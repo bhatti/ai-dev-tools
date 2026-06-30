@@ -10,13 +10,13 @@ Each step is a small idempotent Python script. Steps communicate via `/workspace
 ## Architecture
 
 ```
-issue_picker → plan → implement → create_pr → monitor_pr → learn
-     ↓             ↓          ↓           ↓            ↓         ↓
-issue.json   plan.md   impl_result  pr.json  monitor_result  learnings.md
+issue_picker → plan → implement → create_pr → poll_pr → learn
+     ↓            ↓          ↓           ↓          ↓         ↓
+issue.json   plan.md   impl_result  pr.json  poll_result  learnings.md
              plan_result.json
 ```
 
-In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `monitor_pr` runs as the main container. `learn` is called automatically by `monitor_pr` when the PR is merged/closed.
+In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `poll_pr` runs as the main container. `learn` is called automatically by `poll_pr` when the PR is merged/closed.
 
 ## Quick Start — Docker (one step at a time)
 
@@ -27,7 +27,15 @@ In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, mu
 - A [GitHub PAT](https://github.com/settings/tokens) with `repo` + `issues` scope
 - Claude API key (Anthropic) or AWS Bedrock access
 
-### 2. Build the image
+### 2. Get the image
+
+**Option A — Pull from Docker Hub (fastest):**
+
+```bash
+docker pull plexobject/ai-dev-tools:latest
+```
+
+**Option B — Build locally:**
 
 ```bash
 git clone https://github.com/bhatti/ai-dev-tools.git
@@ -110,14 +118,14 @@ ISSUE_ID=3 docker compose run --rm gh-create-pr
 cat test-workspace/3/pr.json   # contains the PR URL
 ```
 
-**Step 5 — Monitor PR** (polls every 2 min, responds to review comments, calls learn on merge)
+**Step 5 — Poll PR** (polls every 2 min, responds to `ai-bot` review comments, exits on merge/close)
 
 ```bash
-ISSUE_ID=3 docker compose run --rm gh-monitor-pr
+ISSUE_ID=3 docker compose run --rm gh-poll-pr
 # Long-running — exits 0 when PR is merged or closed
 ```
 
-**Step 6 — Learn** (can also be run standalone without waiting for monitor)
+**Step 6 — Learn** (can also be run standalone without waiting for poll)
 
 ```bash
 ISSUE_ID=3 docker compose run --rm gh-learn
@@ -131,7 +139,7 @@ make gh-pick                      # issue picker
 make gh-plan ISSUE_ID=3           # plan
 make gh-implement ISSUE_ID=3      # implement
 make gh-pr ISSUE_ID=3             # create PR
-make gh-monitor ISSUE_ID=3        # monitor PR
+make gh-poll ISSUE_ID=3           # poll PR for comments/merge
 make gh-learn ISSUE_ID=3          # extract learnings
 
 make gh-all ISSUE_ID=3            # all 6 steps in sequence
@@ -158,54 +166,109 @@ cat /workspace/3/plan.md
 
 ---
 
-## Publishing the Docker Image
+## Jira / BitBucket Pipeline
 
-### Option A — GitHub Container Registry (automatic via CI)
+The same SDLC pipeline works with Jira issues and BitBucket PRs:
 
-Pushing to `main` automatically builds and pushes to `ghcr.io/bhatti/ai-dev-tools` via the GitHub Actions workflow in `.github/workflows/build-push.yml`. Tags generated:
-- `main` — latest commit on main
-- `sha-<short-sha>` — every commit
-- `v1.2.3` / `1.2` — when you push a semver tag
+### Environment
 
 ```bash
-# Trigger a versioned release:
-git tag v1.0.0 && git push origin v1.0.0
+export JIRA_PROJECT=PROJ
+export JIRA_EMAIL=you@example.com
+export JIRA_API_TOKEN=your_jira_api_token
+export JIRA_BASE_URL=https://yourorg.atlassian.net
+# BitBucket account username (NOT email) — find at bitbucket.org/account/settings/
+export BITBUCKET_USERNAME=your-bb-username
+export BITBUCKET_WORKSPACE=your-workspace
+# Atlassian HTTP Access Token (ATATT...) — works for both REST API and git clone
+export BITBUCKET_TOKEN=ATATT_your_token_here
+export BITBUCKET_REPO=your-repo
 ```
 
-### Option B — Manual push to GHCR
+### Run each step
 
 ```bash
-# Authenticate once:
+# Pick issue (transitions label ai-ready → ai-in-progress)
+docker compose run --rm jira-issue-picker
+
+# Plan
+ISSUE_ID=PROJ-42 docker compose run --rm jira-plan
+
+# Implement (clones via HTTPS token, branches, codes, commits)
+ISSUE_ID=PROJ-42 docker compose run --rm jira-implement
+
+# Create BitBucket PR
+ISSUE_ID=PROJ-42 docker compose run --rm jira-create-pr
+
+# Poll PR (responds to ai-bot comments, exits on merge/decline)
+ISSUE_ID=PROJ-42 docker compose run --rm jira-poll-pr
+
+# Learn
+ISSUE_ID=PROJ-42 docker compose run --rm jira-learn
+```
+
+### Makefile shortcuts
+
+```bash
+make jira-pick
+make jira-plan ISSUE_ID=PROJ-42
+make jira-implement ISSUE_ID=PROJ-42
+make jira-pr ISSUE_ID=PROJ-42
+make jira-poll ISSUE_ID=PROJ-42
+make jira-learn ISSUE_ID=PROJ-42
+
+make jira-all ISSUE_ID=PROJ-42    # all steps in sequence
+```
+
+### Repo routing via issue labels
+
+By default the pipeline clones `BITBUCKET_WORKSPACE/BITBUCKET_REPO`. To route a specific Jira issue to a different repo, add a label:
+
+```
+repo:my-repo              # uses main branch
+repo:my-repo:develop      # uses develop branch
+```
+
+The workspace always comes from the `BITBUCKET_WORKSPACE` env var.
+
+### Poll PR comment protocol
+
+The poll step only responds to PR comments that start with `ai-bot` (case-insensitive). All other comments are ignored. This prevents the bot from responding to its own replies or unrelated human discussion.
+
+---
+
+## Docker Image
+
+The official image is published to Docker Hub:
+
+```bash
+docker pull plexobject/ai-dev-tools:latest
+```
+
+### Versioned releases
+
+Use `make release` to bump the patch version, tag, and push:
+
+```bash
+make release    # bumps VERSION (0.1.1 → 0.1.2), commits, tags v0.1.2, pushes
+make tag        # tags current VERSION without bumping
+```
+
+GitHub Actions (`.github/workflows/build-push.yml`) also builds on push to `main` and on semver tags, publishing to `ghcr.io/bhatti/ai-dev-tools`.
+
+### Manual push
+
+```bash
+# Docker Hub:
+docker login
+make build push IMAGE=plexobject/ai-dev-tools TAG=latest
+
+# GHCR:
 echo $GH_TOKEN | docker login ghcr.io -u bhatti --password-stdin
-
-# Build and push:
 make build push IMAGE=ghcr.io/bhatti/ai-dev-tools TAG=latest
-# or explicitly:
-docker build -t ghcr.io/bhatti/ai-dev-tools:latest .
-docker push ghcr.io/bhatti/ai-dev-tools:latest
-```
 
-### Option C — Docker Hub
-
-```bash
-docker login   # prompts for Docker Hub credentials
-
-make build push IMAGE=bhatti/ai-dev-tools TAG=latest
-# or:
-docker build -t bhatti/ai-dev-tools:latest .
-docker push bhatti/ai-dev-tools:latest
-```
-
-### Option D — Private registry (ECR, GCR, ACR, etc.)
-
-```bash
-# Example: AWS ECR
-aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin 123456789.dkr.ecr.us-east-1.amazonaws.com
-
-make build push \
-  IMAGE=123456789.dkr.ecr.us-east-1.amazonaws.com/ai-dev-tools \
-  TAG=latest
+# Private registry (ECR, GCR, ACR):
+make build push IMAGE=123456789.dkr.ecr.us-east-1.amazonaws.com/ai-dev-tools TAG=latest
 ```
 
 ---
@@ -219,11 +282,10 @@ All steps read/write files under `/workspace/{issue-id}/`:
 | `issue.json` | issue_picker | plan, implement, create_pr |
 | `plan.md` | plan | implement |
 | `plan_result.json` | plan | — (idempotency check) |
-| `impl_result.json` | implement | create_pr, monitor_pr |
+| `impl_result.json` | implement | create_pr, poll_pr |
 | `branch.txt` | implement | create_pr |
-| `pr.json` | create_pr | monitor_pr, learn |
-| `processed_comments.json` | monitor_pr | monitor_pr (dedup) |
-| `monitor_result.json` | monitor_pr | — |
+| `pr.json` | create_pr | poll_pr, learn |
+| `processed_comments.json` | poll_pr | poll_pr (comment dedup) |
 | `learnings.md` | learn | — |
 | `logs/` | all steps | debugging |
 
@@ -287,7 +349,7 @@ Key variables:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run tests (44 tests)
+# Run tests (48 tests)
 make test
 
 # Run with coverage

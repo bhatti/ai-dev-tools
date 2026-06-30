@@ -5,7 +5,7 @@
 
 x-common: &common
   build: .
-  image: ai-dev-tools:local
+  image: ${AI_DEV_IMAGE:-plexobject/ai-dev-tools:latest}
   extra_hosts:
     - "ai:100.107.120.55"   # Tailscale IP for Bedrock proxy — resolves inside Docker Desktop VM
   volumes:

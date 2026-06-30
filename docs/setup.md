@@ -62,7 +62,7 @@ PYTHONPATH=. python -m scripts.gh.issue_picker
 PYTHONPATH=. python -m scripts.gh.plan --issue-id 3
 PYTHONPATH=. python -m scripts.gh.implement --issue-id 3
 PYTHONPATH=. python -m scripts.gh.create_pr --issue-id 3
-PYTHONPATH=. python -m scripts.gh.monitor_pr --issue-id 3
+PYTHONPATH=. python -m scripts.gh.poll_pr --issue-id 3
 ```
 
 Exit codes: `0` = success, `1` = error (retryable), `2` = blocked (needs human).
@@ -109,7 +109,7 @@ ISSUE_ID=3 docker compose run --rm gh-create-pr
 cat test-workspace/3/pr.json
 
 # Step 5 — Monitor PR (polls until merged/closed, then calls learn)
-ISSUE_ID=3 docker compose run --rm gh-monitor-pr
+ISSUE_ID=3 docker compose run --rm gh-poll-pr
 
 # Step 6 — Learn (can run standalone without waiting for monitor)
 ISSUE_ID=3 docker compose run --rm gh-learn
@@ -158,7 +158,7 @@ make gh-pick                  # issue picker
 make gh-plan ISSUE_ID=3       # plan for issue 3
 make gh-implement ISSUE_ID=3
 make gh-pr ISSUE_ID=3
-make gh-monitor ISSUE_ID=3
+make gh-poll ISSUE_ID=3
 make gh-learn ISSUE_ID=3
 
 make gh-all ISSUE_ID=3        # all 6 steps in sequence
@@ -245,9 +245,11 @@ export JIRA_PROJECT=PROJ
 export JIRA_EMAIL=you@example.com
 export JIRA_API_TOKEN=your_jira_api_token
 export JIRA_BASE_URL=https://yourorg.atlassian.net
-export BITBUCKET_USERNAME=your-username
+# BitBucket account username (NOT email) — find at bitbucket.org/account/settings/
+export BITBUCKET_USERNAME=your-bb-username
 export BITBUCKET_WORKSPACE=your-workspace
-export BITBUCKET_TOKEN=your_bb_app_password
+# Atlassian HTTP Access Token (ATATT...) — used for both REST API and git HTTPS clone
+export BITBUCKET_TOKEN=ATATT_your_token_here
 export BITBUCKET_REPO=your-repo
 
 docker compose run --rm jira-issue-picker
@@ -255,7 +257,7 @@ docker compose run --rm jira-issue-picker
 ISSUE_ID=PROJ-42 docker compose run --rm jira-plan
 ISSUE_ID=PROJ-42 docker compose run --rm jira-implement
 ISSUE_ID=PROJ-42 docker compose run --rm jira-create-pr
-ISSUE_ID=PROJ-42 docker compose run --rm jira-monitor-pr
+ISSUE_ID=PROJ-42 docker compose run --rm jira-poll-pr
 ISSUE_ID=PROJ-42 docker compose run --rm jira-learn
 ```
 
@@ -264,8 +266,8 @@ ISSUE_ID=PROJ-42 docker compose run --rm jira-learn
 By default the pipeline uses `BITBUCKET_WORKSPACE`/`BITBUCKET_REPO` from env. To route a specific issue to a different repo, add a label to the Jira issue:
 
 ```
-repo:myworkspace:my-other-repo          # uses main branch
-repo:myworkspace:my-other-repo:develop  # uses develop branch
+repo:my-other-repo          # uses main branch, workspace from env
+repo:my-other-repo:develop  # uses develop branch, workspace from env
 ```
 
 ---
@@ -275,7 +277,7 @@ repo:myworkspace:my-other-repo:develop  # uses develop branch
 ```bash
 # Local Python (fast):
 source .venv/bin/activate
-make test              # 44 tests
+make test              # 48 tests
 make test-cov          # with coverage report
 
 # Inside Docker:

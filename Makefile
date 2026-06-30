@@ -1,4 +1,4 @@
-IMAGE    ?= ghcr.io/bhatti/ai-dev-tools
+IMAGE    ?= plexobject/ai-dev-tools
 TAG      ?= latest
 ISSUE_ID ?= 42
 
