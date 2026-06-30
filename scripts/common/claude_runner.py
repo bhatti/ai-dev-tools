@@ -5,7 +5,6 @@ and extracts the JSON status line from the response.
 """
 
 import json
-import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -23,17 +22,21 @@ class ClaudeResult:
 def extract_status_json(output: str) -> dict:
     """Extract the last JSON object containing a 'status' key from output.
 
-    Scans lines from the end so nested JSON objects are handled correctly.
+    Scans lines from the end. Handles JSON embedded mid-line and correctly
+    handles } inside string values by using the stdlib JSON parser.
     """
+    decoder = json.JSONDecoder()
     for line in reversed(output.splitlines()):
-        line = line.strip()
-        if line.startswith("{") and '"status"' in line:
-            try:
-                obj = json.loads(line)
-                if "status" in obj:
-                    return obj
-            except json.JSONDecodeError:
-                continue
+        if '"status"' not in line:
+            continue
+        for i, ch in enumerate(line):
+            if ch == "{":
+                try:
+                    obj, _ = decoder.raw_decode(line, i)
+                    if isinstance(obj, dict) and "status" in obj:
+                        return obj
+                except json.JSONDecodeError:
+                    pass
     return {}
 
 

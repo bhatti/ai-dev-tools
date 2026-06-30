@@ -1,11 +1,20 @@
-IMAGE ?= ghcr.io/bhatti/ai-dev-tools
-TAG   ?= latest
+IMAGE    ?= ghcr.io/bhatti/ai-dev-tools
+TAG      ?= latest
 ISSUE_ID ?= 42
+
+VERSION       := $(shell cat VERSION)
+_VER_PARTS    := $(subst ., ,$(VERSION))
+_VER_MAJOR    := $(word 1,$(_VER_PARTS))
+_VER_MINOR    := $(word 2,$(_VER_PARTS))
+_VER_PATCH    := $(word 3,$(_VER_PARTS))
+_NEXT_PATCH   := $(shell expr $(_VER_PATCH) + 1)
+NEXT_VERSION  := $(_VER_MAJOR).$(_VER_MINOR).$(_NEXT_PATCH)
 
 .PHONY: build push test test-docker lint clean \
         gh-pick gh-plan gh-implement gh-pr gh-poll gh-learn gh-all \
         jira-pick jira-plan jira-implement jira-pr jira-poll jira-learn jira-all \
-        k8s-apply k8s-rbac k8s-delete help
+        k8s-apply k8s-rbac k8s-delete \
+        tag release help
 
 ## ── Build & Push ───────────────────────────────────────────────────────────
 
@@ -14,6 +23,22 @@ build:           ## Build Docker image
 
 push: build      ## Push image to registry
 	docker push $(IMAGE):$(TAG)
+
+## ── Versioning ──────────────────────────────────────────────────────────────
+
+tag:             ## Tag current VERSION (v$(VERSION)) and push the tag
+	@echo "Tagging v$(VERSION)"
+	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"
+	git push origin "v$(VERSION)"
+	@echo "Tagged and pushed v$(VERSION)"
+
+release:         ## Bump patch in VERSION, commit, tag, and push ($(VERSION) → $(NEXT_VERSION))
+	@echo "$(NEXT_VERSION)" > VERSION
+	git add VERSION
+	git commit -m "chore: bump version to $(NEXT_VERSION)"
+	git tag -a "v$(NEXT_VERSION)" -m "Release v$(NEXT_VERSION)"
+	git push origin HEAD "v$(NEXT_VERSION)"
+	@echo "Released v$(NEXT_VERSION)"
 
 ## ── Tests ──────────────────────────────────────────────────────────────────
 

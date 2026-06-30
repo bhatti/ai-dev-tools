@@ -34,20 +34,53 @@ def make_branch_name(issue_id: str, title: str, nonce: str | None = None) -> str
     return f"ai/{issue_id}-{slug}-{nonce}"
 
 
-def clone_repo(url: str, dest: Path, depth: int = 100, ssh_key: str = "") -> Path:
-    """Clone repo via SSH. If dest exists and is a git repo, fetch instead of re-cloning.
+def _embed_credentials(url: str, username: str, token: str) -> str:
+    """Return URL with credentials embedded: https://user:token@host/path.
 
-    ssh_key: PEM-encoded private key string (from SSH_PRIVATE_KEY env var).
-             If empty, relies on ssh-agent or ~/.ssh/id_* already present in the container.
+    Username is percent-encoded; token is left as-is (Atlassian ATATT tokens
+    contain = signs that must not be encoded for git to accept them).
+    Raises ValueError if url has no '://' scheme separator.
     """
-    import tempfile
-    dest = Path(dest)
+    from urllib.parse import quote
 
+    scheme_end = url.index("://")  # ValueError if no scheme — callers must pass https:// URLs
+    scheme = url[:scheme_end]
+    rest = url[scheme_end + 3:]
+    return f"{scheme}://{quote(username, safe='')}:{token}@{rest}"
+
+
+def _redact_url(url: str) -> str:
+    """Replace credentials in a URL with *** for safe logging."""
+    return re.sub(r"://[^@]*@", "://***@", url)
+
+
+def clone_repo(
+    url: str,
+    dest: Path,
+    depth: int = 100,
+    ssh_key: str = "",
+    http_token: str = "",
+    http_username: str = "x-token-auth",
+) -> Path:
+    """Clone repo. If dest exists and is a git repo, fetch instead of re-cloning.
+
+    Auth priority:
+      1. http_token: credentials embedded in URL (works with Atlassian ATATT tokens)
+      2. ssh_key: writes key to temp file, uses GIT_SSH_COMMAND
+      3. Neither: relies on ssh-agent or ~/.ssh/id_* in the container
+    """
+    import shutil
+    import tempfile
+
+    dest = Path(dest)
     key_path = ""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
-    if ssh_key:
-        # Write key to a temp file so git/ssh can use it
+    if http_token:
+        git_url = _embed_credentials(url, http_username, http_token)
+        # No GIT_SSH_COMMAND — pure HTTPS path
+    elif ssh_key:
+        git_url = url
         fd, key_path = tempfile.mkstemp(suffix=".pem")
         with os.fdopen(fd, "w") as f:
             f.write(ssh_key)
@@ -56,25 +89,36 @@ def clone_repo(url: str, dest: Path, depth: int = 100, ssh_key: str = "") -> Pat
         os.chmod(key_path, 0o600)
         env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o BatchMode=yes"
     else:
+        git_url = url
         env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no -o BatchMode=yes"
+
+    safe_url = _redact_url(git_url)
 
     try:
         if dest.exists() and (dest / ".git").exists():
             try:
+                # Refresh the stored remote URL so a rotated token is always current
+                if http_token:
+                    _run(["git", "remote", "set-url", "origin", git_url], cwd=dest, env=env)
                 _run(["git", "fetch", "--depth", str(depth), "origin"], cwd=dest, env=env)
                 return dest
             except subprocess.CalledProcessError as e:
                 print(f"git fetch failed, re-cloning ({e.returncode}): {e.stderr.strip()}", file=sys.stderr)
-                import shutil
                 shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
-            ["git", "clone", "--depth", str(depth), url, str(dest)],
+            ["git", "clone", "--depth", str(depth), git_url, str(dest)],
             capture_output=True, text=True, env=env,
         )
         if result.returncode != 0:
-            print(f"git clone stderr: {result.stderr.strip()}", file=sys.stderr)
-            raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+            print(f"git clone failed: {result.stderr.strip()}", file=sys.stderr)
+            # Raise with redacted command so the token is never in the exception message
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                ["git", "clone", "--depth", str(depth), safe_url, str(dest)],
+                result.stdout,
+                result.stderr,
+            )
     finally:
         if key_path and os.path.exists(key_path):
             os.unlink(key_path)
@@ -121,17 +165,33 @@ def commit_all(repo_path: Path, message: str) -> bool:
     return True
 
 
-def push_branch(repo_path: Path, branch: str, force_with_lease: bool = True) -> None:
-    """Push branch to origin."""
+def push_branch(
+    repo_path: Path,
+    branch: str,
+    force_with_lease: bool = True,
+    http_token: str = "",
+    http_username: str = "x-token-auth",
+    url: str = "",
+) -> None:
+    """Push branch to origin.
+
+    http_token/http_username/url: when provided, refreshes the stored remote URL
+    before pushing so a rotated token is always current.
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if http_token and url:
+        git_url = _embed_credentials(url, http_username, http_token)
+        _run(["git", "remote", "set-url", "origin", git_url], cwd=repo_path, env=env)
+
     cmd = ["git", "push", "origin", branch]
     if force_with_lease:
         cmd.append("--force-with-lease")
-    result = _run(cmd, cwd=repo_path, check=False)
+    result = _run(cmd, cwd=repo_path, check=False, env=env)
     if result.returncode != 0:
         stderr = result.stderr + result.stdout
         # Only fall back to set-upstream on first push (no tracking branch yet)
         if "has no upstream branch" in stderr or "no upstream configured" in stderr:
-            _run(["git", "push", "--set-upstream", "origin", branch], cwd=repo_path)
+            _run(["git", "push", "--set-upstream", "origin", branch], cwd=repo_path, env=env)
         else:
             raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 

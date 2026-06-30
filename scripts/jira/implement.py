@@ -96,11 +96,18 @@ def main(issue_id: str) -> None:
     issue_dir = get_issue_dir(config, issue_id)
     repo_dir = issue_dir / "repo"
 
+    http_token = config.get("BITBUCKET_TOKEN", "")
     ssh_key = config.get("SSH_PRIVATE_KEY", "")
-    clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=True)
 
-    print(f"Cloning {workspace}/{repo_name}")
-    clone_repo(clone_url, repo_dir, ssh_key=ssh_key)
+    if http_token:
+        clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
+        http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+        print(f"Cloning {workspace}/{repo_name} via HTTPS token")
+        clone_repo(clone_url, repo_dir, http_token=http_token, http_username=http_username)
+    else:
+        clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=True)
+        print(f"Cloning {workspace}/{repo_name} via SSH")
+        clone_repo(clone_url, repo_dir, ssh_key=ssh_key)
     configure_git(repo_dir, config["GIT_USER_NAME"], config["GIT_USER_EMAIL"])
 
     branch_file = issue_dir / "branch.txt"

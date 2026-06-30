@@ -19,7 +19,7 @@ import click
 from scripts.common.artifacts import read_json, write_json
 from scripts.common.bitbucket_api import create_pr as bb_create_pr
 from scripts.common.config import get_issue_dir, load_config
-from scripts.common.git_utils import current_branch, push_branch
+from scripts.common.git_utils import current_branch, detect_bitbucket_url, push_branch
 from scripts.common.label_utils import jira_transition_label
 
 
@@ -54,8 +54,12 @@ def main(issue_id: str) -> None:
     repo_dir = issue_dir / "repo"
     branch = impl_result.get("branch") or current_branch(repo_dir)
 
+    http_token = config.get("BITBUCKET_TOKEN", "")
+    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+    push_url = detect_bitbucket_url(workspace, repo_name, use_ssh=not http_token)
+
     print(f"Pushing branch {branch}")
-    push_branch(repo_dir, branch)
+    push_branch(repo_dir, branch, http_token=http_token, http_username=http_username, url=push_url)
 
     title = f"[AI] {issue_id}: {issue['title']}"
     description = "\n".join([
