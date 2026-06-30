@@ -1,0 +1,59 @@
+# Ad-hoc single-step job template.
+# Usage: substitute STEP and ISSUE_ID then apply.
+#
+#   STEP=plan ISSUE_ID=42 envsubst < k8s/single-step-job.yaml | kubectl apply -f -
+#
+# Valid STEP values (gh): issue_picker, plan, implement, create_pr, poll_pr, learn
+# Valid STEP values (jira): scripts.jira.plan, scripts.jira.implement, etc.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ai-step-${STEP}-${ISSUE_ID}
+  namespace: ai-dev
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400   # Clean up after 24h
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: ai-workspace
+        - name: secrets
+          secret:
+            secretName: ai-dev-secrets
+            items:
+              - key: ssh-key
+                path: ssh-key
+                mode: 0600
+      containers:
+        - name: step
+          image: ghcr.io/bhatti/ai-dev-tools:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "scripts.gh.${STEP}", "--issue-id", "${ISSUE_ID}"]
+          envFrom:
+            - secretRef:
+                name: ai-dev-secrets
+          env:
+            - name: GH_ORG
+              value: "${GH_ORG}"
+            - name: GH_REPO
+              value: "${GH_REPO}"
+            - name: WORKSPACE_DIR
+              value: "/workspace"
+            - name: AI_MODEL
+              value: "${AI_MODEL:-claude-sonnet-4-6}"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi

@@ -1,0 +1,113 @@
+# Jira/BitBucket full pipeline job.
+# Usage: substitute ISSUE_ID before applying.
+#   ISSUE_ID=PROJ-42 envsubst < k8s/jira-pipeline-job.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ai-jira-implement-${ISSUE_ID_SAFE}   # ISSUE_ID_SAFE = issue key with / replaced by -
+  namespace: ai-dev
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: ai-workspace
+        - name: secrets
+          secret:
+            secretName: ai-dev-secrets
+            items:
+              - key: ssh-key
+                path: ssh-key
+                mode: 0600
+        - name: claude-settings
+          secret:
+            secretName: claude-settings
+      initContainers:
+        - name: plan
+          image: ghcr.io/bhatti/ai-dev-tools:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "scripts.jira.plan", "--issue-id", "${ISSUE_ID}"]
+          envFrom:
+            - secretRef:
+                name: ai-dev-secrets
+          env: &jira-env
+            - name: JIRA_PROJECT
+              value: "PROJ"
+            - name: BITBUCKET_WORKSPACE
+              value: "your-workspace"
+            - name: BITBUCKET_REPO
+              value: "your-repo"
+            - name: WORKSPACE_DIR
+              value: "/workspace"
+            - name: AI_MODEL
+              value: "claude-sonnet-4-6"
+          volumeMounts: &common-mounts
+            - name: workspace
+              mountPath: /workspace
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: claude-settings
+              mountPath: /home/agent/.claude
+              readOnly: true
+          resources: &common-resources
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+        - name: implement
+          image: ghcr.io/bhatti/ai-dev-tools:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "scripts.jira.implement", "--issue-id", "${ISSUE_ID}"]
+          envFrom:
+            - secretRef:
+                name: ai-dev-secrets
+          env: *jira-env
+          volumeMounts: *common-mounts
+          resources: *common-resources
+
+        - name: create-pr
+          image: ghcr.io/bhatti/ai-dev-tools:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "scripts.jira.create_pr", "--issue-id", "${ISSUE_ID}"]
+          envFrom:
+            - secretRef:
+                name: ai-dev-secrets
+          env: *jira-env
+          volumeMounts: *common-mounts
+          resources: *common-resources
+
+      containers:
+        - name: poll-pr
+          image: ghcr.io/bhatti/ai-dev-tools:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "scripts.jira.poll_pr", "--issue-id", "${ISSUE_ID}"]
+          envFrom:
+            - secretRef:
+                name: ai-dev-secrets
+          env:
+            - name: JIRA_PROJECT
+              value: "PROJ"
+            - name: BITBUCKET_WORKSPACE
+              value: "your-workspace"
+            - name: BITBUCKET_REPO
+              value: "your-repo"
+            - name: WORKSPACE_DIR
+              value: "/workspace"
+            - name: POLL_INTERVAL
+              value: "120"
+          volumeMounts: *common-mounts
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

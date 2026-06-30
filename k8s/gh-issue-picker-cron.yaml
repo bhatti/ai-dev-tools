@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ai-gh-issue-picker
+  namespace: ai-dev
+spec:
+  schedule: "*/5 * * * *"   # Every 5 minutes
+  concurrencyPolicy: Forbid  # Skip if previous run still going
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 180
+      template:
+        spec:
+          restartPolicy: Never
+          volumes:
+            - name: workspace
+              persistentVolumeClaim:
+                claimName: ai-workspace
+            - name: secrets
+              secret:
+                secretName: ai-dev-secrets
+                items:
+                  - key: ssh-key
+                    path: ssh-key
+                    mode: 0600
+          containers:
+            - name: picker
+              image: ghcr.io/bhatti/ai-dev-tools:latest
+              imagePullPolicy: Always
+              command: ["python", "-m", "scripts.gh.issue_picker"]
+              envFrom:
+                - secretRef:
+                    name: ai-dev-secrets
+              env:
+                - name: GH_ORG
+                  value: "bhatti"           # Override as needed
+                - name: GH_REPO
+                  value: "your-repo"        # Override as needed
+                - name: PICKUP_LABEL
+                  value: "ai-ready"
+                - name: INPROGRESS_LABEL
+                  value: "ai-in-progress"
+                - name: MAX_ISSUES
+                  value: "3"
+                - name: WORKSPACE_DIR
+                  value: "/workspace"
+              volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+                - name: secrets
+                  mountPath: /secrets
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

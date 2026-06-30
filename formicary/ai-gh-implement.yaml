@@ -1,0 +1,139 @@
+# Formicary job: full GitHub SDLC pipeline for one issue.
+# Runs plan → implement → create_pr as sequential tasks.
+# poll_pr (which calls learn on completion) runs as the final long-running task.
+#
+# Usage:
+#   formicary submit formicary/ai-gh-implement.yaml --var ISSUE_ID=42
+#
+# Dependencies: issue_picker must have run first and written /workspace/{ISSUE_ID}/issue.json.
+# In a fully automated setup, the issue_picker job triggers this via formicary's
+# job-trigger mechanism, passing the ISSUE_ID variable.
+
+job-type: ai-gh-implement
+description: "AI-driven implementation pipeline for a GitHub issue"
+timeout: 7200s    # 2 hours total
+# Claude settings: mount ~/.claude/settings.json via formicary's host_volumes config:
+#   host_volumes:
+#     - host_path: /home/youruser/.claude
+#       container_path: /home/agent/.claude
+#       read_only: true
+
+variables:
+  ISSUE_ID:
+    type: STRING
+    required: true
+
+tasks:
+  - task-type: plan
+    method: DOCKER
+    image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
+    working-dir: /app
+    environment:
+      WORKSPACE_DIR: /workspace
+      GH_ORG: ${GH_ORG}
+      GH_REPO: ${GH_REPO}
+      GH_TOKEN: ${GH_TOKEN}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
+      MAX_TURNS_PLAN: ${MAX_TURNS_PLAN:-30}
+      # Claude API config — set CLAUDE_CODE_USE_BEDROCK=1 for Tailscale/Bedrock proxy
+      # or ANTHROPIC_API_KEY for direct API access
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
+      ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    script:
+      - python -m scripts.gh.plan --issue-id ${ISSUE_ID}
+    artifacts:
+      paths:
+        - /workspace/${ISSUE_ID}
+      expire-after: 24h
+    on-exit-code:
+      0: COMPLETED
+      2: PAUSED      # BLOCKED — needs human intervention
+      ELSE: FAILED
+
+  - task-type: implement
+    method: DOCKER
+    image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
+    working-dir: /app
+    depends-on:
+      - plan
+    environment:
+      WORKSPACE_DIR: /workspace
+      GH_ORG: ${GH_ORG}
+      GH_REPO: ${GH_REPO}
+      GH_TOKEN: ${GH_TOKEN}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
+      MAX_TURNS_IMPLEMENT: ${MAX_TURNS_IMPLEMENT:-100}
+      GIT_USER_NAME: ${GIT_USER_NAME:-AI Agent}
+      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-ai-agent@noreply.local}
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
+      ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    script:
+      - python -m scripts.gh.implement --issue-id ${ISSUE_ID}
+    artifacts:
+      paths:
+        - /workspace/${ISSUE_ID}
+      expire-after: 24h
+    on-exit-code:
+      0: COMPLETED
+      ELSE: FAILED
+
+  - task-type: create-pr
+    method: DOCKER
+    image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
+    working-dir: /app
+    depends-on:
+      - implement
+    environment:
+      WORKSPACE_DIR: /workspace
+      GH_ORG: ${GH_ORG}
+      GH_REPO: ${GH_REPO}
+      GH_TOKEN: ${GH_TOKEN}
+      INPROGRESS_LABEL: ${INPROGRESS_LABEL:-ai-in-progress}
+      PR_OPEN_LABEL: ${PR_OPEN_LABEL:-ai-pr-open}
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
+      ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    script:
+      - python -m scripts.gh.create_pr --issue-id ${ISSUE_ID}
+    artifacts:
+      paths:
+        - /workspace/${ISSUE_ID}
+      expire-after: 24h
+    on-exit-code:
+      0: COMPLETED
+      ELSE: FAILED
+
+  - task-type: poll-pr
+    method: DOCKER
+    image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
+    working-dir: /app
+    depends-on:
+      - create-pr
+    timeout: 86400s   # 24h — formicary re-runs this task on cron until MERGED/CLOSED
+    environment:
+      WORKSPACE_DIR: /workspace
+      GH_ORG: ${GH_ORG}
+      GH_REPO: ${GH_REPO}
+      GH_TOKEN: ${GH_TOKEN}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
+      POLL_INTERVAL: ${POLL_INTERVAL:-120}
+      NEEDS_HUMAN_LABEL: ${NEEDS_HUMAN_LABEL:-needs-human}
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
+      ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    script:
+      # poll_pr calls learn.py automatically when PR is merged/closed
+      - python -m scripts.gh.poll_pr --issue-id ${ISSUE_ID}
+    artifacts:
+      paths:
+        - /workspace/${ISSUE_ID}
+      expire-after: 168h    # 7 days
+    on-exit-code:
+      0: COMPLETED
+      ELSE: FAILED

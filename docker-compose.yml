@@ -1,0 +1,116 @@
+# Local development / testing compose file.
+# Usage: docker compose run --rm gh-issue-picker
+#
+# Set env vars in a .env file (see .env.example).
+
+x-common: &common
+  build: .
+  image: ai-dev-tools:local
+  extra_hosts:
+    - "ai:100.107.120.55"   # Tailscale IP for Bedrock proxy — resolves inside Docker Desktop VM
+  volumes:
+    - ./test-workspace:/workspace
+    - ./secrets:/secrets:ro
+  env_file:
+    - path: .env
+      required: false          # .env is optional — export vars in your shell instead
+  environment:
+    - WORKSPACE_DIR=/workspace${ISSUE_ID:+/${ISSUE_ID}}
+    # GitHub — accept GH_* or GITHUB_* prefix from host shell
+    # GH_TOKEN is also the native env var read by the gh CLI
+    - GH_ORG=${GH_ORG:-${GITHUB_ORG:-}}
+    - GH_REPO=${GH_REPO:-${GITHUB_REPO:-}}
+    - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+    - GITHUB_TOKEN=${GITHUB_TOKEN:-${GH_TOKEN:-}}
+    # Jira
+    - JIRA_PROJECT
+    - JIRA_EMAIL
+    - JIRA_API_TOKEN
+    - JIRA_BASE_URL
+    # BitBucket — accept BITBUCKET_* or BB_* prefix from host shell
+    - BITBUCKET_USERNAME=${BITBUCKET_USERNAME:-${BB_USERNAME:-}}
+    - BITBUCKET_WORKSPACE=${BITBUCKET_WORKSPACE:-${BB_WORKSPACE:-}}
+    - BITBUCKET_TOKEN=${BITBUCKET_TOKEN:-${BB_TOKEN:-}}
+    - BITBUCKET_REPO=${BITBUCKET_REPO:-${BB_REPO:-}}
+    # Claude / Anthropic
+    # Tailscale/Bedrock users: set these in shell or .env:
+    #   CLAUDE_CODE_USE_BEDROCK=1
+    #   ANTHROPIC_BEDROCK_BASE_URL=http://ai/bedrock
+    #   CLAUDE_CODE_SKIP_BEDROCK_AUTH=1
+    # Direct API users: set ANTHROPIC_API_KEY
+    - ANTHROPIC_API_KEY
+    - ANTHROPIC_BEDROCK_BASE_URL
+    - CLAUDE_CODE_USE_BEDROCK
+    - CLAUDE_CODE_SKIP_BEDROCK_AUTH
+    - ANTHROPIC_DEFAULT_OPUS_MODEL
+    - ANTHROPIC_DEFAULT_SONNET_MODEL
+    - ANTHROPIC_DEFAULT_HAIKU_MODEL
+    - AI_MODEL
+    # Workflow tuning
+    - PICKUP_LABEL
+    - INPROGRESS_LABEL
+    - PR_OPEN_LABEL
+    - NEEDS_HUMAN_LABEL
+    - MAX_ISSUES
+    - POLL_INTERVAL
+    - GIT_USER_NAME
+    - GIT_USER_EMAIL
+    - SSH_PRIVATE_KEY
+    - BASE_BRANCH
+
+services:
+  gh-issue-picker:
+    <<: *common
+    command: ["python", "-m", "scripts.gh.issue_picker"]
+
+  gh-plan:
+    <<: *common
+    command: ["python", "-m", "scripts.gh.plan", "--issue-id", "${ISSUE_ID:-}"]
+
+  gh-implement:
+    <<: *common
+    command: ["python", "-m", "scripts.gh.implement", "--issue-id", "${ISSUE_ID:-}"]
+
+  gh-create-pr:
+    <<: *common
+    command: ["python", "-m", "scripts.gh.create_pr", "--issue-id", "${ISSUE_ID:-}"]
+
+  gh-poll-pr:
+    <<: *common
+    command: ["python", "-m", "scripts.gh.poll_pr", "--issue-id", "${ISSUE_ID:-}"]
+
+  gh-learn:
+    <<: *common
+    command: ["python", "-m", "scripts.gh.learn", "--issue-id", "${ISSUE_ID:-}"]
+
+  jira-issue-picker:
+    <<: *common
+    command: ["python", "-m", "scripts.jira.issue_picker"]
+
+  jira-plan:
+    <<: *common
+    command: ["python", "-m", "scripts.jira.plan", "--issue-id", "${ISSUE_ID:-}"]
+
+  jira-implement:
+    <<: *common
+    command: ["python", "-m", "scripts.jira.implement", "--issue-id", "${ISSUE_ID:-}"]
+
+  jira-create-pr:
+    <<: *common
+    command: ["python", "-m", "scripts.jira.create_pr", "--issue-id", "${ISSUE_ID:-}"]
+
+  jira-poll-pr:
+    <<: *common
+    command: ["python", "-m", "scripts.jira.poll_pr", "--issue-id", "${ISSUE_ID:-}"]
+
+  jira-learn:
+    <<: *common
+    command: ["python", "-m", "scripts.jira.learn", "--issue-id", "${ISSUE_ID:-}"]
+
+  # Run all tests (no Docker needed — uses local Python)
+  test:
+    image: python:3.12-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["sh", "-c", "pip install -e '.[dev]' -q && pytest tests/ -v"]

@@ -1,0 +1,46 @@
+# Formicary job: pick ai-ready GitHub issues and write issue.json artifacts.
+# Runs on a schedule (every 5 min) or can be triggered manually.
+#
+# Usage:
+#   formicary submit formicary/ai-gh-issue-picker.yaml
+#
+# The job container must have ai-dev-tools installed:
+#   docker pull <registry>/ai-dev-tools:latest
+#   (or build locally: make build)
+#
+# Env vars are injected via formicary's secret/config mechanism.
+
+job-type: ai-gh-issue-picker
+description: "Pick ai-ready GitHub issues and write workspace artifacts"
+cron-trigger: "*/5 * * * *"
+timeout: 300s
+max-concurrency: 1
+
+tasks:
+  - task-type: pick-issues
+    method: DOCKER
+    image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
+    working-dir: /app
+    environment:
+      WORKSPACE_DIR: /workspace
+      GH_ORG: ${GH_ORG}
+      GH_REPO: ${GH_REPO}
+      GH_TOKEN: ${GH_TOKEN}
+      PICKUP_LABEL: ${PICKUP_LABEL:-ai-ready}
+      INPROGRESS_LABEL: ${INPROGRESS_LABEL:-ai-in-progress}
+      MAX_ISSUES: ${MAX_ISSUES:-5}
+      # Claude API — issue_picker doesn't call claude, but entrypoint.sh requires config
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
+      ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    script:
+      - python -m scripts.gh.issue_picker
+    artifacts:
+      paths:
+        - /workspace
+      expire-after: 24h
+    on-exit-code:
+      0: COMPLETED
+      2: COMPLETED    # No issues available — not an error for a cron job
+      ELSE: FAILED

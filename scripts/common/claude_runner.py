@@ -1,0 +1,113 @@
+"""Invoke Claude Code CLI and parse structured output.
+
+Wraps the `claude` CLI with proper flags, captures output,
+and extracts the JSON status line from the response.
+"""
+
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class ClaudeResult:
+    exit_code: int
+    output: str
+    status_json: dict = field(default_factory=dict)
+    status: str = "UNKNOWN"
+
+
+def extract_status_json(output: str) -> dict:
+    """Extract the last JSON object containing a 'status' key from output.
+
+    Scans lines from the end so nested JSON objects are handled correctly.
+    """
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and '"status"' in line:
+            try:
+                obj = json.loads(line)
+                if "status" in obj:
+                    return obj
+            except json.JSONDecodeError:
+                continue
+    return {}
+
+
+def run_claude(
+    prompt: str,
+    working_dir: Path,
+    model: str | None = None,
+    max_turns: int = 30,
+    log_file: Path | None = None,
+    extra_env: dict | None = None,
+) -> ClaudeResult:
+    """Run claude CLI, return structured result.
+
+    The prompt is passed as a command-line argument to avoid shell injection.
+    Output is streamed to stdout (for live monitoring) and captured.
+    """
+    import os
+    import tempfile
+
+    cmd = ["claude", "--print", "--dangerously-skip-permissions"]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["--max-turns", str(max_turns)]
+    # Prompt passed via stdin to avoid ARG_MAX limits on large prompts
+
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+
+    output_lines: list[str] = []
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=working_dir,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        assert proc.stdin is not None
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            output_lines.append(line)
+        proc.wait()
+        exit_code = proc.returncode
+    except FileNotFoundError:
+        print("ERROR: 'claude' CLI not found. Install @anthropic-ai/claude-code.", file=sys.stderr)
+        return ClaudeResult(exit_code=1, output="claude not found", status="ERROR")
+
+    full_output = "".join(output_lines)
+
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text(full_output)
+
+    if exit_code != 0:
+        raise RuntimeError(
+            f"claude exited with code {exit_code}.\n"
+            f"Last output:\n{full_output[-2000:] if len(full_output) > 2000 else full_output}"
+        )
+
+    status_json = extract_status_json(full_output)
+    status = status_json.get("status", "UNKNOWN")
+
+    return ClaudeResult(
+        exit_code=exit_code,
+        output=full_output,
+        status_json=status_json,
+        status=status,
+    )

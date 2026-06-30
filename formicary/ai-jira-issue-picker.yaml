@@ -1,0 +1,42 @@
+# Formicary job: pick ai-ready Jira issues and write issue.json artifacts.
+# Runs on a schedule (every 5 min) or can be triggered manually.
+#
+# Usage:
+#   formicary submit formicary/ai-jira-issue-picker.yaml
+
+job-type: ai-jira-issue-picker
+description: "Pick ai-ready Jira issues and write workspace artifacts"
+cron-trigger: "*/5 * * * *"
+timeout: 300s
+max-concurrency: 1
+
+tasks:
+  - task-type: pick-issues
+    method: DOCKER
+    image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
+    working-dir: /app
+    environment:
+      WORKSPACE_DIR: /workspace
+      JIRA_BASE_URL: ${JIRA_BASE_URL}
+      JIRA_EMAIL: ${JIRA_EMAIL}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+      JIRA_PROJECT: ${JIRA_PROJECT}
+      BITBUCKET_WORKSPACE: ${BITBUCKET_WORKSPACE}
+      BITBUCKET_REPO: ${BITBUCKET_REPO}
+      PICKUP_LABEL: ${PICKUP_LABEL:-ai-ready}
+      INPROGRESS_LABEL: ${INPROGRESS_LABEL:-ai-in-progress}
+      MAX_ISSUES: ${MAX_ISSUES:-5}
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
+      ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    script:
+      - python -m scripts.jira.issue_picker
+    artifacts:
+      paths:
+        - /workspace
+      expire-after: 24h
+    on-exit-code:
+      0: COMPLETED
+      2: COMPLETED    # No issues available — not an error for a cron job
+      ELSE: FAILED
