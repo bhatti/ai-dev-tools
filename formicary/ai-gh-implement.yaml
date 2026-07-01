@@ -34,7 +34,7 @@ tasks:
       GH_REPO: ${GH_REPO}
       GH_TOKEN: ${GH_TOKEN}
       AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
-      MAX_TURNS_PLAN: ${MAX_TURNS_PLAN:-30}
+      MAX_TURNS_PLAN: ${MAX_TURNS_PLAN:-50}
       # Claude API config — set CLAUDE_CODE_USE_BEDROCK=1 for Tailscale/Bedrock proxy
       # or ANTHROPIC_API_KEY for direct API access
       CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
@@ -57,6 +57,8 @@ tasks:
     image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
     working-dir: /app
     depends-on:
+      - plan
+    artifact_ids:
       - plan
     environment:
       WORKSPACE_DIR: /workspace
@@ -87,6 +89,9 @@ tasks:
     working-dir: /app
     depends-on:
       - implement
+    artifact_ids:
+      - plan
+      - implement
     environment:
       WORKSPACE_DIR: /workspace
       GH_ORG: ${GH_ORG}
@@ -114,26 +119,33 @@ tasks:
     working-dir: /app
     depends-on:
       - create-pr
-    timeout: 86400s   # 24h — formicary re-runs this task on cron until MERGED/CLOSED
+    artifact_ids:
+      - plan
+      - implement
+      - create-pr
+    # No task-level timeout — this task runs once per formicary retry cycle.
+    # Formicary pauses and resumes it (via exit code 3) until PR is merged/closed.
     environment:
       WORKSPACE_DIR: /workspace
       GH_ORG: ${GH_ORG}
       GH_REPO: ${GH_REPO}
       GH_TOKEN: ${GH_TOKEN}
       AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
-      POLL_INTERVAL: ${POLL_INTERVAL:-120}
       NEEDS_HUMAN_LABEL: ${NEEDS_HUMAN_LABEL:-needs-human}
       CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
       ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
       CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     script:
-      # poll_pr calls learn.py automatically when PR is merged/closed
+      # Runs once: exits 0 (merged/closed), 3 (still open → PAUSED), or 1 (error).
+      # learn.py is called automatically inside poll_pr on exit 0.
       - python -m scripts.gh.poll_pr --issue-id ${ISSUE_ID}
     artifacts:
       paths:
         - /workspace/${ISSUE_ID}
       expire-after: 168h    # 7 days
     on-exit-code:
-      0: COMPLETED
+      0: COMPLETED           # PR merged or closed — pipeline done
+      3: PAUSED              # PR still open — formicary retries after delay
       ELSE: FAILED
+    delay: ${POLL_INTERVAL:-120}s   # seconds to wait before retrying a PAUSED task

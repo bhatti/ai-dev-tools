@@ -105,11 +105,24 @@ def main(issue_id: str | None) -> None:
         sys.exit(2)
 
     picked = 0
+    issues_json_list = []
     for issue in issues[:max_issues]:
         if pick_issue(config, issue):
             picked += 1
-            launch_pipeline(str(issue["number"]))
+            issue_id_str = str(issue["number"])
+            issues_json_list.append({
+                "IssueNumber": issue_id_str,
+                "IssueTitle": issue["title"],
+                "IssueURL": issue["url"],
+                "GHOrg": config["GH_ORG"],
+                "GHRepo": config["GH_REPO"],
+                "_description": f"#{issue_id_str}: {issue['title']}",
+                "_user_key": issue_id_str,
+            })
+            launch_pipeline(issue_id_str)
 
+    if issues_json_list:
+        print(f"::set-output name=IssuesJSON::{json.dumps(issues_json_list)}")
     print(f"Picked {picked} issue(s)")
     sys.exit(0 if picked > 0 else 2)
 

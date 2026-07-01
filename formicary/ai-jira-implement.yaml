@@ -26,7 +26,7 @@ tasks:
       JIRA_API_TOKEN: ${JIRA_API_TOKEN}
       JIRA_PROJECT: ${JIRA_PROJECT}
       AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
-      MAX_TURNS_PLAN: ${MAX_TURNS_PLAN:-30}
+      MAX_TURNS_PLAN: ${MAX_TURNS_PLAN:-50}
       CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
       ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
       CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
@@ -47,6 +47,8 @@ tasks:
     image: ${IMAGE_REPO}/ai-dev-tools:${IMAGE_TAG:-latest}
     working-dir: /app
     depends-on:
+      - plan
+    artifact_ids:
       - plan
     environment:
       WORKSPACE_DIR: /workspace
@@ -81,6 +83,9 @@ tasks:
     working-dir: /app
     depends-on:
       - implement
+    artifact_ids:
+      - plan
+      - implement
     environment:
       WORKSPACE_DIR: /workspace
       JIRA_BASE_URL: ${JIRA_BASE_URL}
@@ -112,7 +117,11 @@ tasks:
     working-dir: /app
     depends-on:
       - create-pr
-    timeout: 86400s   # 24h — formicary re-runs this task on cron until MERGED/DECLINED
+    artifact_ids:
+      - plan
+      - implement
+      - create-pr
+    # No task-level timeout — runs once per formicary retry cycle.
     environment:
       WORKSPACE_DIR: /workspace
       JIRA_BASE_URL: ${JIRA_BASE_URL}
@@ -123,19 +132,21 @@ tasks:
       BITBUCKET_USERNAME: ${BITBUCKET_USERNAME}
       BITBUCKET_TOKEN: ${BITBUCKET_TOKEN}
       AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
-      POLL_INTERVAL: ${POLL_INTERVAL:-120}
       NEEDS_HUMAN_LABEL: ${NEEDS_HUMAN_LABEL:-needs-human}
       CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-0}
       ANTHROPIC_BEDROCK_BASE_URL: ${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}
       CLAUDE_CODE_SKIP_BEDROCK_AUTH: ${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     script:
-      # poll_pr calls learn.py automatically when PR is merged/declined
+      # Runs once: exits 0 (merged/declined), 3 (still open → PAUSED), or 1 (error).
+      # learn.py is called automatically inside poll_pr on exit 0.
       - python -m scripts.jira.poll_pr --issue-id ${ISSUE_ID}
     artifacts:
       paths:
         - /workspace/${ISSUE_ID}
       expire-after: 168h
     on-exit-code:
-      0: COMPLETED
+      0: COMPLETED           # PR merged or declined — pipeline done
+      3: PAUSED              # PR still open — formicary retries after delay
       ELSE: FAILED
+    delay: ${POLL_INTERVAL:-120}s   # seconds to wait before retrying a PAUSED task

@@ -116,12 +116,33 @@ def main(issue_id: str | None) -> None:
         print(f"No issues found with label '{config['PICKUP_LABEL']}'")
         sys.exit(2)
 
+    import json as _json
     picked = 0
+    issues_json_list = []
     for raw in issues[:max_issues]:
         if pick_issue(config, raw):
             picked += 1
-            _launch_pipeline(raw.get("key", ""))
+            issue_key = raw.get("key", "")
+            fields = raw.get("fields", {})
+            title = fields.get("summary", "")
+            default_workspace = config.get("BITBUCKET_WORKSPACE", "")
+            default_repo = config.get("BITBUCKET_REPO", "")
+            workspace, repo, branch = parse_repo_from_labels(
+                fields.get("labels", []), default_workspace, default_repo
+            )
+            issues_json_list.append({
+                "IssueNumber": issue_key,
+                "IssueTitle": title,
+                "IssueURL": f"{config['JIRA_BASE_URL']}/browse/{issue_key}",
+                "BitbucketWorkspace": workspace,
+                "BitbucketRepo": repo,
+                "_description": f"{issue_key}: {title}",
+                "_user_key": issue_key,
+            })
+            _launch_pipeline(issue_key)
 
+    if issues_json_list:
+        print(f"::set-output name=IssuesJSON::{_json.dumps(issues_json_list)}")
     print(f"Picked {picked} issue(s)")
     sys.exit(0 if picked > 0 else 2)
 

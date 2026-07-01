@@ -11,7 +11,7 @@ Reads:  /workspace/{issue_id}/pr.json
 Writes: /workspace/{issue_id}/monitor_result.json
         /workspace/{issue_id}/processed_comments.json
 
-Exit codes: 0=merged/closed or comments handled, 1=error
+Exit codes: 0=merged/closed (done), 3=still open (retry later), 1=error
 """
 
 import json
@@ -183,7 +183,8 @@ def main(issue_id: str) -> None:
         print(f"PR #{pr_number} open, no new ai-bot comments ({skipped} other comment(s) ignored)")
         if all_new:
             write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
-        sys.exit(0)
+        # Exit 3 = PR still open; formicary maps this to PAUSED and retries after delay
+        sys.exit(3)
 
     for comment in ai_bot_comments:
         print(f"  Responding to ai-bot comment #{comment['id']} from @{comment['user']}")
@@ -193,8 +194,9 @@ def main(issue_id: str) -> None:
             print(f"WARNING: failed to respond to comment #{comment['id']}: {e}", file=sys.stderr)
         write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
 
-    print(f"Handled {len(ai_bot_comments)} comment(s)")
-    sys.exit(0)
+    print(f"Handled {len(ai_bot_comments)} comment(s), PR still open")
+    # Exit 3 = PR still open; formicary will retry after delay
+    sys.exit(3)
 
 
 if __name__ == "__main__":
