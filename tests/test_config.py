@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from scripts.common.config import DEFAULTS, get_issue_dir, get_workspace_dir, load_config
+from scripts.common.config import DEFAULTS, get_issue_dir, get_workspace_dir, load_config, validate_claude_config
 
 
 def test_load_config_applies_defaults(tmp_workspace):
@@ -82,3 +82,45 @@ def test_bb_alias_resolves(monkeypatch):
     config = load_config()
     assert config["BITBUCKET_REPO"] == "bb-repo"
     assert config["BITBUCKET_TOKEN"] == "bb-token"
+
+
+# --- validate_claude_config ---
+
+def test_validate_claude_config_bedrock_mode(capsys):
+    config = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": "http://ai/bedrock"}
+    validate_claude_config(config)
+    out = capsys.readouterr().out
+    assert "mode=bedrock" in out
+    assert "http://ai/bedrock" in out
+
+
+def test_validate_claude_config_bedrock_strips_credentials(capsys):
+    config = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": "http://user:secret@proxy/bedrock"}
+    validate_claude_config(config)
+    out = capsys.readouterr().out
+    assert "secret" not in out
+    assert "mode=bedrock" in out
+
+
+def test_validate_claude_config_direct_api_key(capsys):
+    config = {"CLAUDE_CODE_USE_BEDROCK": "0", "ANTHROPIC_API_KEY": "sk-ant-test"}
+    validate_claude_config(config)
+    out = capsys.readouterr().out
+    assert "mode=direct-api-key" in out
+
+
+def test_validate_claude_config_missing_exits(capsys):
+    config = {"CLAUDE_CODE_USE_BEDROCK": "0", "ANTHROPIC_API_KEY": ""}
+    with pytest.raises(SystemExit) as exc:
+        validate_claude_config(config)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Claude API not configured" in err
+
+
+def test_validate_claude_config_bedrock_default_url(capsys):
+    # ANTHROPIC_BEDROCK_BASE_URL absent — should use the hardcoded default
+    config = {"CLAUDE_CODE_USE_BEDROCK": "1"}
+    validate_claude_config(config)
+    out = capsys.readouterr().out
+    assert "mode=bedrock" in out

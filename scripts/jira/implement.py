@@ -19,7 +19,7 @@ import click
 
 from scripts.common.artifacts import read_json, read_text, write_json, write_log
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.git_utils import (
     clone_repo,
     commit_all,
@@ -66,6 +66,8 @@ You are an expert software engineer implementing a Jira issue.
 @click.option("--issue-id", required=True, help="Jira issue key (e.g. PROJ-42)")
 def main(issue_id: str) -> None:
     config = load_config(required=[])
+    validate_claude_config(config)
+    print(f"[implement] issue={issue_id}", flush=True)
 
     existing = read_json(config, issue_id, "impl_result.json")
     if existing and existing.get("status") == "DONE":

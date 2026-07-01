@@ -12,7 +12,6 @@ Exit codes: 0=success, 1=error
 
 import os
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,25 +19,23 @@ from pathlib import Path
 import click
 
 from scripts.common.config import load_config
-
-
-def _run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+from scripts.common.shell import run_cmd
 
 
 def list_merged_ai_branches(org: str, repo: str) -> list[str]:
     """Return ai/* branches whose PRs are merged or closed."""
-    result = _run([
+    import json
+
+    result = run_cmd([
         "gh", "api",
         f"repos/{org}/{repo}/branches",
         "--paginate",
         "--jq", '[.[] | select(.name | startswith("ai/")) | .name]',
-    ])
+    ], check=False)
     if result.returncode != 0:
         print(f"WARNING: could not list branches: {result.stderr.strip()}", file=sys.stderr)
         return []
 
-    import json
     try:
         branches = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
@@ -46,14 +43,14 @@ def list_merged_ai_branches(org: str, repo: str) -> list[str]:
 
     merged = []
     for branch in branches:
-        pr_result = _run([
+        pr_result = run_cmd([
             "gh", "pr", "list",
             "-R", f"{org}/{repo}",
             "--head", branch,
             "--state", "all",
             "--json", "state,mergedAt",
             "--jq", ".[0]",
-        ])
+        ], check=False)
         if pr_result.returncode != 0:
             continue
         pr_data_str = pr_result.stdout.strip()
@@ -72,11 +69,11 @@ def list_merged_ai_branches(org: str, repo: str) -> list[str]:
 
 
 def delete_remote_branch(org: str, repo: str, branch: str) -> bool:
-    result = _run([
+    result = run_cmd([
         "gh", "api",
         "-X", "DELETE",
         f"repos/{org}/{repo}/git/refs/heads/{branch}",
-    ])
+    ], check=False)
     if result.returncode == 0:
         print(f"  Deleted remote branch: {branch}")
         return True

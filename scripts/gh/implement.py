@@ -20,7 +20,7 @@ import click
 
 from scripts.common.artifacts import read_json, read_text, write_json, write_log, write_text
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.git_utils import (
     clone_repo,
     commit_all,
@@ -68,6 +68,8 @@ You are an expert software engineer implementing a GitHub issue.
 @click.option("--issue-id", required=True, help="Issue number to implement")
 def main(issue_id: str) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO"])
+    validate_claude_config(config)
+    print(f"[implement] issue={issue_id} org={config['GH_ORG']} repo={config['GH_REPO']}", flush=True)
 
     # Idempotency check
     existing = read_json(config, issue_id, "impl_result.json")

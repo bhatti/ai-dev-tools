@@ -15,6 +15,7 @@ Short aliases are resolved once at load time; scripts never need to check both.
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 DEFAULTS: dict[str, str] = {
     "WORKSPACE_DIR": "/workspace",
@@ -75,6 +76,34 @@ def load_config(required: list[str] | None = None) -> dict[str, str]:
             sys.exit(1)
 
     return config
+
+
+def validate_claude_config(config: dict[str, str]) -> None:
+    """Verify Claude API credentials are present before invoking the claude CLI.
+
+    Exits with code 1 and a diagnostic message if neither ANTHROPIC_API_KEY
+    nor CLAUDE_CODE_USE_BEDROCK=1 is configured.  Prints the active mode so
+    it appears in the formicary task log at startup.
+    """
+    use_bedrock = config.get("CLAUDE_CODE_USE_BEDROCK", "0") == "1"
+    api_key = config.get("ANTHROPIC_API_KEY", "")
+
+    if use_bedrock:
+        base_url = config.get("ANTHROPIC_BEDROCK_BASE_URL", "http://ai/bedrock")
+        parsed = urlparse(base_url)
+        # Strip userinfo (user:password@) so credentials are never logged.
+        safe_url = urlunparse(parsed._replace(netloc=parsed.hostname or ""))
+        print(f"[claude] mode=bedrock base_url={safe_url}")
+    elif api_key:
+        print("[claude] mode=direct-api-key")
+    else:
+        print(
+            "ERROR: Claude API not configured.\n"
+            "  Set CLAUDE_CODE_USE_BEDROCK=1 (with optional ANTHROPIC_BEDROCK_BASE_URL)\n"
+            "  or set ANTHROPIC_API_KEY for direct API access.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def get_workspace_dir(config: dict[str, str]) -> Path:

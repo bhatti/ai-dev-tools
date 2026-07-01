@@ -25,7 +25,7 @@ from scripts.common.bitbucket_api import (
     list_pr_comments,
 )
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.git_utils import commit_all, push_branch
 
 
@@ -89,6 +89,8 @@ def call_learn(issue_id: str) -> None:
 @click.option("--issue-id", required=True, help="Jira issue key (e.g. PROJ-42)")
 def main(issue_id: str) -> None:
     config = load_config(required=["BITBUCKET_USERNAME", "BITBUCKET_TOKEN"])
+    validate_claude_config(config)
+    print(f"[poll_pr] issue={issue_id}", flush=True)
 
     pr = read_json(config, issue_id, "pr.json")
     if not pr:

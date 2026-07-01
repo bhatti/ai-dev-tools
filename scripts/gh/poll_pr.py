@@ -15,7 +15,6 @@ Exit codes: 0=merged/closed (done), 3=still open (retry later), 1=error
 """
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -23,12 +22,9 @@ import click
 
 from scripts.common.artifacts import read_json, write_json
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.git_utils import commit_all, current_branch, push_branch
-
-
-def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+from scripts.common.shell import run_cmd as _run
 
 
 def get_pr_state(org: str, repo: str, pr_number: int) -> str:
@@ -133,6 +129,8 @@ def call_learn(issue_id: str) -> None:
 @click.option("--issue-id", required=True, help="Issue number")
 def main(issue_id: str) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO", "GH_TOKEN"])
+    validate_claude_config(config)
+    print(f"[poll_pr] issue={issue_id} org={config['GH_ORG']} repo={config['GH_REPO']}", flush=True)
 
     pr = read_json(config, issue_id, "pr.json")
     if not pr or not pr.get("number"):

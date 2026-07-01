@@ -16,7 +16,6 @@ no-op (issue_picker ignores it and runs in batch mode).
 """
 
 import json
-import subprocess
 import sys
 
 import click
@@ -25,10 +24,7 @@ import click
 from scripts.common.artifacts import write_json
 from scripts.common.config import load_config
 from scripts.common.label_utils import gh_transition_label
-
-
-def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+from scripts.common.shell import run_cmd as _run
 
 
 def fetch_ready_issues(config: dict) -> list[dict]:
@@ -97,6 +93,11 @@ def launch_pipeline(issue_id: str) -> None:
 )
 def main(issue_id: str | None) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO", "GH_TOKEN"])
+    print(
+        f"[issue_picker] org={config['GH_ORG']} repo={config['GH_REPO']}"
+        f" pickup_label={config['PICKUP_LABEL']} max={config['MAX_ISSUES']}",
+        flush=True,
+    )
     max_issues = int(config["MAX_ISSUES"])
 
     issues = fetch_ready_issues(config)

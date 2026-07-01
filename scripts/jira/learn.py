@@ -19,7 +19,7 @@ import click
 from scripts.common.artifacts import read_json, write_text
 from scripts.common.bitbucket_api import list_pr_comments
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 
 
 LEARN_PROMPT_TEMPLATE = """\
@@ -51,6 +51,8 @@ Output ONLY this JSON on the last line:
 @click.option("--issue-id", required=True, help="Jira issue key (e.g. PROJ-42)")
 def main(issue_id: str) -> None:
     config = load_config(required=[])
+    validate_claude_config(config)
+    print(f"[learn] issue={issue_id}", flush=True)
 
     pr = read_json(config, issue_id, "pr.json")
     issue = read_json(config, issue_id, "issue.json")

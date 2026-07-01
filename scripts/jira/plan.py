@@ -19,7 +19,7 @@ import click
 
 from scripts.common.artifacts import read_json, write_json, write_text
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 
 
 PLAN_PROMPT_TEMPLATE = """\
@@ -55,6 +55,8 @@ def _slug(title: str, max_len: int = 40) -> str:
 @click.option("--issue-id", required=True, help="Jira issue key (e.g. PROJ-42)")
 def main(issue_id: str) -> None:
     config = load_config(required=["JIRA_PROJECT"])
+    validate_claude_config(config)
+    print(f"[plan] issue={issue_id} project={config['JIRA_PROJECT']}", flush=True)
 
     existing = read_json(config, issue_id, "plan_result.json")
     if existing and existing.get("status") == "DONE":

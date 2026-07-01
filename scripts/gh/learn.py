@@ -12,18 +12,14 @@ Exit codes: 0=done, 1=error
 """
 
 import json
-import subprocess
 import sys
 
 import click
 
 from scripts.common.artifacts import read_json, read_text, write_json, write_text
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
-
-
-def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
+from scripts.common.shell import run_cmd as _run
 
 
 def fetch_pr_comments(org: str, repo: str, pr_number: int) -> list[dict]:
@@ -69,6 +65,8 @@ Output ONLY this JSON on the last line:
 @click.option("--issue-id", required=True, help="Issue number")
 def main(issue_id: str) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO", "GH_TOKEN"])
+    validate_claude_config(config)
+    print(f"[learn] issue={issue_id} org={config['GH_ORG']} repo={config['GH_REPO']}", flush=True)
 
     pr = read_json(config, issue_id, "pr.json")
     issue = read_json(config, issue_id, "issue.json")

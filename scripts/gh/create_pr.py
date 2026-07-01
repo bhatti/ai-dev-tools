@@ -14,7 +14,6 @@ Exit codes: 0=success, 1=error
 
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -24,10 +23,7 @@ from scripts.common.artifacts import read_json, write_json
 from scripts.common.config import get_issue_dir, load_config
 from scripts.common.git_utils import current_branch, push_branch
 from scripts.common.label_utils import gh_transition_label
-
-
-def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+from scripts.common.shell import run_cmd as _run
 
 
 def create_github_pr(
@@ -76,6 +72,7 @@ def create_github_pr(
 @click.option("--issue-id", required=True, help="Issue number")
 def main(issue_id: str) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO", "GH_TOKEN"])
+    print(f"[create_pr] issue={issue_id} org={config['GH_ORG']} repo={config['GH_REPO']}", flush=True)
 
     # Idempotency check
     existing = read_json(config, issue_id, "pr.json")

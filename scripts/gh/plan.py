@@ -19,7 +19,7 @@ import click
 
 from scripts.common.artifacts import read_json, read_text, write_json, write_log, write_text
 from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_issue_dir, load_config
+from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 
 
 PLAN_PROMPT_TEMPLATE = """\
@@ -56,6 +56,8 @@ def _slug(title: str, max_len: int = 40) -> str:
 @click.option("--issue-id", required=True, help="Issue number to plan")
 def main(issue_id: str) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO"])
+    validate_claude_config(config)
+    print(f"[plan] issue={issue_id} org={config['GH_ORG']} repo={config['GH_REPO']}", flush=True)
 
     # Idempotency check
     existing = read_json(config, issue_id, "plan_result.json")
