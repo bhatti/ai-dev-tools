@@ -133,19 +133,41 @@ def configure_git(repo_path: Path, name: str, email: str) -> None:
 
 
 def create_branch(repo_path: Path, branch_name: str) -> str:
-    """Create/checkout branch. Idempotent — reuses if it already exists."""
+    """Create/checkout branch. Idempotent — reuses if it already exists.
+
+    Strategy (in order):
+    1. Branch already exists locally → checkout
+    2. refs/remotes/origin/<branch> exists → checkout -b tracking it
+    3. Remote has the branch → fetch with explicit refspec (creates tracking ref), then checkout
+    4. None of the above → create new local branch
+    """
+    # 1. Already local
     result = _run(["git", "branch", "--list", branch_name], cwd=repo_path)
     if result.stdout.strip():
         _run(["git", "checkout", branch_name], cwd=repo_path)
-    else:
-        # Check if branch exists on remote
-        remote_result = _run(
-            ["git", "ls-remote", "--heads", "origin", branch_name], cwd=repo_path, check=False
-        )
-        if remote_result.stdout.strip():
-            _run(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"], cwd=repo_path)
-        else:
-            _run(["git", "checkout", "-b", branch_name], cwd=repo_path)
+        return branch_name
+
+    # 2. Local tracking ref refs/remotes/origin/<branch> exists
+    tracking = _run(
+        ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch_name}"],
+        cwd=repo_path, check=False,
+    )
+    if tracking.returncode == 0:
+        _run(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"], cwd=repo_path)
+        return branch_name
+
+    # 3. Branch exists on remote — fetch with explicit refspec so tracking ref is created
+    remote = _run(
+        ["git", "ls-remote", "--heads", "origin", branch_name], cwd=repo_path, check=False
+    )
+    if remote.stdout.strip():
+        refspec = f"+refs/heads/{branch_name}:refs/remotes/origin/{branch_name}"
+        _run(["git", "fetch", "--depth", "100", "origin", refspec], cwd=repo_path)
+        _run(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"], cwd=repo_path)
+        return branch_name
+
+    # 4. New branch
+    _run(["git", "checkout", "-b", branch_name], cwd=repo_path)
     return branch_name
 
 
@@ -185,7 +207,9 @@ def push_branch(
 
     cmd = ["git", "push", "origin", branch]
     if force_with_lease:
-        cmd.append("--force-with-lease")
+        # Shallow clones mark tracking refs stale even after explicit refspec fetches.
+        # These branches are AI-owned (no human pushes), so --force is safe.
+        cmd.append("--force")
     result = _run(cmd, cwd=repo_path, check=False, env=env)
     if result.returncode != 0:
         stderr = result.stderr + result.stdout

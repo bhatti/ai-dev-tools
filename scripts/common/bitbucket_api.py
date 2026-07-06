@@ -1,7 +1,9 @@
 """BitBucket Cloud REST API v2 client using basic auth (username + app password).
 
 Required config keys:
-    BITBUCKET_USERNAME  — BitBucket account username
+    BITBUCKET_USERNAME  — BitBucket account email (NOT the username/nickname —
+                          Bitbucket's REST API v2 requires the email address for
+                          Basic Auth with app passwords)
     BITBUCKET_TOKEN     — BitBucket App Password
 """
 

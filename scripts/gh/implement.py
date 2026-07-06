@@ -4,10 +4,10 @@ Usage:
     python -m scripts.gh.implement --issue-id 42
 
 Required env: GH_ORG, GH_REPO
-Reads:  /workspace/{issue_id}/issue.json
-        /workspace/{issue_id}/plan.md
-Writes: /workspace/{issue_id}/impl_result.json
-        /workspace/{issue_id}/repo/  (cloned repo with changes)
+Reads:  /workspace/issue.json
+        /workspace/plan.md
+Writes: /workspace/impl_result.json
+        /workspace/repo/  (cloned repo with changes)
 
 Idempotent: reuses existing clone and branch if present.
 Exit codes: 0=done, 2=blocked, 1=error/tests-failing
@@ -30,6 +30,7 @@ from scripts.common.git_utils import (
     detect_repo_url,
     get_commit_count,
     make_branch_name,
+    push_branch,
 )
 
 
@@ -46,21 +47,28 @@ You are an expert software engineer implementing a GitHub issue.
 
 ## Instructions
 
-1. Read CLAUDE.md, .cursorrules, .windsurfrules, or any repo-specific coding guidelines if they exist — follow them strictly throughout.
-2. Keep changes simple and robust: modify existing code rather than adding new layers. Avoid over-engineering.
-3. Use the /ygs-implement skill if available, otherwise implement each task directly.
-4. For each task:
-   - Make actual file changes following the repo's existing patterns
-   - Run tests to verify they pass
+1. Read CLAUDE.md, .cursorrules, .windsurfrules, or any repo-specific coding guidelines if they exist — follow them strictly. Never deviate from the existing language, style, and patterns of the repository.
+2. Before writing any implementation code, check `.claude/skills/` for relevant skills. If the plan names a skill, invoke it via the Skill tool rather than reimplementing its steps.
+3. Search for existing utilities in `utils/`, `shared/`, `common/` dirs before adding new abstractions. Prefer reusing what exists.
+4. Use TDD for non-trivial changes:
+   a. Write the failing test first and confirm it fails.
+   b. Implement the code.
+   c. Confirm the test passes.
+5. For each plan task:
+   - Make targeted file changes following the repo's existing patterns.
+   - Do NOT modify files unrelated to the task.
    - Commit with message: "task: <description>"
-5. After all tasks, run the full test suite.
-6. If tests fail, fix them before proceeding. Stop after 2 consecutive failed fix attempts.
-7. Output ONLY this JSON on the last line:
-   {{"status":"DONE","files_changed":["file1","file2"],"commits":<N>,"tests_status":"passing"}}
-   Or if blocked:
-   {{"status":"BLOCKED","reason":"<explanation>"}}
-   Or if tests still failing:
+6. After all tasks, run the full test suite. Do NOT run lint or eslint — only the test suite.
+7. If tests fail, iterate on the fix. Stop after 2 consecutive failed fix attempts.
+8. After tests pass, do a cleanup pass: remove any unused variables, imports, or dead code you introduced.
+9. Output ONLY this JSON on the last line (no text after it):
+   {{"status":"DONE","files_changed":["file1","file2"],"commits":<N>,"tests_status":"passing","summary":"<one sentence>"}}
+   Or if blocked / requirements unclear:
+   {{"status":"CANNOT_IMPLEMENT","reason":"<explanation>"}}
+   Or if tests still failing after retries:
    {{"status":"TESTS_FAILING","reason":"<explanation>","commits":<N>}}
+
+IMPORTANT: Always write the JSON result on the last line regardless of outcome. This is the handoff contract for the next step.
 """
 
 
@@ -79,12 +87,12 @@ def main(issue_id: str) -> None:
 
     issue = read_json(config, issue_id, "issue.json")
     if not issue:
-        print(f"ERROR: /workspace/{issue_id}/issue.json not found", file=sys.stderr)
+        print(f"ERROR: {get_issue_dir(config, issue_id)}/issue.json not found", file=sys.stderr)
         sys.exit(1)
 
     plan = read_text(config, issue_id, "plan.md")
     if not plan:
-        print(f"ERROR: /workspace/{issue_id}/plan.md not found", file=sys.stderr)
+        print(f"ERROR: {get_issue_dir(config, issue_id)}/plan.md not found", file=sys.stderr)
         sys.exit(1)
 
     org = config["GH_ORG"]
@@ -140,6 +148,13 @@ def main(issue_id: str) -> None:
     # Catch-all commit for any uncommitted changes
     commit_all(repo_dir, "implement: changes from AI agent")
 
+    # Push here so create-pr only needs the GitHub API, not the local repo clone.
+    token = config.get("GH_TOKEN", "")
+    org = config["GH_ORG"]
+    repo = issue.get("repo") or config["GH_REPO"]
+    push_branch(repo_dir, branch, http_token=token, http_username="x-access-token",
+                url=f"https://github.com/{org}/{repo}.git" if token else "")
+
     commit_count = get_commit_count(repo_dir)
     result_data = result.status_json or {"status": result.status}
     result_data["commits"] = result_data.get("commits", commit_count)
@@ -148,13 +163,27 @@ def main(issue_id: str) -> None:
     write_json(config, issue_id, "impl_result.json", result_data)
     write_log(config, issue_id, "implement", result.output)
 
-    if result.status == "BLOCKED":
-        print(f"Implementation blocked: {result.status_json.get('reason', 'unknown')}")
+    sj = result.status_json or {}
+
+    if result.status == "MAX_TURNS_REACHED":
+        print(f"Max turns reached — partial implementation pushed to branch '{branch}' ({commit_count} commits)")
+        print(f"::set-output name=BranchName::{branch}")
+        print(f"::set-output name=CommitCount::{commit_count}")
+        sys.exit(2)
+
+    if result.status in ("BLOCKED", "CANNOT_IMPLEMENT"):
+        print(f"Implementation blocked: {sj.get('reason', 'unknown')}")
         sys.exit(2)
 
     if result.status == "TESTS_FAILING":
-        print(f"Tests failing: {result.status_json.get('reason', 'unknown')}")
+        print(f"Tests failing: {sj.get('reason', 'unknown')}")
         sys.exit(1)
+
+    if result.status not in ("DONE",):
+        print(f"WARNING: unexpected status '{result.status}' — treating as incomplete")
+        if commit_count == 0:
+            write_json(config, issue_id, "impl_result.json", {"status": "ERROR", "branch": branch, "reason": f"unexpected status: {result.status}"})
+            sys.exit(1)
 
     if commit_count == 0:
         print("WARNING: No commits made — implementation may be incomplete")

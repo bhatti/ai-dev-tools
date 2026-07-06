@@ -20,7 +20,7 @@ from urllib.parse import urlparse, urlunparse
 DEFAULTS: dict[str, str] = {
     "WORKSPACE_DIR": "/workspace",
     "AI_MODEL": "claude-sonnet-4-6",
-    "MAX_TURNS_PLAN": "30",
+    "MAX_TURNS_PLAN": "50",
     "MAX_TURNS_IMPLEMENT": "100",
     "PICKUP_LABEL": "ai-ready",
     "INPROGRESS_LABEL": "ai-in-progress",
@@ -34,7 +34,7 @@ DEFAULTS: dict[str, str] = {
     "CLAUDE_CODE_USE_BEDROCK": "1",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "us.anthropic.claude-opus-4-6-v1",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "us.anthropic.claude-sonnet-4-6",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
@@ -114,14 +114,10 @@ def get_workspace_dir(config: dict[str, str]) -> Path:
 def get_issue_dir(config: dict[str, str], issue_id: str) -> Path:
     """Return the issue workspace directory.
 
-    If WORKSPACE_DIR already ends with the issue_id (single-issue mount like
-    /workspace/PROJ-123), return it directly. Otherwise return
-    /workspace/{issue_id}/ for multi-issue layouts.
+    Each task runs in its own pod with a fresh emptyDir at /workspace, so
+    there is never more than one issue per container. Always return workspace
+    directly — no issue-id subdirectory needed.
     """
     workspace = get_workspace_dir(config)
-    if workspace.name == str(issue_id):
-        workspace.mkdir(parents=True, exist_ok=True)
-        return workspace
-    d = workspace / str(issue_id)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace

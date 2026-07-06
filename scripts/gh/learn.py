@@ -4,9 +4,9 @@ Usage:
     python -m scripts.gh.learn --issue-id 42
 
 Required env: GH_ORG, GH_REPO, GH_TOKEN
-Reads:  /workspace/{issue_id}/pr.json
-        /workspace/{issue_id}/impl_result.json
-Writes: /workspace/{issue_id}/learnings.md
+Reads:  /workspace/pr.json
+        /workspace/impl_result.json
+Writes: /workspace/learnings.md
 
 Exit codes: 0=done, 1=error
 """

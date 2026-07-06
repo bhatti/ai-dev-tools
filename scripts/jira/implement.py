@@ -4,10 +4,10 @@ Usage:
     python -m scripts.jira.implement --issue-id PROJ-42
 
 Required env: BITBUCKET_WORKSPACE, BITBUCKET_REPO (or from issue.json)
-Reads:  /workspace/{issue_id}/issue.json
-        /workspace/{issue_id}/plan.md
-Writes: /workspace/{issue_id}/impl_result.json
-        /workspace/{issue_id}/repo/
+Reads:  /workspace/issue.json
+        /workspace/plan.md
+Writes: /workspace/impl_result.json
+        /workspace/repo/
 
 Idempotent: reuses existing clone and branch if present.
 Exit codes: 0=done, 2=blocked, 1=error/tests-failing
@@ -28,6 +28,7 @@ from scripts.common.git_utils import (
     detect_bitbucket_url,
     get_commit_count,
     make_branch_name,
+    push_branch,
 )
 
 
@@ -79,12 +80,12 @@ def main(issue_id: str) -> None:
 
     issue = read_json(config, issue_id, "issue.json")
     if not issue:
-        print(f"ERROR: /workspace/{issue_id}/issue.json not found", file=sys.stderr)
+        print(f"ERROR: {get_issue_dir(config, issue_id)}/issue.json not found", file=sys.stderr)
         sys.exit(1)
 
     plan = read_text(config, issue_id, "plan.md")
     if not plan:
-        print(f"ERROR: /workspace/{issue_id}/plan.md not found", file=sys.stderr)
+        print(f"ERROR: {get_issue_dir(config, issue_id)}/plan.md not found", file=sys.stderr)
         sys.exit(1)
 
     # Repo info from issue.json (set by picker) or env fallback
@@ -142,7 +143,16 @@ def main(issue_id: str) -> None:
         write_json(config, issue_id, "impl_result.json", {"status": "ERROR", "branch": branch, "reason": str(e)})
         sys.exit(1)
 
+    # Commit any changes Claude made (idempotent — no-op if nothing changed).
     commit_all(repo_dir, "implement: changes from AI agent")
+
+    # Push here so create-pr only needs the Bitbucket API, not the local repo clone.
+    if http_token:
+        push_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
+        push_branch(repo_dir, branch, http_token=http_token, http_username=http_username, url=push_url)
+    else:
+        push_branch(repo_dir, branch)
+
     commit_count = get_commit_count(repo_dir)
 
     result_data = result.status_json or {"status": result.status}
@@ -151,6 +161,12 @@ def main(issue_id: str) -> None:
 
     write_json(config, issue_id, "impl_result.json", result_data)
     write_log(config, issue_id, "implement", result.output)
+
+    if result.status == "MAX_TURNS_REACHED":
+        print(f"Max turns reached — partial implementation pushed to branch '{branch}' ({commit_count} commits)")
+        print(f"::set-output name=BranchName::{branch}")
+        print(f"::set-output name=CommitCount::{commit_count}")
+        sys.exit(2)
 
     if result.status == "BLOCKED":
         print(f"Implementation blocked: {result.status_json.get('reason', 'unknown')}")

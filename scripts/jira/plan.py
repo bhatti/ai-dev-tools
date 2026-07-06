@@ -4,9 +4,9 @@ Usage:
     python -m scripts.jira.plan --issue-id PROJ-42
 
 Required env: JIRA_PROJECT
-Reads:  /workspace/{issue_id}/issue.json
-Writes: /workspace/{issue_id}/plan.md
-        /workspace/{issue_id}/plan_result.json
+Reads:  /workspace/issue.json
+Writes: /workspace/plan.md
+        /workspace/plan_result.json
 
 Idempotent: skips if plan_result.json already shows DONE.
 Exit codes: 0=done, 2=blocked, 1=error
@@ -65,7 +65,7 @@ def main(issue_id: str) -> None:
 
     issue = read_json(config, issue_id, "issue.json")
     if not issue:
-        print(f"ERROR: /workspace/{issue_id}/issue.json not found", file=sys.stderr)
+        print(f"ERROR: {get_issue_dir(config, issue_id)}/issue.json not found", file=sys.stderr)
         sys.exit(1)
 
     issue_dir = get_issue_dir(config, issue_id)

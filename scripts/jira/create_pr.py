@@ -4,9 +4,9 @@ Usage:
     python -m scripts.jira.create_pr --issue-id PROJ-42
 
 Required env: BITBUCKET_USERNAME, BITBUCKET_TOKEN (or from issue.json)
-Reads:  /workspace/{issue_id}/impl_result.json
-        /workspace/{issue_id}/plan_result.json
-Writes: /workspace/{issue_id}/pr.json
+Reads:  /workspace/impl_result.json
+        /workspace/plan_result.json
+Writes: /workspace/pr.json
 
 Idempotent: skips if pr.json already contains a valid URL.
 Exit codes: 0=success, 1=error
@@ -18,8 +18,8 @@ import click
 
 from scripts.common.artifacts import read_json, write_json
 from scripts.common.bitbucket_api import create_pr as bb_create_pr
-from scripts.common.config import get_issue_dir, load_config
-from scripts.common.git_utils import current_branch, detect_bitbucket_url, push_branch
+from scripts.common.config import load_config
+from scripts.common.git_utils import detect_bitbucket_url
 from scripts.common.label_utils import jira_transition_label
 
 
@@ -50,16 +50,10 @@ def main(issue_id: str) -> None:
         print("ERROR: BITBUCKET_WORKSPACE and BITBUCKET_REPO must be set", file=sys.stderr)
         sys.exit(1)
 
-    issue_dir = get_issue_dir(config, issue_id)
-    repo_dir = issue_dir / "repo"
-    branch = impl_result.get("branch") or current_branch(repo_dir)
-
-    http_token = config.get("BITBUCKET_TOKEN", "")
-    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
-    push_url = detect_bitbucket_url(workspace, repo_name, use_ssh=not http_token)
-
-    print(f"Pushing branch {branch}")
-    push_branch(repo_dir, branch, http_token=http_token, http_username=http_username, url=push_url)
+    branch = impl_result.get("branch")
+    if not branch:
+        print("ERROR: impl_result.json missing 'branch' field", file=sys.stderr)
+        sys.exit(1)
 
     title = f"[AI] {issue_id}: {issue['title']}"
     description = "\n".join([

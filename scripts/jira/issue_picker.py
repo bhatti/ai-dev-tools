@@ -8,7 +8,7 @@ Required env: JIRA_PROJECT, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_BASE_URL
 Optional env: PICKUP_LABEL, INPROGRESS_LABEL, MAX_ISSUES,
               BITBUCKET_WORKSPACE, BITBUCKET_REPO
 
-Output: /workspace/{issue_key}/issue.json for each picked issue
+Output: /workspace/issue.json (per-pod emptyDir; one issue per pod)
 Exit codes: 0=picked at least one, 2=none available, 1=error
 
 Can be called standalone, from a K8s CronJob, or from a formicary SHELL task.
@@ -75,7 +75,7 @@ def pick_issue(config: dict, raw: dict) -> bool:
         "labels": labels,
         "source": "jira",
     })
-    print(f"  Written to workspace/{issue_key}/issue.json")
+    print(f"  Written to workspace/issue.json")
     jira_transition_label(config, issue_key, config["PICKUP_LABEL"], config["INPROGRESS_LABEL"])
     print(f"::set-output name=IssueNumber::{issue_key}")
     print(f"::set-output name=IssueTitle::{title}")

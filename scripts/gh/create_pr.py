@@ -1,12 +1,12 @@
-"""Push branch and create a GitHub Pull Request.
+"""Create a GitHub Pull Request (branch is already pushed by implement step).
 
 Usage:
     python -m scripts.gh.create_pr --issue-id 42
 
 Required env: GH_ORG, GH_REPO, GH_TOKEN
-Reads:  /workspace/{issue_id}/impl_result.json
-        /workspace/{issue_id}/plan_result.json
-Writes: /workspace/{issue_id}/pr.json
+Reads:  /workspace/impl_result.json
+        /workspace/plan_result.json
+Writes: /workspace/pr.json
 
 Idempotent: skips if pr.json already contains a valid URL.
 Exit codes: 0=success, 1=error
@@ -19,9 +19,8 @@ from pathlib import Path
 
 import click
 
-from scripts.common.artifacts import read_json, write_json
-from scripts.common.config import get_issue_dir, load_config
-from scripts.common.git_utils import current_branch, push_branch
+from scripts.common.artifacts import read_json, read_text, write_json
+from scripts.common.config import load_config
 from scripts.common.label_utils import gh_transition_label
 from scripts.common.shell import run_cmd as _run
 
@@ -33,6 +32,7 @@ def create_github_pr(
     plan_result: dict,
     impl_result: dict,
     branch: str,
+    plan_md: str = "",
 ) -> dict:
     """Create a PR via gh CLI and return {url, number}."""
     issue_id = issue["number"]
@@ -41,10 +41,10 @@ def create_github_pr(
     body_lines = [
         f"Closes #{issue_id}",
         "",
-        f"## Summary",
+        "## Summary",
         plan_result.get("summary", "AI-generated implementation"),
         "",
-        f"## Implementation Details",
+        "## Implementation Details",
         f"- Commits: {impl_result.get('commits', 'unknown')}",
         f"- Tests: {impl_result.get('tests_status', 'unknown')}",
         f"- Complexity: {plan_result.get('total_complexity', 'unknown')}",
@@ -65,6 +65,16 @@ def create_github_pr(
         raise RuntimeError(f"Could not parse PR URL from gh output: {result.stdout.strip()!r}")
     pr_url = m.group(0)
     pr_number = int(m.group(1))
+
+    # Post plan as a PR comment so reviewers can see the AI's reasoning
+    if plan_md:
+        comment_body = f"## AI Implementation Plan\n\n{plan_md[:60000]}"
+        _run([
+            "gh", "api",
+            f"repos/{org}/{repo}/issues/{pr_number}/comments",
+            "-f", f"body={comment_body}",
+        ], check=False)
+
     return {"url": pr_url, "number": pr_number}
 
 
@@ -94,21 +104,24 @@ def main(issue_id: str) -> None:
         print(f"ERROR: impl_result status={impl_result.get('status')}: {impl_result.get('reason', '')}", file=sys.stderr)
         sys.exit(1)
 
-    issue_dir = get_issue_dir(config, issue_id)
-    repo_dir = issue_dir / "repo"
-    branch = impl_result.get("branch") or current_branch(repo_dir)
+    branch = impl_result.get("branch")
+    if not branch:
+        print("ERROR: impl_result.json missing 'branch' field", file=sys.stderr)
+        sys.exit(1)
 
     org = config["GH_ORG"]
-    repo = config["GH_REPO"]
+    # Use repo from issue.json if present — issue_picker may override the default repo
+    repo = issue.get("repo") or config["GH_REPO"]
 
-    print(f"Pushing branch {branch}")
-    push_branch(repo_dir, branch)
+    plan_md = read_text(config, issue_id, "plan.md") or ""
 
     print("Creating PR")
-    pr_info = create_github_pr(org, repo, issue, plan_result, impl_result, branch)
+    pr_info = create_github_pr(org, repo, issue, plan_result, impl_result, branch, plan_md=plan_md)
 
-    # Transition label
-    gh_transition_label(org, repo, issue_id, config["INPROGRESS_LABEL"], config["PR_OPEN_LABEL"])
+    # Transition label — use .get() with fallback so missing env vars don't crash after PR creation
+    inprogress_label = config.get("INPROGRESS_LABEL", "ai-in-progress")
+    pr_open_label = config.get("PR_OPEN_LABEL", "ai-pr-open")
+    gh_transition_label(org, repo, issue_id, inprogress_label, pr_open_label)
 
     pr_data = {
         "url": pr_info["url"],

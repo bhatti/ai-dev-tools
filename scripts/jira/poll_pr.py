@@ -6,13 +6,14 @@ Usage:
     python -m scripts.jira.poll_pr --issue-id PROJ-42
 
 Required env: BITBUCKET_USERNAME, BITBUCKET_TOKEN (or from pr.json)
-Reads:  /workspace/{issue_id}/pr.json
-Writes: /workspace/{issue_id}/monitor_result.json
-        /workspace/{issue_id}/processed_comments.json
+Reads:  /workspace/pr.json
+Writes: /workspace/monitor_result.json
+        /workspace/processed_comments.json
 
 Exit codes: 0=merged/declined (done), 3=still open (retry later), 1=error
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,7 +27,58 @@ from scripts.common.bitbucket_api import (
 )
 from scripts.common.claude_runner import run_claude
 from scripts.common.config import get_issue_dir, load_config, validate_claude_config
-from scripts.common.git_utils import commit_all, push_branch
+from scripts.common.git_utils import clone_repo, commit_all, configure_git, create_branch, detect_bitbucket_url, push_branch
+from scripts.common.shell import run_cmd as _run
+
+
+def ensure_repo_clone(
+    config: dict,
+    workspace: str,
+    repo_name: str,
+    branch: str,
+    repo_dir: Path,
+) -> None:
+    """Clone the BitBucket repo and checkout the feature branch with remote tracking.
+
+    A shallow clone only fetches the default branch. We explicitly fetch the
+    feature branch so that --force-with-lease works correctly.
+    """
+    http_token = config.get("BITBUCKET_TOKEN", "")
+    ssh_key = config.get("SSH_PRIVATE_KEY", "")
+    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+
+    if http_token:
+        clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
+    else:
+        clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=True)
+
+    if not (repo_dir.exists() and (repo_dir / ".git").exists()):
+        print(f"Cloning {workspace}/{repo_name} branch={branch} for feedback response")
+        if http_token:
+            clone_repo(clone_url, repo_dir, http_token=http_token, http_username=http_username)
+        else:
+            clone_repo(clone_url, repo_dir, ssh_key=ssh_key)
+        configure_git(
+            repo_dir,
+            config.get("GIT_USER_NAME", "AI Agent"),
+            config.get("GIT_USER_EMAIL", "ai-agent@noreply.local"),
+        )
+
+    # Fetch the feature branch with an explicit refspec so git creates the local
+    # tracking ref refs/remotes/origin/<branch>.  A bare `git fetch origin <branch>`
+    # only writes FETCH_HEAD — it does NOT create the tracking ref, which makes
+    # `--force-with-lease` refuse the push (no lease value to compare against).
+    print(f"Fetching branch {branch}")
+    refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
+    fetch = _run(
+        ["git", "-C", str(repo_dir), "fetch", "--depth", "100", "origin", refspec],
+        check=False,
+    )
+    if fetch.returncode != 0:
+        raise RuntimeError(f"git fetch failed for branch {branch}: {fetch.stderr.strip() or fetch.stdout.strip()}")
+
+    # checkout the branch tracking origin/<branch>
+    create_branch(repo_dir, branch)
 
 
 def respond_to_comment(
@@ -40,10 +92,13 @@ def respond_to_comment(
     branch: str,
 ) -> None:
     issue_dir = get_issue_dir(config, issue_id)
+    http_token = config.get("BITBUCKET_TOKEN", "")
+    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
     author = comment.get("author", {}).get("nickname", "unknown")
     body = comment.get("content", {}).get("raw", "") or comment.get("body", "")
     comment_id = comment.get("id")
 
+    max_turns = int(config.get("MAX_TURNS_FEEDBACK", "10"))
     prompt = f"""\
 You are an AI agent responding to BitBucket PR review feedback.
 
@@ -51,11 +106,12 @@ You are an AI agent responding to BitBucket PR review feedback.
 {body}
 
 ## Instructions
-1. Analyze the feedback carefully.
-2. Make the requested changes to the code.
-3. Run tests to verify nothing is broken.
-4. Commit with: "feedback: address comment from @{author}"
-5. Output ONLY this JSON on the last line:
+1. Read CLAUDE.md or any repo-specific coding guidelines if they exist and follow them.
+2. Analyze the feedback carefully.
+3. Make the requested changes — edit the file directly. Keep changes minimal and focused.
+4. Do NOT run tests or lint — just make the change and commit.
+5. Commit with: "feedback: address comment from @{author}"
+6. Output ONLY this JSON on the last line:
    {{"status":"DONE","commits":<N>,"summary":"<one sentence>"}}
    Or if you cannot address it:
    {{"status":"SKIPPED","reason":"<explanation>"}}
@@ -64,19 +120,34 @@ You are an AI agent responding to BitBucket PR review feedback.
         prompt,
         working_dir=repo_dir,
         model=config.get("AI_MODEL"),
-        max_turns=20,
+        max_turns=max_turns,
         log_file=issue_dir / "logs" / f"feedback_{comment_id}.log",
     )
     commit_all(repo_dir, f"feedback: address comment from @{author}")
-    push_branch(repo_dir, branch, force_with_lease=True)
 
-    reply = f"Addressed feedback from @{author}. {result.status_json.get('summary', '')}"
+    # Re-fetch the tracking ref before pushing so --force-with-lease has an up-to-date
+    # lease value. Claude may have pushed its own commits via Bash during its run.
+    refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
+    fetch_result = _run(["git", "-C", str(repo_dir), "fetch", "--depth", "100", "origin", refspec], check=False)
+    if fetch_result.returncode != 0:
+        print(f"WARNING: pre-push fetch failed: {fetch_result.stderr.strip()}", file=sys.stderr)
+
+    # Refresh credentials in remote URL before push — handles re-runs where the
+    # repo already exists and clone_repo was not called this invocation.
+    if http_token:
+        push_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
+        push_branch(repo_dir, branch, force_with_lease=True,
+                    http_token=http_token, http_username=http_username, url=push_url)
+    else:
+        push_branch(repo_dir, branch, force_with_lease=True)
+
+    summary = (result.status_json or {}).get("summary", "")
+    reply = f"Addressed feedback from @{author}. {summary}".strip()
     add_pr_comment(config, workspace, repo_name, pr_id, reply)
 
 
 def call_learn(issue_id: str) -> None:
     """Call jira learn.py as a subprocess after PR is resolved."""
-    import subprocess
     result = subprocess.run(
         [sys.executable, "-m", "scripts.jira.learn", "--issue-id", issue_id],
         check=False,
@@ -105,7 +176,13 @@ def main(issue_id: str) -> None:
     branch = pr["branch"]
     issue_dir = get_issue_dir(config, issue_id)
     repo_dir = issue_dir / "repo"
-    bot_username = config.get("BITBUCKET_USERNAME", "")
+    # BITBUCKET_USERNAME is the email for API auth; the Bitbucket API returns
+    # author nicknames. Use a dedicated BotNickname config if set, otherwise
+    # fall back to the part before '@' in the email.
+    _raw_username = config.get("BITBUCKET_USERNAME", "")
+    bot_username = config.get("BotNickname") or (
+        _raw_username.split("@")[0] if "@" in _raw_username else _raw_username
+    )
 
     print(f"Checking BitBucket PR {pr_id} as @{bot_username}")
 
@@ -130,12 +207,15 @@ def main(issue_id: str) -> None:
 
     comments = list_pr_comments(config, workspace, repo_name, pr_id)
     all_new = [c for c in comments if c.get("id") not in processed_ids]
-    # Mark all seen — only act on those starting with "ai-bot"
+    # Mark all seen before processing so we don't double-process on next run
     for c in all_new:
         processed_ids.add(c.get("id"))
+
+    # Only respond to comments prefixed with "ai-bot" — skip bot's own replies
     ai_bot_comments = [
         c for c in all_new
         if (c.get("content", {}).get("raw", "") or c.get("body", "")).strip().lower().startswith("ai-bot")
+        and c.get("author", {}).get("nickname", "").lower() != bot_username.lower()
     ]
 
     if not ai_bot_comments:
@@ -143,8 +223,10 @@ def main(issue_id: str) -> None:
         print(f"PR {pr_id} open, no new ai-bot comments ({skipped} other comment(s) ignored)")
         if all_new:
             write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
-        # Exit 3 = PR still open; formicary maps this to PAUSED and retries after delay
         sys.exit(3)
+
+    # Clone repo on demand — poll-pr runs in a fresh pod with emptyDir
+    ensure_repo_clone(config, workspace, repo_name, branch, repo_dir)
 
     for comment in ai_bot_comments:
         comment_id = comment.get("id")
@@ -156,10 +238,9 @@ def main(issue_id: str) -> None:
             )
         except Exception as e:
             print(f"WARNING: failed to respond to comment {comment_id}: {e}", file=sys.stderr)
-        write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
 
+    write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
     print(f"Handled {len(ai_bot_comments)} comment(s), PR still open")
-    # Exit 3 = PR still open; formicary will retry after delay
     sys.exit(3)
 
 

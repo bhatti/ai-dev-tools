@@ -55,20 +55,65 @@ def run_claude(
     The prompt is passed as a command-line argument to avoid shell injection.
     Output is streamed to stdout (for live monitoring) and captured.
     """
-    cmd = ["claude", "--print", "--dangerously-skip-permissions"]
+    # Restrict tools + use a short system prompt to stay under Bedrock's input-size limit.
+    # Claude Code's default system prompt is very large and causes "Prompt is too long"
+    # against Bedrock cross-region inference endpoints.
+    # The replacement must explicitly include "follow existing conventions" — without it
+    # Claude will rewrite files in a different language or style.
+    _TOOLS = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS"
+    _SYSTEM_PROMPT = (
+        "You are an expert software engineer. "
+        "Follow the instructions in the user prompt exactly. "
+        "Always follow the existing code conventions, language, style, and patterns of the repository. "
+        "Never rewrite or replace existing code in a different language. "
+        "Prefer editing existing files over creating new ones. "
+        "Do not add unnecessary abstractions or features beyond what is asked."
+    )
+    cmd = [
+        "claude", "--print", "--dangerously-skip-permissions",
+        "--system-prompt", _SYSTEM_PROMPT,
+        "--allowedTools", _TOOLS,
+    ]
     if model:
         cmd += ["--model", model]
     cmd += ["--max-turns", str(max_turns)]
     # Prompt passed via stdin to avoid ARG_MAX limits on large prompts
 
-    env = os.environ.copy()
+    # Pass only vars that claude itself needs — avoids injecting the entire
+    # formicary job environment (50+ vars including multi-line SSH keys) into
+    # the Bedrock system prompt, which has a strict size limit.
+    _CLAUDE_VARS = {
+        "HOME", "PATH", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
+        "TMPDIR", "TMP", "TEMP",
+        # Bedrock / API auth
+        "CLAUDE_CODE_USE_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+        "ANTHROPIC_API_KEY",
+        # Model selection
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        # AWS SDK (needed when bedrock calls go through aws-sdk)
+        "AWS_DEFAULT_REGION",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    }
+    env = {k: v for k, v in os.environ.items() if k in _CLAUDE_VARS}
     if extra_env:
         env.update(extra_env)
+
+    # Save prompt to log dir for debugging
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.with_suffix(".prompt.txt").write_text(prompt)
 
     output_lines: list[str] = []
     stderr_lines: list[str] = []
 
-    print(f"[claude] starting: model={model or 'default'} max_turns={max_turns} cwd={working_dir}", flush=True)
+    print(f"[claude] starting: model={model or 'default'} max_turns={max_turns} cwd={working_dir} prompt_chars={len(prompt)}", flush=True)
 
     try:
         proc = subprocess.Popen(
@@ -123,6 +168,19 @@ def run_claude(
             log_file.with_suffix(".stderr.log").write_text(full_stderr)
 
     if exit_code != 0:
+        # "Reached max turns" is a normal operating condition, not a hard error.
+        # Claude may have made partial progress — commit/push that work rather than
+        # discarding it.  Any other non-zero exit is a genuine failure.
+        if "Reached max turns" in full_output or "Reached max turns" in full_stderr:
+            print(f"[claude] max turns ({max_turns}) reached — treating as partial result", flush=True)
+            status_json = extract_status_json(full_output) or {}
+            status_json.setdefault("status", "MAX_TURNS_REACHED")
+            return ClaudeResult(
+                exit_code=exit_code,
+                output=full_output,
+                status_json=status_json,
+                status="MAX_TURNS_REACHED",
+            )
         stderr_hint = f"\nStderr:\n{full_stderr[-1000:]}" if full_stderr.strip() else ""
         raise RuntimeError(
             f"claude exited with code {exit_code}.{stderr_hint}\n"
