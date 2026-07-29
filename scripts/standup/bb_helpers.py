@@ -37,7 +37,7 @@ def get_open_prs(config: dict) -> list[dict]:
             timeout=30,
         )
         if not resp.ok:
-            print(f"[bb_helpers] PR list error {resp.status_code}", flush=True)
+            print(f"[bb_helpers] PR list error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
             break
         data = resp.json()
         for pr in data.get("values", []):

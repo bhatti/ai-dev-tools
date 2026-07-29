@@ -25,6 +25,7 @@ import json
 import sys
 from base64 import b64encode
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -61,6 +62,24 @@ def get_current_jira_user(config: dict) -> dict | None:
     return resp.json() if resp.ok else None
 
 
+def _discover_jira_project(config: dict) -> str:
+    """Return the first accessible project key, ordered by recent activity."""
+    resp = requests.get(
+        f"{_jira_base(config)}/rest/api/3/project/search",
+        headers=_jira_headers(config),
+        params={"maxResults": 1, "orderBy": "lastIssueUpdatedTime"},
+        timeout=20,
+    )
+    if resp.ok:
+        values = resp.json().get("values", [])
+        if values:
+            return values[0]["key"]
+    raise RuntimeError(
+        "JIRA_PROJECT not set and could not auto-discover a project — "
+        "set JIRA_PROJECT env var or pass --jira-project"
+    )
+
+
 def get_active_sprint(config: dict) -> dict | None:
     """Return the first active sprint for the project's board, or None."""
     board_resp = requests.get(
@@ -70,6 +89,7 @@ def get_active_sprint(config: dict) -> dict | None:
         timeout=20,
     )
     if not board_resp.ok:
+        print(f"[gather_jira] board list error {board_resp.status_code}: {board_resp.text[:200]}", file=sys.stderr, flush=True)
         return None
     boards = board_resp.json().get("values", [])
     if not boards:
@@ -100,6 +120,7 @@ def get_sprint_issues(config: dict, sprint_id: int) -> list[dict]:
         timeout=30,
     )
     if not resp.ok:
+        print(f"[gather_jira] sprint issues error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
         return []
     return resp.json().get("issues", [])
 
@@ -204,8 +225,11 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_h
 
 def main() -> None:
     config = load_config(required=[
-        "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PROJECT",
+        "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN",
     ])
+    if not config.get("JIRA_PROJECT"):
+        config["JIRA_PROJECT"] = _discover_jira_project(config)
+        print(f"[gather_jira] auto-discovered project: {config['JIRA_PROJECT']}", flush=True)
     workspace_dir = get_workspace_dir(config)
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -219,7 +243,16 @@ def main() -> None:
     print(f"[gather_jira] project={config['JIRA_PROJECT']} lookback={lookback_hours}h stale_after={stale_days}d", flush=True)
 
     me = get_current_jira_user(config)
-    print(f"[gather_jira] logged in as: {me.get('displayName', '?') if me else 'unknown'}", flush=True)
+    if not me:
+        # Strip credentials from the URL before logging (https://user:token@host → https://host)
+        raw_url = config["JIRA_BASE_URL"]
+        parsed = urlparse(raw_url)
+        safe_url = urlunparse(parsed._replace(netloc=parsed.hostname or ""))
+        raise RuntimeError(
+            f"Failed to authenticate with Jira at {safe_url} — "
+            "check JIRA_EMAIL and JIRA_API_TOKEN"
+        )
+    print(f"[gather_jira] logged in as: {me.get('displayName', '?')}", flush=True)
 
     sprint = get_active_sprint(config)
     sprint_info: dict = {}
@@ -286,4 +319,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.common.entrypoint import run_main
+    run_main(main, "gather_result.json")

@@ -52,6 +52,7 @@ mkdir -p ~/.claude
 if [ "${CLAUDE_CODE_USE_BEDROCK:-0}" = "1" ]; then
   cat > ~/.claude/settings.json <<EOF
 {
+  "claudeCodeLocalNetworkingEnabled": true,
   "apiKeyHelper": "echo '-'",
   "env": {
     "ANTHROPIC_BEDROCK_BASE_URL": "${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}",
@@ -70,6 +71,7 @@ EOF
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   cat > ~/.claude/settings.json <<EOF
 {
+  "claudeCodeLocalNetworkingEnabled": true,
   "skipWorkflowUsageWarning": true,
   "permissions": { "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)"] }
 }

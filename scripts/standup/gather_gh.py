@@ -21,6 +21,7 @@ Exit codes: 0=done, 1=error
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 
@@ -47,13 +48,17 @@ def get_open_issues(config: dict) -> list[dict]:
     """
     org = config["GH_ORG"]
     repo = config["GH_REPO"]
-    result = _run([
-        "gh", "issue", "list",
-        "-R", f"{org}/{repo}",
-        "--state", "open",
-        "--limit", "200",
-        "--json", "number,title,body,url,labels,assignees,updatedAt,createdAt,comments",
-    ])
+    try:
+        result = _run([
+            "gh", "issue", "list",
+            "-R", f"{org}/{repo}",
+            "--state", "open",
+            "--limit", "200",
+            "--json", "number,title,body,url,labels,assignees,updatedAt,createdAt,comments",
+        ])
+    except subprocess.CalledProcessError as e:
+        print(f"[gather_gh] gh issue list failed (exit {e.returncode}): {e.stderr}", file=sys.stderr, flush=True)
+        raise
     if not result.stdout.strip():
         return []
     try:
@@ -75,13 +80,17 @@ def get_open_prs(config: dict) -> list[dict]:
     """Return open PRs (up to 100) with age and reviewers. Uses gh CLI."""
     org = config["GH_ORG"]
     repo = config["GH_REPO"]
-    result = _run([
-        "gh", "pr", "list",
-        "-R", f"{org}/{repo}",
-        "--state", "open",
-        "--limit", "100",
-        "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName",
-    ])
+    try:
+        result = _run([
+            "gh", "pr", "list",
+            "-R", f"{org}/{repo}",
+            "--state", "open",
+            "--limit", "100",
+            "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName",
+        ])
+    except subprocess.CalledProcessError as e:
+        print(f"[gather_gh] gh pr list failed (exit {e.returncode}): {e.stderr}", file=sys.stderr, flush=True)
+        raise
     if not result.stdout.strip():
         return []
     try:
@@ -238,4 +247,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.common.entrypoint import run_main
+    run_main(main, "gather_result.json")

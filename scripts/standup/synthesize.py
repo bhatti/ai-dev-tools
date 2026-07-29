@@ -218,4 +218,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.common.entrypoint import run_main
+    run_main(main, "synthesize_result.json")

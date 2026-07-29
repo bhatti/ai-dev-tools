@@ -50,6 +50,14 @@ def main() -> None:
         except json.JSONDecodeError:
             pass
 
+    gather_result = {}
+    gather_path = workspace_dir / "gather_result.json"
+    if gather_path.exists():
+        try:
+            gather_result = json.loads(gather_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
     # Build combined artifact
     combined_parts = [
         f"# Standup Report — {date.today().isoformat()}",
@@ -67,25 +75,33 @@ def main() -> None:
     slack_ok = post_message(config, brief)
 
     post_result = {
-        "status": "DONE",
+        "status": "DONE" if slack_ok else "SLACK_FAILED",
         "slack_posted": slack_ok,
         "risk_count": synth_result.get("risk_count", 0),
         "discussion_questions": synth_result.get("discussion_questions", 0),
         "silence_count": synth_result.get("silence_count", 0),
+        "issue_count": gather_result.get("issue_count", 0),
+        "pr_count": gather_result.get("pr_count", 0),
+        "slack_message_count": gather_result.get("slack_message_count", 0),
+        "sprint": gather_result.get("sprint", ""),
         "date": date.today().isoformat(),
     }
     (workspace_dir / "post_result.json").write_text(json.dumps(post_result, indent=2))
 
     print(
         f"[post] done — slack_posted={slack_ok} "
+        f"issues={post_result['issue_count']} prs={post_result['pr_count']} "
         f"risks={post_result['risk_count']} "
         f"questions={post_result['discussion_questions']}",
         flush=True,
     )
     # Print final JSON for formicary report_stdout capture
     print(json.dumps(post_result))
+    if not slack_ok:
+        sys.exit(1)
     sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.common.entrypoint import run_main
+    run_main(main, "post_result.json")
