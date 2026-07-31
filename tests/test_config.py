@@ -44,7 +44,8 @@ def test_get_issue_dir_creates_directory(tmp_workspace):
     config = {"WORKSPACE_DIR": str(tmp_workspace)}
     issue_dir = get_issue_dir(config, "99")
     assert issue_dir.exists()
-    assert issue_dir == tmp_workspace / "99"
+    # get_issue_dir returns workspace directly — each task runs in its own pod
+    assert issue_dir == tmp_workspace
 
 
 def test_get_issue_dir_idempotent(tmp_workspace):

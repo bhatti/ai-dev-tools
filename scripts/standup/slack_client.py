@@ -125,3 +125,20 @@ def post_message(config: dict, text: str, channel: str | None = None) -> bool:
         return False
     print(f"[slack] brief posted to {ch}", flush=True)
     return True
+
+
+def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL") -> bool:
+    """Post a notification to Slack using the channel from config[channel_key].
+
+    Optional — returns True on success, False (logged, no exception) on any failure.
+    Silently skips when SLACK_BOT_TOKEN or the channel env var is absent.
+    """
+    token = config.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        print(f"[slack] SLACK_BOT_TOKEN not set — skipping notification", flush=True)
+        return False
+    channel = config.get(channel_key, "")
+    if not channel:
+        print(f"[slack] {channel_key} not set — skipping notification", flush=True)
+        return False
+    return post_message(config, text, channel=channel)

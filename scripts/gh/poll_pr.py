@@ -27,6 +27,7 @@ from scripts.common.claude_runner import run_claude
 from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.git_utils import clone_repo, commit_all, configure_git, create_branch, push_branch
 from scripts.common.shell import run_cmd as _run
+from scripts.standup.slack_client import notify
 
 
 def get_pr_state(org: str, repo: str, pr_number: int) -> str:
@@ -233,6 +234,10 @@ def main(issue_id: str) -> None:
             call_learn(issue_id)
         except RuntimeError as e:
             print(f"WARNING: learn step failed (non-fatal): {e}", file=sys.stderr)
+        notify(
+            config,
+            f"✅ PR #{pr_number} {state.lower()} for issue #{issue_id}: {pr.get('url', '')}",
+        )
         print("Done")
         sys.exit(0)
 
@@ -276,6 +281,10 @@ def main(issue_id: str) -> None:
 
     write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
     print(f"Handled {len(actionable)} comment(s), PR still open")
+    notify(
+        config,
+        f"🔄 Addressed {len(actionable)} review comment(s) on PR #{pr_number} (issue #{issue_id}): {pr.get('url', '')}",
+    )
     # Exit 3 = PR still open; formicary will retry after delay
     sys.exit(3)
 

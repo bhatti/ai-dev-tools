@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.standup.slack_client import get_standup_messages, post_message, resolve_channel_id
+from scripts.standup.slack_client import get_standup_messages, notify, post_message, resolve_channel_id
 
 
 @pytest.fixture
@@ -110,3 +110,44 @@ def test_post_message_slack_error(mock_post, config_with_slack):
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": False, "error": "channel_not_found"})
     ok = post_message(config_with_slack, "hello")
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# notify
+# ---------------------------------------------------------------------------
+
+def test_notify_no_token(config_no_slack):
+    ok = notify(config_no_slack, "hello")
+    assert ok is False
+
+
+def test_notify_no_channel(tmp_workspace):
+    config = {"WORKSPACE_DIR": str(tmp_workspace), "SLACK_BOT_TOKEN": "xoxb-test"}
+    ok = notify(config, "hello")
+    assert ok is False
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_notify_success(mock_post, tmp_workspace):
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    config = {
+        "WORKSPACE_DIR": str(tmp_workspace),
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "my-team",
+    }
+    ok = notify(config, "🤖 PR created: https://github.com/org/repo/pull/1")
+    assert ok is True
+    assert mock_post.call_args.kwargs["json"]["channel"] == "#my-team"
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_notify_custom_channel_key(mock_post, tmp_workspace):
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    config = {
+        "WORKSPACE_DIR": str(tmp_workspace),
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_STANDUP_CHANNEL": "standup-alerts",
+    }
+    ok = notify(config, "✅ PR merged", channel_key="SLACK_STANDUP_CHANNEL")
+    assert ok is True
+    assert mock_post.call_args.kwargs["json"]["channel"] == "#standup-alerts"

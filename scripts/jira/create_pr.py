@@ -21,6 +21,7 @@ from scripts.common.bitbucket_api import create_pr as bb_create_pr
 from scripts.common.config import load_config
 from scripts.common.git_utils import detect_bitbucket_url
 from scripts.common.label_utils import jira_transition_label
+from scripts.standup.slack_client import notify
 
 
 @click.command()
@@ -103,6 +104,11 @@ def main(issue_id: str) -> None:
     print(f"::set-output name=PRUrl::{pr_url}")
     print(f"::set-output name=PRId::{pr_id}")
     print(f"::set-output name=BranchName::{branch}")
+
+    notify(
+        config,
+        f"🤖 PR created for issue {issue_id}: {issue.get('title', '')}\n{pr_url}",
+    )
     sys.exit(0)
 
 

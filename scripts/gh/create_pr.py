@@ -23,6 +23,7 @@ from scripts.common.artifacts import read_json, read_text, write_json
 from scripts.common.config import load_config
 from scripts.common.label_utils import gh_transition_label
 from scripts.common.shell import run_cmd as _run
+from scripts.standup.slack_client import notify
 
 
 def create_github_pr(
@@ -135,6 +136,11 @@ def main(issue_id: str) -> None:
     print(f"::set-output name=PRUrl::{pr_info['url']}")
     print(f"::set-output name=PRNumber::{pr_info['number']}")
     print(f"::set-output name=BranchName::{branch}")
+
+    notify(
+        config,
+        f"🤖 PR created for issue #{issue_id}: {issue.get('title', '')}\n{pr_info['url']}",
+    )
     sys.exit(0)
 
 

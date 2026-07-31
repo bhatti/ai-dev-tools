@@ -29,6 +29,7 @@ from scripts.common.claude_runner import run_claude
 from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.git_utils import clone_repo, commit_all, configure_git, create_branch, detect_bitbucket_url, push_branch
 from scripts.common.shell import run_cmd as _run
+from scripts.standup.slack_client import notify
 
 
 def ensure_repo_clone(
@@ -199,6 +200,10 @@ def main(issue_id: str) -> None:
             call_learn(issue_id)
         except RuntimeError as e:
             print(f"WARNING: learn step failed (non-fatal): {e}", file=sys.stderr)
+        notify(
+            config,
+            f"✅ PR {pr_id} {state.lower()} for issue {issue_id}: {pr.get('url', '')}",
+        )
         print("Done")
         sys.exit(0)
 
@@ -241,6 +246,10 @@ def main(issue_id: str) -> None:
 
     write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
     print(f"Handled {len(ai_bot_comments)} comment(s), PR still open")
+    notify(
+        config,
+        f"🔄 Addressed {len(ai_bot_comments)} review comment(s) on PR {pr_id} (issue {issue_id}): {pr.get('url', '')}",
+    )
     sys.exit(3)
 
 

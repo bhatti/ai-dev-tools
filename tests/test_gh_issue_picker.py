@@ -47,6 +47,8 @@ def test_main_picks_issues_and_writes_artifacts(
     monkeypatch.setenv("GH_REPO", "testrepo")
     monkeypatch.setenv("GH_TOKEN", "ghp_test")
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
+    # Limit to 1 so only the first issue is written to workspace/issue.json
+    monkeypatch.setenv("MAX_ISSUES", "1")
 
     mock_run.return_value = MagicMock(stdout=SAMPLE_GH_RESPONSE, returncode=0)
     mock_transition.return_value = None
@@ -56,6 +58,7 @@ def test_main_picks_issues_and_writes_artifacts(
     result = runner.invoke(main, [])
     assert result.exit_code == 0
 
+    # get_issue_dir returns workspace directly — issue_id arg is ignored
     issue = read_json(sample_config, "42", "issue.json")
     assert issue is not None
     assert issue["number"] == 42

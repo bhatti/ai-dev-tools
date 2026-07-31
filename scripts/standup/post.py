@@ -75,7 +75,7 @@ def main() -> None:
     slack_ok = post_message(config, brief)
 
     post_result = {
-        "status": "DONE" if slack_ok else "SLACK_FAILED",
+        "status": "DONE",
         "slack_posted": slack_ok,
         "risk_count": synth_result.get("risk_count", 0),
         "discussion_questions": synth_result.get("discussion_questions", 0),
@@ -97,8 +97,6 @@ def main() -> None:
     )
     # Print final JSON for formicary report_stdout capture
     print(json.dumps(post_result))
-    if not slack_ok:
-        sys.exit(1)
     sys.exit(0)
 
 

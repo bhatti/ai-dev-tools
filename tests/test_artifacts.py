@@ -39,7 +39,8 @@ def test_read_text_missing_returns_none(sample_config):
 
 def test_write_log_creates_logs_subdir(sample_config, tmp_workspace):
     write_log(sample_config, "42", "plan", "log output here")
-    log_path = tmp_workspace / "42" / "logs" / "plan.log"
+    # get_issue_dir returns workspace directly, so logs go to workspace/logs/
+    log_path = tmp_workspace / "logs" / "plan.log"
     assert log_path.exists()
     assert log_path.read_text() == "log output here"
 
