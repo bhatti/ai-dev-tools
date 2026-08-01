@@ -46,57 +46,75 @@ Use the `/ygs-standup` skill logic and `/ygs-risk-scan` skill logic to produce t
 You have all the data above — do NOT call any external APIs.
 
 ### Step 1 — Per-person status
-For each assignee who has at least one issue or PR, write 2-3 sentences:
-- What did they close or complete?
-- What are they currently working on (issue key/number + title)?
+For each person with assigned issues across ALL boards in all_sprints[]:
+- What did they complete or close?
+- What are they currently working on (ISSUE-KEY + title)?
 - Any blockers, stale items, or Slack signals?
-- Every claim must trace to an issue key/PR number or Slack message — never fabricate.
-- "No tracker activity in last {lookback_hours}h" if genuinely nothing.
+- Every claim must trace to an issue key/PR number — never fabricate.
+- If no issues assigned to someone: "No tracker activity in last {lookback_hours}h"
+- If issues list is empty: say "No issues found in sprint" — do NOT invent work.
 
-### Step 2 — Risk scan (apply ygs-risk-scan thresholds)
+### Step 2 — Per-board status table
+For each board in all_sprints[] (use all_sprints[].board and all_sprints[].name):
+- Count: total issues, done, in-progress, not-started
+- Days left until sprint end
+- Any HIGH risks for that board
+
+### Step 3 — Risk scan (apply ygs-risk-scan thresholds)
 Rank risks:
 - 🔴 HIGH — blocks another person's work OR sprint goal at risk if unaddressed today
   Triggers: issue stale >5d, PR open >4d no review, blocked label, dependency chain stale
 - 🟡 MEDIUM — bad trajectory, becomes HIGH within 2 days
   Triggers: issue stale >3d, PR open >2d no review, person silent in standup >2d
 - ℹ️ LOW — worth noting, not meeting time
+- Every risk line MUST include the assignee's first name in parentheses: e.g. "KEY (@Shahzad): reason"
 
-Include capacity check if sprint end_date is available:
-  remaining_days = sprint_end - today
-  velocity_needed = not_started_issues / remaining_days
-
-### Step 3 — Discussion questions
+### Step 4 — Discussion questions
 2-3 items requiring human judgment (not status recitation):
 - Blocked items that need a decision
 - Scope/priority trade-offs
 - Team bottlenecks (single reviewer, single expert, etc.)
+- Every discussion item MUST start with the Jira key and assignee's first name: "KEY (@Name): question"
 
-### Step 4 — Output format
-Produce TWO markdown sections:
+### Step 5 — Output format
 
-#### STANDUP_BRIEF (post this to Slack)
+You MUST produce output in EXACTLY this structure with EXACTLY these two delimiter lines:
+
+#### STANDUP_BRIEF
+<Slack message here — plain text only, no markdown>
+#### RISK_REPORT
+<Full risk detail here — Markdown is fine>
+
+Rules for STANDUP_BRIEF (this is the Slack message — plain text only):
+- No asterisks, no underscores, no backticks, no bold/italic — plain readable text only
+- No ## headings — use ALL CAPS labels like "BOARD STATUS", "STATUS", "RISKS", "DISCUSSION"
+- Bullets: use • (plain text bullet)
+- Keep entire Slack message under 1500 chars total
+- Reference issues as KEY only (e.g. CRIBL-1234)
+
+STANDUP_BRIEF must follow this exact template:
 ```
-📋 *Standup Brief — {today}*
+📋 Standup Brief — {today}
 
-*Per-person status*
-• **<name>:** <2-3 sentence status>
-...
+BOARD STATUS
+• <board name> / <sprint name>: <N> total, <N> done, <N> in-progress, <N> not started — <N> days left
 
-*Risks*
-🔴 ...
-🟡 ...
+STATUS
+• <Person>: working on KEY (summary). Completed: KEY. <blocker if any>
 
-*Discussion (bring to the meeting)*
-1. ...
-2. ...
+RISKS
+🔴 KEY (@assignee): one-line reason
+🟡 KEY (@assignee): one-line reason
 
-Sprint health: X/Y done (Z%), N days left  ← only if sprint data available
+DISCUSSION
+1. KEY (@assignee): question requiring human decision
+2. KEY (@assignee): question
 ```
 
-#### RISK_REPORT (full detail, saved as artifact)
-Full ranked risk list with recommended actions, dependency graph summary, capacity numbers.
+#### RISK_REPORT (full detail, saved as artifact — standard Markdown is fine here)
+Full ranked risk list with recommended actions, dependency graph summary, capacity numbers per board.
 
-### Step 5 — Exit JSON (last line of output, required)
+### Step 6 — Exit JSON (last line of output, required)
 ```json
 {{"status":"DONE","risk_count":<N_high_and_medium>,"discussion_questions":<N>,"silence_count":<N_with_no_activity>}}
 ```
@@ -152,6 +170,27 @@ def _clean_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _truncate_brief(text: str) -> str:
+    """Remove any risk report content that leaked into the brief.
+
+    Cuts at the first line that starts a risk report section or at the
+    ```json status line, whichever comes first.
+    """
+    import re
+    stop_patterns = [
+        r"^#{1,4}\s+RISK",        # ## RISK REPORT heading
+        r"^RISK REPORT",           # plain heading
+        r"^---\s*$",               # horizontal rule separator
+        r"^```json",               # status JSON fence
+    ]
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        for pat in stop_patterns:
+            if re.match(pat, line.strip(), re.IGNORECASE):
+                return "\n".join(lines[:i]).strip()
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -189,12 +228,12 @@ def main() -> None:
 
     output = result.output
 
-    brief = _clean_code_fence(_extract_section(output, "STANDUP_BRIEF"))
+    brief = _truncate_brief(_clean_code_fence(_extract_section(output, "STANDUP_BRIEF")))
     risk_report = _clean_code_fence(_extract_section(output, "RISK_REPORT"))
 
-    # Fallback: if sections not found, use the full output as the brief
+    # Fallback: if sections not found, use the full output as the brief (truncated)
     if not brief:
-        brief = output.strip()
+        brief = _truncate_brief(output.strip())
 
     (workspace_dir / "standup_brief.md").write_text(brief)
     if risk_report:

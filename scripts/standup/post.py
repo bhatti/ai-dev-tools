@@ -10,8 +10,11 @@ Optional env:
 Reads:  /workspace/standup_brief.md
         /workspace/risk_report.md    (optional)
         /workspace/synthesize_result.json
-Writes: /workspace/standup_report.md   combined report artifact
+Writes: /workspace/standup_report.md   combined report artifact (job artifact)
         /workspace/post_result.json
+
+Note: standup_report.html is written by render_html.py (also a job artifact).
+      HTML/MD are available in the Formicary job artifacts; Slack gets plain text only.
 
 Exit codes: 0=done, 1=error
 """
@@ -58,20 +61,21 @@ def main() -> None:
         except json.JSONDecodeError:
             pass
 
-    # Build combined artifact
+    today = date.today().isoformat()
+
+    # Build combined Markdown artifact (job artifact — full detail)
     combined_parts = [
-        f"# Standup Report — {date.today().isoformat()}",
+        f"# Standup Report — {today}",
         "",
         brief,
     ]
     if risk_report:
         combined_parts += ["", "---", "", "## Full Risk Report", "", risk_report]
 
-    combined = "\n".join(combined_parts)
-    (workspace_dir / "standup_report.md").write_text(combined)
+    (workspace_dir / "standup_report.md").write_text("\n".join(combined_parts))
     print("[post] standup_report.md written", flush=True)
 
-    # Post to Slack
+    # Post plain text brief to Slack
     slack_ok = post_message(config, brief)
 
     post_result = {
@@ -84,7 +88,7 @@ def main() -> None:
         "pr_count": gather_result.get("pr_count", 0),
         "slack_message_count": gather_result.get("slack_message_count", 0),
         "sprint": gather_result.get("sprint", ""),
-        "date": date.today().isoformat(),
+        "date": today,
     }
     (workspace_dir / "post_result.json").write_text(json.dumps(post_result, indent=2))
 
@@ -95,7 +99,6 @@ def main() -> None:
         f"questions={post_result['discussion_questions']}",
         flush=True,
     )
-    # Print final JSON for formicary report_stdout capture
     print(json.dumps(post_result))
     sys.exit(0)
 

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.standup.slack_client import get_standup_messages, notify, post_message, resolve_channel_id
+from scripts.standup.slack_client import get_standup_messages, notify, post_message, resolve_channel_id, upload_file
 
 
 @pytest.fixture
@@ -151,3 +151,56 @@ def test_notify_custom_channel_key(mock_post, tmp_workspace):
     ok = notify(config, "✅ PR merged", channel_key="SLACK_STANDUP_CHANNEL")
     assert ok is True
     assert mock_post.call_args.kwargs["json"]["channel"] == "#standup-alerts"
+
+
+# ---------------------------------------------------------------------------
+# upload_file
+# ---------------------------------------------------------------------------
+
+def test_upload_file_no_token(tmp_workspace, config_no_slack):
+    (tmp_workspace / "report.html").write_text("<html/>")
+    ok = upload_file(config_no_slack, str(tmp_workspace / "report.html"), "report.html")
+    assert ok is False
+
+
+@patch("scripts.standup.slack_client.requests.get")
+@patch("scripts.standup.slack_client.requests.put")
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_file_success(mock_post, mock_put, mock_get, config_with_slack, tmp_workspace):
+    html_file = tmp_workspace / "report.html"
+    html_file.write_text("<html><body>Report</body></html>")
+
+    # conversations.list for resolve_channel_id
+    mock_get.return_value = MagicMock(ok=True, json=lambda: {
+        "ok": True,
+        "channels": [{"id": "C123", "name": "standup"}],
+        "response_metadata": {"next_cursor": ""},
+    })
+    # getUploadURLExternal then completeUploadExternal
+    mock_post.side_effect = [
+        MagicMock(ok=True, json=lambda: {
+            "ok": True, "upload_url": "https://files.slack.com/upload/v1/xyz", "file_id": "F123"
+        }),
+        MagicMock(ok=True, json=lambda: {"ok": True}),
+    ]
+    mock_put.return_value = MagicMock(ok=True)
+
+    ok = upload_file(config_with_slack, str(html_file), "report.html",
+                     initial_comment="Full report")
+    assert ok is True
+    # PUT called with the upload URL
+    assert mock_put.call_args.args[0] == "https://files.slack.com/upload/v1/xyz"
+    # completeUploadExternal called with channel_id and file_id
+    complete_payload = mock_post.call_args_list[1].kwargs["json"]
+    assert complete_payload["channel_id"] == "C123"
+    assert complete_payload["files"][0]["id"] == "F123"
+    assert complete_payload["initial_comment"] == "Full report"
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_file_get_url_fails(mock_post, config_with_slack, tmp_workspace):
+    html_file = tmp_workspace / "report.html"
+    html_file.write_text("<html/>")
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": False, "error": "not_allowed"})
+    ok = upload_file(config_with_slack, str(html_file), "report.html")
+    assert ok is False

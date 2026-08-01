@@ -99,6 +99,80 @@ def get_standup_messages(config: dict, lookback_hours: int = 26) -> list[dict]:
     return messages
 
 
+def upload_file(config: dict, file_path: str, filename: str, channel: str | None = None,
+                initial_comment: str = "") -> bool:
+    """Upload a file to Slack using the v2 upload API (getUploadURLExternal flow).
+
+    Requires the files:write scope.
+    Returns True on success, False (no exception) on any failure.
+    Silently skips when SLACK_BOT_TOKEN is absent.
+    """
+    token = config.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        print("[slack] SLACK_BOT_TOKEN not set — cannot upload file", flush=True)
+        return False
+
+    import os
+    file_size = os.path.getsize(file_path)
+
+    # Step 1: request an upload URL
+    resp = requests.post(
+        "https://slack.com/api/files.getUploadURLExternal",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"filename": filename, "length": file_size},
+        timeout=20,
+    )
+    if not resp.ok:
+        print(f"[slack] getUploadURLExternal HTTP {resp.status_code}", file=sys.stderr, flush=True)
+        return False
+    data = resp.json()
+    if not data.get("ok"):
+        print(f"[slack] getUploadURLExternal error: {data.get('error', 'unknown')}", file=sys.stderr, flush=True)
+        return False
+    upload_url = data["upload_url"]
+    file_id = data["file_id"]
+
+    # Step 2: PUT the file content to the upload URL
+    with open(file_path, "rb") as fh:
+        put_resp = requests.put(upload_url, data=fh, timeout=60)
+    if not put_resp.ok:
+        print(f"[slack] file PUT HTTP {put_resp.status_code}", file=sys.stderr, flush=True)
+        return False
+
+    # Step 3: complete the upload and share to channel
+    ch = channel or config.get("SLACK_STANDUP_CHANNEL", "standup")
+    if not ch.startswith("#"):
+        ch = f"#{ch}"
+    channel_id = resolve_channel_id(token, ch.lstrip("#"))
+    if not channel_id:
+        print(f"[slack] channel '{ch}' not found — cannot complete upload", flush=True)
+        return False
+
+    complete_payload = {
+        "files": [{"id": file_id}],
+        "channel_id": channel_id,
+    }
+    if initial_comment:
+        complete_payload["initial_comment"] = initial_comment
+
+    complete_resp = requests.post(
+        "https://slack.com/api/files.completeUploadExternal",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=complete_payload,
+        timeout=20,
+    )
+    if not complete_resp.ok:
+        print(f"[slack] completeUploadExternal HTTP {complete_resp.status_code}", file=sys.stderr, flush=True)
+        return False
+    result = complete_resp.json()
+    if not result.get("ok"):
+        print(f"[slack] completeUploadExternal error: {result.get('error', 'unknown')}", file=sys.stderr, flush=True)
+        return False
+
+    print(f"[slack] file '{filename}' uploaded to {ch}", flush=True)
+    return True
+
+
 def post_message(config: dict, text: str, channel: str | None = None) -> bool:
     """Post a message to Slack. Returns True on success, False (no exception) on failure."""
     token = config.get("SLACK_BOT_TOKEN", "")
@@ -113,7 +187,7 @@ def post_message(config: dict, text: str, channel: str | None = None) -> bool:
     resp = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"channel": ch, "text": text, "unfurl_links": False},
+        json={"channel": ch, "text": text, "unfurl_links": False, "mrkdwn": True},
         timeout=20,
     )
     if not resp.ok:

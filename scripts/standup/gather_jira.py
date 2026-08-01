@@ -80,31 +80,115 @@ def _discover_jira_project(config: dict) -> str:
     )
 
 
-def get_active_sprint(config: dict) -> dict | None:
-    """Return the first active sprint for the project's board, or None."""
-    board_resp = requests.get(
-        f"{_jira_base(config)}/rest/agile/1.0/board",
-        headers=_jira_headers(config),
-        params={"projectKeyOrId": config["JIRA_PROJECT"], "maxResults": 1},
-        timeout=20,
-    )
-    if not board_resp.ok:
-        print(f"[gather_jira] board list error {board_resp.status_code}: {board_resp.text[:200]}", file=sys.stderr, flush=True)
-        return None
-    boards = board_resp.json().get("values", [])
-    if not boards:
-        return None
-    board_id = boards[0]["id"]
+def _fetch_project_boards(config: dict) -> list[dict]:
+    """Fetch all boards for JIRA_PROJECT (paginated, no cap)."""
+    project = config.get("JIRA_PROJECT", "")
+    if not project:
+        return []
+    base = _jira_base(config)
+    headers = _jira_headers(config)
+    boards: list[dict] = []
+    start_at = 0
+    while True:
+        resp = requests.get(
+            f"{base}/rest/agile/1.0/board",
+            headers=headers,
+            params={"projectKeyOrId": project, "maxResults": 50, "startAt": start_at},
+            timeout=20,
+        )
+        if not resp.ok:
+            print(f"[gather_jira] board list error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+            break
+        data = resp.json()
+        batch = data.get("values", [])
+        boards.extend(batch)
+        if data.get("isLast", True) or not batch:
+            break
+        start_at += len(batch)
+    return boards
 
-    sprint_resp = requests.get(
-        f"{_jira_base(config)}/rest/agile/1.0/board/{board_id}/sprint",
+
+def _get_my_sprint_ids(config: dict) -> set[int]:
+    """Return sprint IDs of all open sprints that contain currentUser()'s issues."""
+    resp = requests.get(
+        f"{_jira_base(config)}/rest/api/3/search/jql",
         headers=_jira_headers(config),
-        params={"state": "active", "maxResults": 1},
-        timeout=20,
+        params={
+            "jql": "assignee = currentUser() AND sprint in openSprints()",
+            "maxResults": 100,
+            "fields": "customfield_10010",  # sprint field (Jira Cloud standard)
+        },
+        timeout=30,
     )
-    if not sprint_resp.ok:
-        return None
-    sprints = sprint_resp.json().get("values", [])
+    if not resp.ok:
+        return set()
+    sprint_ids: set[int] = set()
+    for issue in resp.json().get("issues", []):
+        for s in (issue.get("fields", {}).get("customfield_10010") or []):
+            if isinstance(s, dict) and s.get("state") == "active":
+                sprint_ids.add(s["id"])
+    return sprint_ids
+
+
+def get_active_sprints(config: dict) -> list[dict]:
+    """Return active sprints relevant to the current user.
+
+    Strategy:
+    1. Find all sprint IDs that contain the current user's open issues.
+    2. Find those sprints on all CRIBL scrum boards (to get board name + sprint detail).
+    3. Fall back to the first board's sprint if user has no sprint-based issues.
+    """
+    my_sprint_ids = _get_my_sprint_ids(config)
+    print(f"[gather_jira] current user is in {len(my_sprint_ids)} active sprint(s): {my_sprint_ids}", flush=True)
+
+    all_boards = _fetch_project_boards(config)
+    scrum_boards = [b for b in all_boards if b.get("type", "").lower() == "scrum"]
+
+    base = _jira_base(config)
+    headers = _jira_headers(config)
+
+    # Collect all active sprints from all scrum boards, tag with board name
+    all_active: dict[int, dict] = {}  # sprint_id → sprint (with _board_name list)
+    for board in scrum_boards:
+        board_id = board["id"]
+        board_name = board.get("name", str(board_id))
+        resp = requests.get(
+            f"{base}/rest/agile/1.0/board/{board_id}/sprint",
+            headers=headers,
+            params={"state": "active", "maxResults": 10},
+            timeout=20,
+        )
+        if not resp.ok:
+            continue
+        for sprint in resp.json().get("values", []):
+            sid = sprint["id"]
+            if sid not in all_active:
+                sprint["_board_names"] = [board_name]
+                sprint["_board_name"] = board_name
+                all_active[sid] = sprint
+            else:
+                all_active[sid]["_board_names"].append(board_name)
+
+    if not all_active:
+        return []
+
+    # If we know which sprints the user is in, return only those
+    if my_sprint_ids:
+        relevant = [all_active[sid] for sid in my_sprint_ids if sid in all_active]
+        if relevant:
+            names = [(s.get("name","?"), s.get("_board_names",[])) for s in relevant]
+            print(f"[gather_jira] user's sprints: {names}", flush=True)
+            return relevant
+
+    # Fallback: return the first active sprint found (configured project board)
+    first = next(iter(all_active.values()))
+    print(f"[gather_jira] fallback: using first active sprint {first.get('name')} on {first.get('_board_name')}", flush=True)
+    return [first]
+
+
+def get_active_sprint(config: dict) -> dict | None:
+    """Return the first active sprint found across all boards, or None."""
+    sprints = get_active_sprints(config)
     return sprints[0] if sprints else None
 
 
@@ -145,6 +229,30 @@ def search_open_issues(config: dict) -> list[dict]:
         print(f"[gather_jira] search error {resp.status_code}: {resp.text}", file=sys.stderr)
         return []
     return resp.json().get("issues", [])
+
+
+def search_my_open_issues(config: dict) -> list[dict]:
+    """Return all open issues assigned to currentUser() across all projects.
+
+    This catches work that lives outside any sprint (backlog, kanban, cross-project).
+    """
+    jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+    resp = requests.get(
+        f"{_jira_base(config)}/rest/api/3/search/jql",
+        headers=_jira_headers(config),
+        params={
+            "jql": jql,
+            "maxResults": 100,
+            "fields": "summary,status,assignee,updated,labels,priority,comment",
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f"[gather_jira] my-issues search error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+        return []
+    issues = resp.json().get("issues", [])
+    print(f"[gather_jira] {len(issues)} open issues assigned to currentUser()", flush=True)
+    return issues
 
 
 def _extract_embedded_comments(fields: dict, lookback_hours: int) -> list[dict]:
@@ -236,9 +344,11 @@ def main() -> None:
     lookback_hours = int(config.get("STANDUP_LOOKBACK_HOURS", "26"))
     stale_days = int(config.get("STANDUP_STALE_DAYS", "2"))
     stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
-    team_filter = [
-        m.strip() for m in config.get("STANDUP_TEAM_MEMBERS", "").split(",") if m.strip()
-    ]
+    raw_team = config.get("STANDUP_TEAM_MEMBERS", "").strip()
+    # Treat Formicary's un-set template value as empty
+    if raw_team in ("<no value>", "{{.StandupTeamMembers}}"):
+        raw_team = ""
+    team_filter = [m.strip() for m in raw_team.split(",") if m.strip()]
 
     print(f"[gather_jira] project={config['JIRA_PROJECT']} lookback={lookback_hours}h stale_after={stale_days}d", flush=True)
 
@@ -254,23 +364,51 @@ def main() -> None:
         )
     print(f"[gather_jira] logged in as: {me.get('displayName', '?')}", flush=True)
 
-    sprint = get_active_sprint(config)
+    active_sprints = get_active_sprints(config)
     sprint_info: dict = {}
-    if sprint:
-        sprint_info = {
-            "id": sprint["id"],
-            "name": sprint.get("name", ""),
-            "state": sprint.get("state", ""),
-            "start_date": sprint.get("startDate", ""),
-            "end_date": sprint.get("endDate", ""),
-        }
-        print(f"[gather_jira] sprint: {sprint_info['name']} ends {sprint_info['end_date']}", flush=True)
-        raw_issues = get_sprint_issues(config, sprint["id"])
+    all_sprint_infos: list[dict] = []
+    seen_keys: set[str] = set()
+    raw_issues: list[dict] = []
+    if active_sprints:
+        # Dedupe sprints by sprint id — multiple boards often share the same sprint
+        seen_sprint_ids: set[int] = set()
+        for sprint in active_sprints:
+            board_names = sprint.get("_board_names") or [sprint.get("_board_name", "")]
+            s_info = {
+                "id": sprint["id"],
+                "name": sprint.get("name", ""),
+                "board": " · ".join(board_names),
+                "state": sprint.get("state", ""),
+                "start_date": sprint.get("startDate", ""),
+                "end_date": sprint.get("endDate", ""),
+            }
+            all_sprint_infos.append(s_info)
+            if sprint["id"] in seen_sprint_ids:
+                continue
+            seen_sprint_ids.add(sprint["id"])
+            print(f"[gather_jira] sprint: {s_info['name']} (boards: {s_info['board']}) ends {s_info['end_date']}", flush=True)
+            for issue in get_sprint_issues(config, sprint["id"]):
+                if issue.get("key") not in seen_keys:
+                    seen_keys.add(issue["key"])
+                    raw_issues.append(issue)
+        sprint_info = all_sprint_infos[0]
     else:
         print("[gather_jira] no active sprint — querying open project issues", flush=True)
-        raw_issues = search_open_issues(config)
+        for issue in search_open_issues(config):
+            if issue.get("key") not in seen_keys:
+                seen_keys.add(issue["key"])
+                raw_issues.append(issue)
 
-    print(f"[gather_jira] {len(raw_issues)} issues fetched", flush=True)
+    # Always merge issues assigned to the current user — they may be in a different
+    # board/sprint or not in any sprint (backlog/kanban). This ensures the standup
+    # includes the authenticated user's own work regardless of sprint structure.
+    my_issues = search_my_open_issues(config)
+    for issue in my_issues:
+        if issue.get("key") not in seen_keys:
+            seen_keys.add(issue["key"])
+            raw_issues.append(issue)
+
+    print(f"[gather_jira] {len(raw_issues)} issues total after merging my issues", flush=True)
     issues = [_normalise_issue(r, stale_cutoff, config, lookback_hours) for r in raw_issues]
 
     if team_filter:
@@ -287,6 +425,7 @@ def main() -> None:
         "tracker": "jira",
         "current_user": me,
         "sprint": sprint_info,
+        "all_sprints": all_sprint_infos,
         "issues": issues,
         "open_prs": open_prs,
         "slack_messages": slack_messages,

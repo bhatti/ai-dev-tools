@@ -46,7 +46,7 @@ def ensure_repo_clone(
     """
     http_token = config.get("BITBUCKET_TOKEN", "")
     ssh_key = config.get("SSH_PRIVATE_KEY", "")
-    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+    http_username = config.get("BITBUCKET_GIT_USERNAME") or config.get("BITBUCKET_USERNAME", "x-token-auth")
 
     if http_token:
         clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
@@ -94,7 +94,7 @@ def respond_to_comment(
 ) -> None:
     issue_dir = get_issue_dir(config, issue_id)
     http_token = config.get("BITBUCKET_TOKEN", "")
-    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+    http_username = config.get("BITBUCKET_GIT_USERNAME") or config.get("BITBUCKET_USERNAME", "x-token-auth")
     author = comment.get("author", {}).get("nickname", "unknown")
     body = comment.get("content", {}).get("raw", "") or comment.get("body", "")
     comment_id = comment.get("id")

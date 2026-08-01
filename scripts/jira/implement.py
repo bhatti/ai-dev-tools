@@ -104,7 +104,8 @@ def main(issue_id: str) -> None:
 
     if http_token:
         clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
-        http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+        # git HTTPS requires account nickname, not email
+        http_username = config.get("BITBUCKET_GIT_USERNAME") or config.get("BITBUCKET_USERNAME", "x-token-auth")
         print(f"Cloning {workspace}/{repo_name} via HTTPS token")
         clone_repo(clone_url, repo_dir, http_token=http_token, http_username=http_username)
     else:

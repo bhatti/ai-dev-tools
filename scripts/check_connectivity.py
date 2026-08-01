@@ -242,6 +242,11 @@ def check_claude() -> None:
         _skip("claude", "neither CLAUDE_CODE_USE_BEDROCK=1 nor ANTHROPIC_API_KEY set")
         return
 
+    # Derive the Aperture proxy base URL from the bedrock URL (strip /bedrock suffix if present)
+    proxy_base = bedrock_url
+    if proxy_base.endswith("/bedrock"):
+        proxy_base = proxy_base[: -len("/bedrock")]
+
     model = (
         os.environ.get("AI_MODEL")
         or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
@@ -249,6 +254,27 @@ def check_claude() -> None:
     )
 
     if use_bedrock:
+        # Check proxy reachability and list available models via /v1/models
+        models_url = f"{proxy_base}/v1/models"
+        try:
+            resp = requests.get(models_url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                model_ids = [m.get("id", m) if isinstance(m, dict) else str(m) for m in data.get("models", data if isinstance(data, list) else [])]
+                model_found = model in model_ids
+                _record(
+                    "claude-models",
+                    True,
+                    f"proxy reachable at {proxy_base} — {len(model_ids)} models, "
+                    f"target model {'found' if model_found else 'NOT FOUND'}: {model}",
+                )
+                if not model_found and model_ids:
+                    print(f"    Available models: {', '.join(model_ids[:5])}{'...' if len(model_ids) > 5 else ''}", flush=True)
+            else:
+                _record("claude-models", False, f"GET {models_url} => HTTP {resp.status_code}: {resp.text[:120]}")
+        except Exception as e:
+            _record("claude-models", False, f"cannot reach {models_url}: {e}")
+
         # Hit the Bedrock proxy's messages endpoint directly with a minimal prompt
         url = f"{bedrock_url}/v1/messages"
         headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}

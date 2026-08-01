@@ -137,7 +137,15 @@ def test_slack_fail(mock_get, tmp_workspace, monkeypatch):
 # ---------------------------------------------------------------------------
 
 @patch("scripts.check_connectivity.requests.post")
-def test_claude_bedrock_ok(mock_post, tmp_workspace, monkeypatch):
+@patch("scripts.check_connectivity.requests.get")
+def test_claude_bedrock_ok(mock_get, mock_post, tmp_workspace, monkeypatch):
+    mock_get.return_value = MagicMock(
+        status_code=200, ok=True,
+        json=lambda: {"models": [
+            {"id": "us.anthropic.claude-sonnet-4-6"},
+            {"id": "us.anthropic.claude-opus-4-6-v1"},
+        ]},
+    )
     mock_post.return_value = MagicMock(
         status_code=200, ok=True,
         json=lambda: {"content": [{"text": "OK"}]},
@@ -147,13 +155,21 @@ def test_claude_bedrock_ok(mock_post, tmp_workspace, monkeypatch):
         "ANTHROPIC_BEDROCK_BASE_URL": "http://ai/bedrock",
         "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
     })
+    models_check = next(r for r in result["checks"] if r["check"] == "claude-models")
+    assert models_check["status"] == "OK"
+    assert "2 models" in models_check["detail"]
     claude = next(r for r in result["checks"] if r["check"] == "claude-bedrock")
     assert claude["status"] == "OK"
     assert "OK" in claude["detail"]
 
 
 @patch("scripts.check_connectivity.requests.post")
-def test_claude_bedrock_fail(mock_post, tmp_workspace, monkeypatch):
+@patch("scripts.check_connectivity.requests.get")
+def test_claude_bedrock_fail(mock_get, mock_post, tmp_workspace, monkeypatch):
+    mock_get.return_value = MagicMock(
+        status_code=200, ok=True,
+        json=lambda: {"models": [{"id": "us.anthropic.claude-sonnet-4-6"}]},
+    )
     mock_post.return_value = MagicMock(
         status_code=500, ok=False, text="Internal Server Error",
     )

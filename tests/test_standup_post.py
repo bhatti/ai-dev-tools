@@ -6,17 +6,19 @@ from unittest.mock import patch
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-
 BRIEF = """\
-📋 *Standup Brief — 2026-07-17*
+📋 Standup Brief — 2026-07-17
 
-• **Alice:** Working on PROJ-1.
+BOARD STATUS
+• My Board / Sprint 1: 10 total, 3 done, 5 in-progress, 2 not started — 3 days left
 
-🔴 PROJ-5 blocked 3d — needs decision.
+STATUS
+• Alice: working on PROJ-1 (Fix bug). Completed: PROJ-0.
 
+RISKS
+🔴 PROJ-5: blocked 3d — needs decision
+
+DISCUSSION
 1. Descope PROJ-5 or reassign?
 """
 
@@ -98,3 +100,23 @@ def test_main_no_risk_report(mock_post, tmp_workspace, monkeypatch):
 
     report = (tmp_workspace / "standup_report.md").read_text()
     assert "Full Risk Report" not in report
+
+
+@patch("scripts.standup.post.post_message", return_value=True)
+def test_slack_text_is_plain_text(mock_post, tmp_workspace, monkeypatch):
+    """Slack brief must have no markdown bold/italic syntax."""
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
+
+    (tmp_workspace / "standup_brief.md").write_text(BRIEF)
+    (tmp_workspace / "synthesize_result.json").write_text(json.dumps(SYNTH_RESULT))
+
+    from scripts.standup.post import main
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 0
+
+    slack_text = mock_post.call_args.args[1]
+    # Must not contain markdown bold (double-asterisk) — single asterisk in PROJ-* names is fine
+    assert "**" not in slack_text
+    # Must contain the board status section
+    assert "BOARD STATUS" in slack_text or "Board Status" in slack_text or "My Board" in slack_text
