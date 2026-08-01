@@ -12,7 +12,7 @@ def config_with_slack(tmp_workspace):
     return {
         "WORKSPACE_DIR": str(tmp_workspace),
         "SLACK_BOT_TOKEN": "xoxb-test",
-        "SLACK_STANDUP_CHANNEL": "standup",
+        "SLACK_CHANNEL": "standup",
     }
 
 
@@ -146,9 +146,9 @@ def test_notify_custom_channel_key(mock_post, tmp_workspace):
     config = {
         "WORKSPACE_DIR": str(tmp_workspace),
         "SLACK_BOT_TOKEN": "xoxb-test",
-        "SLACK_STANDUP_CHANNEL": "standup-alerts",
+        "SLACK_CHANNEL": "standup-alerts",
     }
-    ok = notify(config, "✅ PR merged", channel_key="SLACK_STANDUP_CHANNEL")
+    ok = notify(config, "✅ PR merged", channel_key="SLACK_CHANNEL")
     assert ok is True
     assert mock_post.call_args.kwargs["json"]["channel"] == "#standup-alerts"
 

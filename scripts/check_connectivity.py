@@ -11,7 +11,7 @@ Optional env (checks skipped when absent):
     GH_TOKEN, GH_ORG, GH_REPO
     JIRA_API_TOKEN, JIRA_EMAIL, JIRA_BASE_URL
     BITBUCKET_TOKEN, BITBUCKET_USERNAME, BITBUCKET_WORKSPACE, BITBUCKET_REPO
-    SLACK_BOT_TOKEN, SLACK_STANDUP_CHANNEL (or SLACK_CHANNEL)
+    SLACK_BOT_TOKEN, SLACK_CHANNEL (or SLACK_CHANNEL)
     CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_API_KEY, ANTHROPIC_BEDROCK_BASE_URL
 """
 
@@ -190,9 +190,9 @@ def check_slack() -> None:
         _record("slack", False, str(e))
 
     # Channel access
-    channel = os.environ.get("SLACK_STANDUP_CHANNEL", "") or os.environ.get("SLACK_CHANNEL", "")
+    channel = os.environ.get("SLACK_CHANNEL", "") or os.environ.get("SLACK_CHANNEL", "")
     if not channel:
-        _skip("slack-channel", "SLACK_STANDUP_CHANNEL / SLACK_CHANNEL not set")
+        _skip("slack-channel", "SLACK_CHANNEL / SLACK_CHANNEL not set")
         return
     channel_name = channel.lstrip("#")
     try:

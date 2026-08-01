@@ -6,7 +6,7 @@ Usage:
 Required env: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT
 Optional env:
     BITBUCKET_WORKSPACE, BITBUCKET_REPO, BITBUCKET_USERNAME, BITBUCKET_TOKEN
-    SLACK_BOT_TOKEN, SLACK_STANDUP_CHANNEL (default: standup)
+    SLACK_BOT_TOKEN, SLACK_CHANNEL (default: standup)
     STANDUP_TEAM_MEMBERS  comma-separated Jira displayNames to scope brief;
                           default is all assignees with open sprint work
     STANDUP_LOOKBACK_HOURS   hours of history to consider (default: 26)
@@ -434,7 +434,7 @@ def main() -> None:
             "jira_base_url": config["JIRA_BASE_URL"],
             "lookback_hours": lookback_hours,
             "stale_days": stale_days,
-            "slack_channel": config.get("SLACK_STANDUP_CHANNEL", "standup"),
+            "slack_channel": config.get("SLACK_CHANNEL", "standup"),
             "team_filter": team_filter,
         },
     }

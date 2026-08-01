@@ -5,7 +5,7 @@ Usage:
 
 Optional env:
     SLACK_BOT_TOKEN          — if set, posts brief to the standup channel
-    SLACK_STANDUP_CHANNEL    — channel name (default: standup)
+    SLACK_CHANNEL    — channel name (default: standup)
 
 Reads:  /workspace/standup_brief.md
         /workspace/risk_report.md    (optional)

@@ -5,7 +5,7 @@ Usage:
 
 Required env: GH_ORG, GH_REPO, GH_TOKEN
 Optional env:
-    SLACK_BOT_TOKEN, SLACK_STANDUP_CHANNEL (default: standup)
+    SLACK_BOT_TOKEN, SLACK_CHANNEL (default: standup)
     STANDUP_TEAM_MEMBERS  comma-separated GitHub logins to scope brief;
                           default is all assignees with open issues
     STANDUP_LOOKBACK_HOURS   hours of history to consider (default: 26)
@@ -223,7 +223,7 @@ def main() -> None:
             "gh_repo": config["GH_REPO"],
             "lookback_hours": lookback_hours,
             "stale_days": stale_days,
-            "slack_channel": config.get("SLACK_STANDUP_CHANNEL", "standup"),
+            "slack_channel": config.get("SLACK_CHANNEL", "standup"),
             "team_filter": team_filter,
         },
     }

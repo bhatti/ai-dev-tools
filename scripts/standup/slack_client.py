@@ -2,7 +2,7 @@
 
 Required env (optional — gracefully skipped when absent):
     SLACK_BOT_TOKEN         xoxb-... bot token
-    SLACK_STANDUP_CHANNEL   channel name without '#' (default: standup)
+    SLACK_CHANNEL   channel name without '#' (default: standup)
 
 Bot scopes needed: channels:history, channels:read, groups:history, groups:read,
                    chat:write, users:read
@@ -71,7 +71,7 @@ def get_standup_messages(config: dict, lookback_hours: int = 26) -> list[dict]:
         print("[slack] SLACK_BOT_TOKEN not set — skipping Slack signals", flush=True)
         return []
 
-    channel_name = config.get("SLACK_STANDUP_CHANNEL", "standup")
+    channel_name = config.get("SLACK_CHANNEL", "standup")
     channel_id = resolve_channel_id(token, channel_name)
     if not channel_id:
         print(f"[slack] channel '{channel_name}' not found — skipping", flush=True)
@@ -140,7 +140,7 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
         return False
 
     # Step 3: complete the upload and share to channel
-    ch = channel or config.get("SLACK_STANDUP_CHANNEL", "standup")
+    ch = channel or config.get("SLACK_CHANNEL", "standup")
     if not ch.startswith("#"):
         ch = f"#{ch}"
     channel_id = resolve_channel_id(token, ch.lstrip("#"))
@@ -180,7 +180,7 @@ def post_message(config: dict, text: str, channel: str | None = None) -> bool:
         print("[slack] SLACK_BOT_TOKEN not set — cannot post brief", flush=True)
         return False
 
-    ch = channel or config.get("SLACK_STANDUP_CHANNEL", "standup")
+    ch = channel or config.get("SLACK_CHANNEL", "standup")
     if not ch.startswith("#"):
         ch = f"#{ch}"
 
