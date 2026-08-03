@@ -75,8 +75,9 @@ def main() -> None:
     (workspace_dir / "standup_report.md").write_text("\n".join(combined_parts))
     print("[post] standup_report.md written", flush=True)
 
-    # Post plain text brief to Slack
-    slack_ok = post_message(config, brief)
+    # Post plain text brief to Slack — always reply to the thread when SlackThreadTs is set
+    thread_ts = config.get("SLACK_THREAD_TS") or None
+    slack_ok = post_message(config, brief, thread_ts=thread_ts)
 
     post_result = {
         "status": "DONE",

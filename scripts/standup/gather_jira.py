@@ -135,7 +135,7 @@ def get_active_sprints(config: dict) -> list[dict]:
 
     Strategy:
     1. Find all sprint IDs that contain the current user's open issues.
-    2. Find those sprints on all CRIBL scrum boards (to get board name + sprint detail).
+    2. Find those sprints on all scrum boards (to get board name + sprint detail).
     3. Fall back to the first board's sprint if user has no sprint-based issues.
     """
     my_sprint_ids = _get_my_sprint_ids(config)

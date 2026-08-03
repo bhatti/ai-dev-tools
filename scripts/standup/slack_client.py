@@ -173,8 +173,13 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
     return True
 
 
-def post_message(config: dict, text: str, channel: str | None = None) -> bool:
-    """Post a message to Slack. Returns True on success, False (no exception) on failure."""
+def post_message(config: dict, text: str, channel: str | None = None,
+                 thread_ts: str | None = None) -> bool:
+    """Post a message to Slack. Returns True on success, False (no exception) on failure.
+
+    If thread_ts is provided (or SLACK_THREAD_TS is set in config), the message
+    is posted as a thread reply instead of to the channel root.
+    """
     token = config.get("SLACK_BOT_TOKEN", "")
     if not token:
         print("[slack] SLACK_BOT_TOKEN not set — cannot post brief", flush=True)
@@ -184,10 +189,15 @@ def post_message(config: dict, text: str, channel: str | None = None) -> bool:
     if not ch.startswith("#"):
         ch = f"#{ch}"
 
+    payload: dict = {"channel": ch, "text": text, "unfurl_links": False, "mrkdwn": True}
+    ts = thread_ts or config.get("SLACK_THREAD_TS", "") or None
+    if ts:
+        payload["thread_ts"] = ts
+
     resp = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"channel": ch, "text": text, "unfurl_links": False, "mrkdwn": True},
+        json=payload,
         timeout=20,
     )
     if not resp.ok:
@@ -197,7 +207,8 @@ def post_message(config: dict, text: str, channel: str | None = None) -> bool:
     if not data.get("ok"):
         print(f"[slack] post_message error: {data.get('error', 'unknown')}", file=sys.stderr, flush=True)
         return False
-    print(f"[slack] brief posted to {ch}", flush=True)
+    dest = f"{ch} (thread)" if ts else ch
+    print(f"[slack] brief posted to {dest}", flush=True)
     return True
 
 
@@ -216,3 +227,13 @@ def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL") -> bool:
         print(f"[slack] {channel_key} not set — skipping notification", flush=True)
         return False
     return post_message(config, text, channel=channel)
+
+
+if __name__ == "__main__":
+    import os
+    import sys
+    _config = dict(os.environ)
+    _ts = _config.get("SLACK_THREAD_TS") or None
+    _skill = _config.get("SKILL_NAME") or _config.get("JOB_TYPE", "job")
+    _text = _config.get("MESSAGE") or (sys.argv[1] if len(sys.argv) > 1 else f":x: {_skill} failed. Check Formicary logs.")
+    post_message(_config, _text, thread_ts=_ts)

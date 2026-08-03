@@ -1,0 +1,182 @@
+# Slack router workflow registry.
+#
+# Each entry maps a Slack intent to a formicary job_type.
+# Add entries here to expose new commands — no code changes needed.
+#
+# Supported Slack commands (replace @bot with your bot's name):
+#
+#   STANDUP / STATUS
+#     @bot standup                     → ai-standup-jira (or ai-standup-gh if DEFAULT_TRACKER=github)
+#     @bot status
+#
+#   SPRINT HEALTH
+#     @bot risk scan                   → ai-adhoc (ygs-risk-scan)
+#
+#   OPEN PRS
+#     @bot prs                         → ai-adhoc (lists open PRs grouped by author/reviewer)
+#     @bot open prs
+#     @bot review queue
+#     @bot pull requests
+#
+#   PR COMMENTS / FEEDBACK
+#     @bot pr comments <url>           → ai-adhoc (comments + inline feedback + tasks for a PR)
+#     @bot pr feedback <url>
+#     @bot show pr <url>
+#     @bot pr details <url>
+#
+#   PR REVIEW (AI code review, posted back to PR)
+#     @bot review <github-pr-url>      → ai-gh-review
+#     @bot review <bitbucket-pr-url>   → ai-jira-review
+#     @bot security review <pr-url>    → ai-gh-review (ygs-security-review)
+#     @bot sre review <pr-url>         → ai-gh-review (ygs-sre-review)
+#
+#   IMPLEMENT
+#     @bot implement PROJ-123          → ai-jira-implement
+#     @bot implement 42                → ai-gh-implement
+#
+# Fields:
+#   triggers    — words/phrases that activate this entry (substring match)
+#   target_kind — "jira" | "github" | "any"; broken ties by DEFAULT_TRACKER env var
+#   id_var      — formicary job variable that receives the entity_id (PR URL, issue key)
+#   required_vars — vars that must be present; router asks user if missing
+#   prompt      — canned prompt for ai-adhoc entries; {PRUrl}/{entity_id} are interpolated
+#   skill       — you-got-skills skill name passed as Skill job variable
+
+workflows:
+  - name: gh-implement
+    job_type: ai-gh-implement
+    shape: ai-implement
+    triggers: ["implement", "build", "gh issue", "github issue"]
+    skill: ""
+    id_var: IssueNumber
+    required_vars: [IssueNumber]
+    target_kind: github
+    description: "Implement a GitHub issue end-to-end"
+
+  - name: jira-implement
+    job_type: ai-jira-implement
+    shape: ai-implement
+    triggers: ["implement", "build", "jira issue"]
+    skill: ""
+    id_var: IssueNumber
+    required_vars: [IssueNumber]
+    target_kind: jira
+    description: "Implement a Jira issue end-to-end"
+
+  - name: gh-review
+    job_type: ai-gh-review
+    shape: ai-review
+    triggers: ["review", "code review", "pr review", "check pr"]
+    skill: ygs-review-pr
+    id_var: PRUrl
+    required_vars: [PRUrl]
+    target_kind: github
+    description: "Review a GitHub PR"
+
+  - name: jira-review
+    job_type: ai-jira-review
+    shape: ai-review
+    triggers: ["review", "code review", "pr review", "check pr"]
+    skill: ygs-review-pr
+    id_var: PRUrl
+    required_vars: [PRUrl]
+    target_kind: jira
+    description: "Review a Bitbucket PR"
+
+  - name: standup-jira
+    job_type: ai-standup-jira
+    shape: ai-standup
+    triggers: ["standup", "status", "daily", "what's happening"]
+    skill: ""
+    id_var: ""
+    required_vars: []
+    target_kind: jira
+    description: "Run a daily standup briefing from Jira"
+
+  - name: standup-gh
+    job_type: ai-standup-gh
+    shape: ai-standup
+    triggers: ["standup", "status", "daily", "what's happening"]
+    skill: ""
+    id_var: ""
+    required_vars: []
+    target_kind: github
+    description: "Run a daily standup briefing from GitHub"
+
+  - name: standup
+    job_type: ai-standup-jira
+    shape: ai-standup
+    triggers: ["standup", "status", "daily", "what's happening"]
+    skill: ""
+    id_var: ""
+    required_vars: []
+    target_kind: any
+    description: "Run a daily standup briefing (default: Jira)"
+
+  - name: risk-scan
+    job_type: ai-adhoc
+    shape: ai-adhoc
+    triggers: ["risk", "risks", "what could go wrong", "risk scan"]
+    skill: ygs-risk-scan
+    id_var: Prompt
+    required_vars: []
+    target_kind: any
+    description: "Scan for sprint risks"
+
+  - name: pr-queue
+    job_type: ai-adhoc
+    shape: ai-adhoc
+    triggers: ["open prs", "my prs", "pr queue", "review queue", "prs to review", "pull requests"]
+    skill: ygs-risk-scan
+    id_var: ""
+    required_vars: []
+    target_kind: any
+    prompt: |
+      List all open pull requests from the configured tracker (Jira/Bitbucket or GitHub).
+      For each PR show: title, author, age in days, review status, and whether I am tagged as a reviewer.
+      Group into two sections:
+        1. PRs where I am the author or assignee
+        2. PRs where I am tagged as a reviewer or reviewer is unassigned
+      Sort each section by age descending (oldest first).
+      Flag any PR open >2 days with no review activity as stale.
+      Be concise — one line per PR.
+    description: "List open PRs — yours and ones where you are tagged as reviewer"
+
+  - name: pr-feedback
+    job_type: ai-adhoc
+    shape: ai-adhoc
+    triggers: ["pr comments", "pr feedback", "pr tasks", "review comments", "feedback on pr", "comments on pr", "show pr", "pr details"]
+    skill: ""
+    id_var: PRUrl
+    required_vars: [PRUrl]
+    target_kind: any
+    prompt: |
+      Fetch all comments, inline review feedback, and open tasks for the pull request at {PRUrl}.
+      Show:
+        1. Overall review status (approved / changes requested / pending)
+        2. Inline comments grouped by file, each with file:line, author, and comment text
+        3. General (non-inline) comments in chronological order with author
+        4. Open tasks with state (open/resolved) and text
+      Highlight unresolved items and anything that blocks merge.
+      Be concise — summarize long threads to one sentence.
+    description: "Show comments, inline feedback, and open tasks for a PR"
+
+  - name: security-review
+    job_type: ai-gh-review
+    shape: ai-review
+    triggers: ["security review", "security check", "sec review"]
+    skill: ygs-security-review
+    id_var: PRUrl
+    required_vars: [PRUrl]
+    target_kind: github
+    description: "Run a security review on a PR"
+
+  - name: sre-review
+    job_type: ai-gh-review
+    shape: ai-review
+    triggers: ["sre review", "ops review", "reliability review"]
+    skill: ygs-sre-review
+    id_var: PRUrl
+    required_vars: [PRUrl]
+    target_kind: github
+    description: "Run an SRE review on a PR"

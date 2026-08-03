@@ -64,6 +64,63 @@ These are written to `~/.claude/settings.json` by the entrypoint.
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-4-6` | Sonnet model ID |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Haiku model ID |
 
+## Slack Router Variables
+
+Required only when running the Slack agent router (`scripts/slack/router.py`).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SLACK_BOT_TOKEN` | Yes* | — | Slack bot OAuth token (`xoxb-...`) — see required scopes below |
+| `SLACK_APP_TOKEN` | Yes* | — | Slack app-level token (`xapp-...`) for Socket Mode — needs `connections:write` scope |
+| `FORMICARY_URL` | Yes* | `http://localhost:7777` | Formicary server base URL |
+| `FORMICARY_TOKEN` | Yes* | — | Formicary API bearer token |
+| `SLACK_CHANNEL` | No | — | Default Slack channel ID for job notifications |
+| `SLACK_THREAD_TS` | No | — | Thread timestamp (injected by the router as a job variable; no need to set manually) |
+| `DEFAULT_TRACKER` | No | `jira` | Default ticket system when no URL/key present in message: `jira` or `github`. Controls which standup/implement workflow is chosen for bare commands like `standup` or `implement PROJ-123`. |
+| `FORMICARY_PUBLIC_URL` | No | — | Public-facing Formicary URL included as a clickable link in the "Started job" Slack message (e.g. `http://localhost:7777` when port-forwarding). If unset, no link is shown. |
+
+*Required for Slack router only.
+
+### Required Slack App Setup
+
+Configure at [api.slack.com/apps](https://api.slack.com/apps) before deploying.
+
+**App-level token (`xapp-...`) — scope:**
+
+| Scope | Purpose |
+|-------|---------|
+| `connections:write` | Open the Socket Mode WebSocket connection |
+
+Settings → Socket Mode → Enable → App-Level Tokens → Generate token → add `connections:write`.
+
+**Bot token (`xoxb-...`) — OAuth & Permissions → Bot Token Scopes:**
+
+| Scope | Purpose |
+|-------|---------|
+| `app_mentions:read` | Receive `@bot` mentions |
+| `channels:history` | Read channel messages (thread replies) |
+| `channels:read` | Resolve channel info |
+| `groups:history` | Same for private channels |
+| `groups:read` | Same for private channels |
+| `chat:write` | Post messages and thread replies |
+| `users:read` | Look up user display names |
+
+**Event Subscriptions → Subscribe to bot events:**
+
+| Event | Purpose |
+|-------|---------|
+| `app_mention` | Fired on `@bot` mentions |
+| `message.channels` | Fired on public channel messages (catches thread replies) |
+| `message.groups` | Fired on private channel messages (required if your channel is private) |
+
+> **After any scope or event change:** go to **Install App → Reinstall to Workspace** — changes don't take effect until you reinstall.
+
+To find your bot's exact name after installing:
+```bash
+curl -s https://slack.com/api/auth.test \
+  -H "Authorization: Bearer $SLACK_BOT_TOKEN" | python3 -m json.tool | grep user
+```
+
 ## Infrastructure Variables
 
 | Variable | Default | Description |

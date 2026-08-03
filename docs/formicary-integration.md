@@ -24,8 +24,33 @@ file-based artifacts under `/workspace/{issue-id}/`:
 |------|---------|
 | `formicary/ai-gh-issue-picker.yaml` | Cron: pick `ai-ready` GitHub issues every 5 min |
 | `formicary/ai-gh-implement.yaml` | Pipeline: plan → implement → create_pr → monitor_pr (calls learn on exit) |
+| `formicary/ai-gh-review.yaml` | Pipeline: review PR → post Block Kit findings to Slack → PAUSE_JOB → apply decision |
 | `formicary/ai-jira-issue-picker.yaml` | Cron: pick `ai-ready` Jira issues every 5 min |
 | `formicary/ai-jira-implement.yaml` | Pipeline: plan → implement → create_pr → monitor_pr (calls learn on exit) |
+| `formicary/ai-jira-review.yaml` | Same review pipeline for Bitbucket/Jira PRs |
+| `formicary/ai-adhoc.yaml` | Run any you-got-skills skill with a free-form prompt, post result to Slack |
+
+## Signal-Based Pause/Resume (Review Workflows)
+
+The review pipelines use formicary's `PAUSE_JOB` mechanism to wait for human feedback without polling. The `post_findings` task always exits with code `3`, which maps to `PAUSE_JOB` with `delay: "0s"` — meaning the job pauses indefinitely until a signal arrives.
+
+```yaml
+# In ai-gh-review.yaml (await-feedback task):
+on_exit_code:
+  3: PAUSE_JOB
+delay: "0s"
+```
+
+When a human clicks "Approve" or "Request Changes" on the Slack Block Kit message, the Slack router resumes the job by injecting the `Decision` variable. Because formicary's trigger endpoint doesn't accept a request body, variable injection uses a 4-step pattern:
+
+1. `GET /api/jobs/requests/{id}` — fetch current job params
+2. Merge new variables (`Decision`, etc.) into existing params
+3. `PUT /api/jobs/requests/{id}` — write updated params back
+4. `POST /api/jobs/requests/{id}/trigger` — signal resume
+
+The `SlackThreadTs` job variable is stored when the job is submitted, so the Slack router can look up a paused job by calling `find_jobs(state=PAUSED, var_filter={SlackThreadTs: thread_ts})` — no external state store needed.
+
+---
 
 ## Deployment
 
@@ -51,6 +76,15 @@ formicary submit formicary/ai-gh-implement.yaml --var ISSUE_ID=42
 
 # Pipeline for a specific Jira issue
 formicary submit formicary/ai-jira-implement.yaml --var ISSUE_ID=PROJ-42
+
+# PR review (GitHub) — pauses for human approval via Slack
+formicary submit formicary/ai-gh-review.yaml --var PRUrl=https://github.com/org/repo/pull/123
+
+# PR review (Jira/Bitbucket)
+formicary submit formicary/ai-jira-review.yaml --var PRUrl=https://bitbucket.org/workspace/repo/pull-requests/5
+
+# Run any skill ad-hoc
+formicary submit formicary/ai-adhoc.yaml --var Skill=ygs-standup --var Prompt="summarize open PRs"
 ```
 
 ### Deploy as a cron job

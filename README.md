@@ -9,11 +9,25 @@ Each step is a small idempotent Python script. Steps communicate via `/workspace
 
 ## Architecture
 
+**Implement pipeline:**
 ```
 issue_picker → plan → implement → create_pr → poll_pr → learn
      ↓            ↓          ↓           ↓          ↓         ↓
 issue.json   plan.md   impl_result  pr.json  poll_result  learnings.md
              plan_result.json
+```
+
+**Review pipeline (signal-based pause):**
+```
+review → post_findings ──(PAUSE_JOB)──→ apply_feedback
+           └─ Block Kit to Slack           └─ Decision env var (injected on resume)
+           └─ exits 3
+```
+
+**Ad-hoc + Slack router:**
+```
+Slack mention → router → formicary submit → adhoc/run_skill → Slack thread reply
+                       ↳ resume paused job (thread reply or Block Kit button click)
 ```
 
 In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `poll_pr` runs as the main container. `learn` is called automatically by `poll_pr` when the PR is merged/closed.
@@ -237,6 +251,115 @@ The poll step only responds to PR comments that start with `ai-bot` (case-insens
 
 ---
 
+## PR Review Workflow
+
+The review pipeline runs Claude against a PR diff using the `ygs-review-pr` skill (or any other you-got-skills skill), posts findings as a Slack Block Kit message with **Approve** / **Request Changes** buttons, then pauses until a human clicks one.
+
+### GitHub PR review
+
+```bash
+# Formicary job — pauses after posting findings, resumes on button click
+formicary submit formicary/ai-gh-review.yaml \
+  --var PRUrl=https://github.com/org/repo/pull/42 \
+  --var SlackChannel=C123ABC
+
+# Or via Slack — mention the bot:
+# @ai-agent review https://github.com/org/repo/pull/42
+```
+
+### Jira/Bitbucket PR review
+
+```bash
+formicary submit formicary/ai-jira-review.yaml \
+  --var PRUrl=https://bitbucket.org/workspace/repo/pull-requests/5 \
+  --var SlackChannel=C123ABC
+```
+
+### What happens
+
+1. `scripts.review.run` — Claude invokes `/ygs-review-pr`, writes `findings.json`
+2. `scripts.review.post_findings` — reads findings, posts Block Kit to Slack, **exits 3 → PAUSE_JOB**
+3. Human clicks Approve or Request Changes in Slack
+4. Slack router resumes the job with `Decision=approve` or `Decision=request-changes`
+5. `scripts.review.apply_feedback` — posts confirmation to the Slack thread
+
+### Use a different skill
+
+```bash
+formicary submit formicary/ai-gh-review.yaml \
+  --var PRUrl=https://github.com/org/repo/pull/42 \
+  --var Skill=ygs-security-review   # override default ygs-review-pr
+```
+
+---
+
+## Slack Agent Router
+
+The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that listens for bot mentions and routes them to formicary jobs. It requires no public ingress.
+
+### Supported commands (mention the bot)
+
+| Command | What it does | Workflow |
+|---------|-------------|---------|
+| `@bot standup` | Compact daily brief: board status, per-person status, risks, discussion | `ai-standup-jira` / `ai-standup-gh` |
+| `@bot risk scan` | Ranked sprint risks: stale work, PR bottlenecks, dependency chains | `ai-adhoc` (ygs-risk-scan) |
+| `@bot prs` | Open PRs grouped by author vs reviewer, sorted by age | `ai-adhoc` |
+| `@bot open prs` | Same as prs | `ai-adhoc` |
+| `@bot review queue` | Same as prs | `ai-adhoc` |
+| `@bot pr comments <url>` | All comments, inline feedback, and open tasks for a PR | `ai-adhoc` |
+| `@bot pr feedback <url>` | Same as pr comments | `ai-adhoc` |
+| `@bot review <github-pr-url>` | Full PR review: correctness, security, API, SRE | `ai-gh-review` |
+| `@bot review <bitbucket-pr-url>` | Same for Bitbucket | `ai-jira-review` |
+| `@bot security review <pr-url>` | OWASP-style security audit | `ai-gh-review` (ygs-security-review) |
+| `@bot sre review <pr-url>` | Failure mode and operational risk review | `ai-gh-review` (ygs-sre-review) |
+| `@bot implement PROJ-123` | Implement a Jira issue | `ai-jira-implement` |
+| `@bot implement 42` | Implement a GitHub issue | `ai-gh-implement` |
+
+When a paused job is waiting in a thread, replying in that thread resumes the job with `ReplyText` set to your message.
+
+### How routing works
+
+1. **Slash-command parse** — deterministic match on the first word (`review`, `implement`, `standup`, `pr`, `risk`, `security`, `sre`)
+2. **Haiku LLM fallback** — free-text classification when no verb matches
+3. **`DEFAULT_TRACKER`** — when intent has no URL/issue key (e.g. bare `standup`), `DEFAULT_TRACKER` env var (`jira` or `github`) picks the right workflow. Default: `jira`.
+4. **Registry lookup** — `scripts/slack/workflows.yml` maps `(intent, target_kind)` → formicary `job_type`
+5. **Submit** to formicary with `SlackThreadTs` stored as a job variable (formicary is the sole source of truth for paused state — no Redis needed)
+
+### Extend the router
+
+Add one entry to `scripts/slack/workflows.yml` to expose a new job type. Add one entry to `scripts/slack/skills.yml` to register a new skill. No code changes needed.
+
+### Deploy
+
+```bash
+cd docs/examples
+./deploy-ai-slack-router.sh --create-k8s-secret --set-configs \
+  --slack-channel "$SLACK_CHANNEL" \
+  --default-tracker jira    # or "github"
+```
+
+Required secrets: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `FORMICARY_TOKEN`.
+Key config: `DEFAULT_TRACKER` — set to `jira` or `github` to control which workflows run for bare commands like `standup`.
+
+---
+
+## Ad-hoc Skill Execution
+
+Run any you-got-skills skill with a free-form prompt and get the result back in your Slack thread:
+
+```bash
+# Via Slack
+@ai-agent standup
+@ai-agent run a risk assessment for sprint 42
+
+# Via formicary directly
+formicary submit formicary/ai-adhoc.yaml \
+  --var Skill=ygs-standup \
+  --var Prompt="summarize open PRs for this week"
+```
+
+---
+
 ## Docker Image
 
 The official image is published to Docker Hub:
@@ -349,7 +472,7 @@ Key variables:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run tests (48 tests)
+# Run tests (198 tests)
 make test
 
 # Run with coverage

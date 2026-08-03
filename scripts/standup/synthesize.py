@@ -18,6 +18,7 @@ Exit codes: 0=done, 1=error
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import date
 
@@ -32,92 +33,74 @@ from scripts.common.config import load_config, get_workspace_dir, validate_claud
 _SYNTHESIZE_PROMPT = """\
 You are an expert engineering team lead generating an evidence-backed standup brief.
 
-## Today's Date
-{today}
+TODAY: {today}
 
-## Gathered Signals (JSON)
-```json
+SIGNALS:
 {signals_json}
-```
 
-## Instructions
+TASK: Produce a standup brief. Do NOT call any tools or APIs. Use only the data above.
 
-Use the `/ygs-standup` skill logic and `/ygs-risk-scan` skill logic to produce the brief.
-You have all the data above — do NOT call any external APIs.
+===== OUTPUT FORMAT RULES — STRICTLY ENFORCED =====
 
-### Step 1 — Per-person status
-For each person with assigned issues across ALL boards in all_sprints[]:
-- What did they complete or close?
-- What are they currently working on (ISSUE-KEY + title)?
-- Any blockers, stale items, or Slack signals?
-- Every claim must trace to an issue key/PR number — never fabricate.
-- If no issues assigned to someone: "No tracker activity in last {lookback_hours}h"
-- If issues list is empty: say "No issues found in sprint" — do NOT invent work.
-
-### Step 2 — Per-board status table
-For each board in all_sprints[] (use all_sprints[].board and all_sprints[].name):
-- Count: total issues, done, in-progress, not-started
-- Days left until sprint end
-- Any HIGH risks for that board
-
-### Step 3 — Risk scan (apply ygs-risk-scan thresholds)
-Rank risks:
-- 🔴 HIGH — blocks another person's work OR sprint goal at risk if unaddressed today
-  Triggers: issue stale >5d, PR open >4d no review, blocked label, dependency chain stale
-- 🟡 MEDIUM — bad trajectory, becomes HIGH within 2 days
-  Triggers: issue stale >3d, PR open >2d no review, person silent in standup >2d
-- ℹ️ LOW — worth noting, not meeting time
-- Every risk line MUST include the assignee's first name in parentheses: e.g. "KEY (@Shahzad): reason"
-
-### Step 4 — Discussion questions
-2-3 items requiring human judgment (not status recitation):
-- Blocked items that need a decision
-- Scope/priority trade-offs
-- Team bottlenecks (single reviewer, single expert, etc.)
-- Every discussion item MUST start with the Jira key and assignee's first name: "KEY (@Name): question"
-
-### Step 5 — Output format
-
-You MUST produce output in EXACTLY this structure with EXACTLY these two delimiter lines:
+The output MUST contain exactly two section markers on their own lines:
 
 #### STANDUP_BRIEF
-<Slack message here — plain text only, no markdown>
 #### RISK_REPORT
-<Full risk detail here — Markdown is fine>
 
-Rules for STANDUP_BRIEF (this is the Slack message — plain text only):
-- No asterisks, no underscores, no backticks, no bold/italic — plain readable text only
-- No ## headings — use ALL CAPS labels like "BOARD STATUS", "STATUS", "RISKS", "DISCUSSION"
-- Bullets: use • (plain text bullet)
-- Keep entire Slack message under 1500 chars total
-- Reference issues as KEY only (e.g. CRIBL-1234)
+Everything between #### STANDUP_BRIEF and #### RISK_REPORT is the Slack message.
+Everything after #### RISK_REPORT is the detailed risk report.
 
-STANDUP_BRIEF must follow this exact template:
-```
+STANDUP_BRIEF RULES (violation = wrong answer):
+1. NO markdown formatting at all: no **, no __, no `, no #, no >, no ->, no →, no arrows
+2. NO bullet dash (-) — use only the • character for bullets
+3. Section headers must be EXACTLY in ALL CAPS: BOARD STATUS, STATUS, RISKS, DISCUSSION
+4. RISKS lines start with emoji only: 🔴 or 🟡 — no **, no →
+5. DISCUSSION lines are numbered: 1. 2. 3.
+6. Max 1500 characters total in STANDUP_BRIEF
+
+STANDUP_BRIEF TEMPLATE — copy structure exactly, fill in data:
+
 📋 Standup Brief — {today}
 
 BOARD STATUS
-• <board name> / <sprint name>: <N> total, <N> done, <N> in-progress, <N> not started — <N> days left
+• <BoardName> Sprint <N> (<scope desc>): <total> total, <done> done, <in-prog> in-progress/review, <ns> not started — <days> days left
 
 STATUS
-• <Person>: working on KEY (summary). Completed: KEY. <blocker if any>
+• <FirstName>: in review KEY (short title), KEY. PRs NNN/NNN open Nd, no reviewers. KEY not started stale Nd.
+• <FirstName>: working on KEY. BLOCKED on KEY (reason).
 
 RISKS
-🔴 KEY (@assignee): one-line reason
-🟡 KEY (@assignee): one-line reason
+🔴 KEY (@FirstName): one-line reason — max 100 chars
+🟡 KEY (@FirstName): one-line reason — max 100 chars
 
 DISCUSSION
-1. KEY (@assignee): question requiring human decision
-2. KEY (@assignee): question
-```
+1. KEY (@FirstName): one-line question requiring decision today
+2. KEY (@FirstName): one-line question requiring decision today
 
-#### RISK_REPORT (full detail, saved as artifact — standard Markdown is fine here)
-Full ranked risk list with recommended actions, dependency graph summary, capacity numbers per board.
+===== END FORMAT RULES =====
 
-### Step 6 — Exit JSON (last line of output, required)
-```json
-{{"status":"DONE","risk_count":<N_high_and_medium>,"discussion_questions":<N>,"silence_count":<N_with_no_activity>}}
-```
+ANALYSIS STEPS:
+
+Step 1 — BOARD STATUS: For each sprint in all_sprints[], one bullet:
+  board name + sprint name + scope (all team members comma-sep) + counts + days remaining
+
+Step 2 — STATUS (primary board only — the board with the most issues):
+  One bullet per person, 120 chars max.
+  Include: in-progress/review issues, open PRs >2d without review, blockers, not-started stale items.
+  Omit: Done issues with no open PR.
+  Every claim must trace to an issue key or PR number.
+
+Step 3 — RISKS (all boards, HIGH and MEDIUM only):
+  HIGH 🔴: stale >5d, PR open >4d no review, Blocked label, sprint ending today with open P0/P1
+  MEDIUM 🟡: stale >3d, PR open >2d no review, sprint ending today with open work
+
+Step 4 — DISCUSSION (2-3 items): Only items needing a human decision today.
+
+#### RISK_REPORT
+Full ranked risk report. Standard markdown is fine here — it goes to the artifact, not Slack.
+
+Exit JSON (last line of your response, required):
+{{"status":"DONE","risk_count":<N>,"discussion_questions":<N>,"silence_count":<N>}}
 """
 
 
@@ -171,12 +154,7 @@ def _clean_code_fence(text: str) -> str:
 
 
 def _truncate_brief(text: str) -> str:
-    """Remove any risk report content that leaked into the brief.
-
-    Cuts at the first line that starts a risk report section or at the
-    ```json status line, whichever comes first.
-    """
-    import re
+    """Remove any risk report content that leaked into the brief."""
     stop_patterns = [
         r"^#{1,4}\s+RISK",        # ## RISK REPORT heading
         r"^RISK REPORT",           # plain heading
@@ -188,6 +166,28 @@ def _truncate_brief(text: str) -> str:
         for pat in stop_patterns:
             if re.match(pat, line.strip(), re.IGNORECASE):
                 return "\n".join(lines[:i]).strip()
+    return text
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove common markdown formatting that breaks Slack plain-text display.
+
+    Slack renders * as a literal asterisk, so **bold** shows as **bold**.
+    Strip bold/italic markers, inline code, heading prefixes, and arrow chars.
+    """
+    # Remove bold/italic markers: **, __, *, _
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    # Remove inline code backticks
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    # Remove markdown heading prefixes (## Foo → FOO already handled by prompt, but clean up any)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Replace markdown dashes at line start with •
+    text = re.sub(r'^\s*-\s+', '• ', text, flags=re.MULTILINE)
+    # Remove arrows that sneak in
+    text = re.sub(r'\s*→\s*', ': ', text)
     return text
 
 
@@ -228,7 +228,7 @@ def main() -> None:
 
     output = result.output
 
-    brief = _truncate_brief(_clean_code_fence(_extract_section(output, "STANDUP_BRIEF")))
+    brief = _strip_markdown(_truncate_brief(_clean_code_fence(_extract_section(output, "STANDUP_BRIEF"))))
     risk_report = _clean_code_fence(_extract_section(output, "RISK_REPORT"))
 
     # Fallback: if sections not found, use the full output as the brief (truncated)

@@ -15,30 +15,53 @@ ai-dev-tools is a set of small, independent Python scripts packaged in a single 
 ## Component Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Docker Image: ghcr.io/bhatti/ai-dev-tools                  │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  scripts/common/                                      │   │
-│  │    config.py     — env var loading + defaults         │   │
-│  │    artifacts.py  — read/write /workspace/{id}/        │   │
-│  │    git_utils.py  — clone, branch, commit, push        │   │
-│  │    claude_runner.py — invoke `claude` CLI             │   │
-│  │    label_utils.py   — GH labels, Jira labels          │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌────────────────────┐    ┌────────────────────────────┐   │
-│  │  scripts/gh/       │    │  scripts/jira/             │   │
-│  │    issue_picker.py │    │    issue_picker.py         │   │
-│  │    plan.py         │    │    plan.py                 │   │
-│  │    implement.py    │    │    implement.py            │   │
-│  │    create_pr.py    │    │    create_pr.py            │   │
-│  │    monitor_pr.py   │    │    monitor_pr.py           │   │
-│  │    learn.py        │    │    learn.py                │   │
-│  └────────────────────┘    └────────────────────────────┘   │
-│                                                              │
-│  Tools: claude CLI, codex CLI, gh CLI, acli, git            │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Docker Image: ghcr.io/bhatti/ai-dev-tools                          │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  scripts/common/                                              │   │
+│  │    config.py       — env var loading + defaults               │   │
+│  │    artifacts.py    — read/write /workspace/{id}/              │   │
+│  │    git_utils.py    — clone, branch, commit, push              │   │
+│  │    claude_runner.py — invoke `claude` CLI                     │   │
+│  │    label_utils.py   — GH labels, Jira labels                  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌────────────────────┐    ┌────────────────────────────┐           │
+│  │  scripts/gh/       │    │  scripts/jira/             │           │
+│  │    issue_picker.py │    │    issue_picker.py         │           │
+│  │    plan.py         │    │    plan.py                 │           │
+│  │    implement.py    │    │    implement.py            │           │
+│  │    create_pr.py    │    │    create_pr.py            │           │
+│  │    monitor_pr.py   │    │    monitor_pr.py           │           │
+│  │    learn.py        │    │    learn.py                │           │
+│  └────────────────────┘    └────────────────────────────┘           │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  scripts/review/                                            │     │
+│  │    run.py           — invoke ygs-review-pr skill via Claude │     │
+│  │    post_findings.py — post Block Kit findings to Slack      │     │
+│  │                       always exits 3 → PAUSE_JOB           │     │
+│  │    apply_feedback.py — post decision confirmation to Slack  │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────┐           │
+│  │  scripts/adhoc/                                       │           │
+│  │    run_skill.py — run any you-got-skills skill,       │           │
+│  │                   post result to Slack thread         │           │
+│  └──────────────────────────────────────────────────────┘           │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  scripts/slack/                                               │   │
+│  │    router.py          — Bolt Socket Mode app                  │   │
+│  │    formicary_client.py — submit / find_jobs / resume          │   │
+│  │    registry.py        — resolve intent → job_type             │   │
+│  │    workflows.yml      — declarative workflow registry         │   │
+│  │    skills.yml         — declarative skill registry            │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  Tools: claude CLI, codex CLI, gh CLI, acli, git                    │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Artifact Flow
@@ -117,10 +140,78 @@ This means:
 - The K8s Job `backoffLimit: 1` retries once on exit code 1
 - Manual re-runs during debugging are safe
 
+## Slack Router
+
+The Slack agent router (`scripts/slack/router.py`) is a long-running Bolt Socket Mode app deployed as a K8s Deployment (1 replica, `Recreate` strategy). It requires no public ingress — Socket Mode uses an outbound WebSocket to Slack's servers.
+
+### Request routing
+
+When a user mentions the bot in a Slack channel:
+
+1. **Bot mention stripped** — `<@UXXXXX>` prefix removed.
+2. **Slash-command parse first** — cheap, deterministic. Recognised patterns: `review <url>`, `implement <id>`, `standup`, `pr <url>`, `risk`, `security`, `sre`.
+3. **Haiku LLM fallback** — if the text doesn't match any verb, a `claude --model haiku --max-turns 1` subprocess classifies the intent.
+4. **Registry lookup** — `workflows.yml` maps `(intent, target_kind)` → formicary `job_type`. `target_kind` is inferred from the entity ID (Jira key → `jira`, GitHub URL → `github`).
+5. **Missing vars check** — if required variables aren't satisfied by the entity ID, the bot asks for them.
+6. **Submit** — `POST /api/jobs/requests` to formicary with all params including `SlackThreadTs`.
+
+### Thread replies
+
+When a user replies in a thread where a paused job is waiting:
+
+1. `find_jobs(state=PAUSED, var_filter={SlackThreadTs: thread_ts})` to look up the paused job.
+2. `resume(job_id, variables={ReplyText: text})` via the 4-step GET→merge→PUT→trigger pattern.
+3. Falls through to new-request handling if no paused job is found on that thread.
+
+### Block Kit buttons
+
+The Slack message posted by `post_findings.py` includes "Approve" and "Request Changes" buttons. Button values are `{job_id}:approve` and `{job_id}:request-changes`. The router's `on_block_action` handler parses `job_id:decision` from the action value and calls `resume(job_id, variables={Decision: decision})`.
+
+### Extension point
+
+`scripts/slack/workflows.yml` and `scripts/slack/skills.yml` are the sole extension points. Adding a new capability requires one YAML entry — no code changes.
+
+---
+
+## PR Review Flow
+
+```
+Slack: @bot review https://github.com/org/repo/pull/42
+  └─→ router submits ai-gh-review with PRUrl + SlackThreadTs
+
+Formicary:
+  [review task]        scripts.review.run
+                         └─→ Claude invokes /ygs-review-pr
+                         └─→ writes findings.json
+  [await-feedback]     scripts.review.post_findings
+                         └─→ posts Block Kit to Slack (exits 3 → PAUSE_JOB)
+  ── JOB PAUSED ──
+  Human clicks "Approve" or "Request Changes" in Slack
+  └─→ router: GET job → merge Decision var → PUT → POST /trigger
+  ── JOB RESUMES ──
+  [finalize task]      scripts.review.apply_feedback
+                         └─→ reads Decision env var
+                         └─→ posts confirmation to Slack thread
+  [done]
+```
+
+---
+
+## Exit Code Contract
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Error (retryable) |
+| `2` | Blocked (needs human — not used in review flow) |
+| `3` | PAUSE_JOB — `post_findings.py` always exits 3 |
+
+---
+
 ## Security
 
 - Secrets are in K8s Secrets, not ConfigMaps or env files
 - SSH key mounted at `/secrets/ssh-key` with mode 0600
 - `gh auth login` is called in entrypoint to authenticate the `gh` CLI
 - Claude runs with `--dangerously-skip-permissions` inside the container (no interactive prompts)
-- The container runs as root (Alpine default) — consider adding a non-root user for production
+- The container runs as non-root (`agent` user, uid 1000) in production K8s deployments

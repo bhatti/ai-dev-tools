@@ -100,6 +100,18 @@ def run_claude(
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        # Tracker credentials — needed by you-got-skills that call APIs via Bash
+        "GH_TOKEN", "GITHUB_TOKEN",
+        "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_HOST", "JIRA_API_TOKEN", "JIRA_AUTH",
+        "JIRA_PROJECT",
+        "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME",
+        # Slack — needed by skills that read standup channel signals
+        "SLACK_BOT_TOKEN", "SLACK_CHANNEL",
+        # Project context
+        "GH_ORG", "GH_REPO",
+        "STANDUP_TEAM_MEMBERS", "STANDUP_LOOKBACK_HOURS",
+        # Workspace
+        "WORKSPACE_DIR",
     }
     env = {k: v for k, v in os.environ.items() if k in _CLAUDE_VARS}
     if extra_env:
@@ -107,8 +119,11 @@ def run_claude(
 
     # Save prompt to log dir for debugging
     if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_file.with_suffix(".prompt.txt").write_text(prompt)
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.with_suffix(".prompt.txt").write_text(prompt)
+        except OSError as e:
+            print(f"[claude] WARNING: could not write prompt log {log_file}: {e}", file=sys.stderr, flush=True)
 
     output_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -162,10 +177,13 @@ def run_claude(
     full_stderr = "".join(stderr_lines)
 
     if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_file.write_text(full_output)
-        if full_stderr:
-            log_file.with_suffix(".stderr.log").write_text(full_stderr)
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text(full_output)
+            if full_stderr:
+                log_file.with_suffix(".stderr.log").write_text(full_stderr)
+        except OSError as e:
+            print(f"[claude] WARNING: could not write log file {log_file}: {e}", file=sys.stderr, flush=True)
 
     if exit_code != 0:
         # "Reached max turns" is a normal operating condition, not a hard error.

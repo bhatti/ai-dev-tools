@@ -101,8 +101,8 @@ def test_build_prompt_includes_signals():
     prompt = _build_prompt(signals)
     assert "PROJ-1" in prompt
     assert "Alice" in prompt
-    assert "ygs-standup" in prompt
-    assert "ygs-risk-scan" in prompt
+    assert "STANDUP_BRIEF" in prompt
+    assert "RISK_REPORT" in prompt
 
 
 def test_build_prompt_trims_long_comments():
