@@ -102,7 +102,7 @@ def test_post_message_success(mock_post, config_with_slack):
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
     ok = post_message(config_with_slack, "📋 *Standup Brief*")
     assert ok is True
-    assert mock_post.call_args.kwargs["json"]["channel"] == "#standup"
+    assert mock_post.call_args.kwargs["json"]["channel"] == "standup"
 
 
 @patch("scripts.standup.slack_client.requests.post")
@@ -137,7 +137,7 @@ def test_notify_success(mock_post, tmp_workspace):
     }
     ok = notify(config, "🤖 PR created: https://github.com/org/repo/pull/1")
     assert ok is True
-    assert mock_post.call_args.kwargs["json"]["channel"] == "#my-team"
+    assert mock_post.call_args.kwargs["json"]["channel"] == "my-team"
 
 
 @patch("scripts.standup.slack_client.requests.post")
@@ -150,7 +150,7 @@ def test_notify_custom_channel_key(mock_post, tmp_workspace):
     }
     ok = notify(config, "✅ PR merged", channel_key="SLACK_CHANNEL")
     assert ok is True
-    assert mock_post.call_args.kwargs["json"]["channel"] == "#standup-alerts"
+    assert mock_post.call_args.kwargs["json"]["channel"] == "standup-alerts"
 
 
 # ---------------------------------------------------------------------------

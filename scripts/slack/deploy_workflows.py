@@ -9,6 +9,7 @@ from environment variables so the Slack router always has the right values.
 Usage:
     python -m scripts.slack.deploy_workflows [--dir PATH] [--file FILE] [--dry-run] [--list]
     python -m scripts.slack.deploy_workflows --set-configs  # push env vars as org configs only
+    python -m scripts.slack.deploy_workflows --trigger ai-standup-jira  # run a cron job now
 
 Environment:
     FORMICARY_URL         default http://localhost:7777
@@ -53,20 +54,54 @@ def _validate(path: Path) -> str | None:
 
 
 def _push_org_config(base_url: str, token: str, org_id: str, name: str, value: str) -> bool:
-    """Upsert a single org config key/value."""
+    """Upsert a single org config key/value. Uses PUT if config already exists, POST otherwise."""
     import re
     secret = bool(re.search(r"(?i)(token|secret|key|password|api|credential|private)", name))
-    payload = {"name": name, "value": value, "secret": secret}
+    payload = {
+        "name": name,
+        "value": value,
+        "kind": "string",
+        "secret": secret,
+        "configurable_id": org_id,
+        "configurable_type": "organizations",
+    }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base = base_url.rstrip("/")
     try:
+        # Try POST first; if 409/400 (already exists) try PUT with the existing config's id
         resp = requests.post(
-            f"{base_url.rstrip('/')}/api/orgs/{org_id}/configs",
+            f"{base}/api/v1/orgs/{org_id}/configs",
             json=payload,
             headers=headers,
             timeout=_DEFAULT_TIMEOUT,
         )
         if resp.ok:
             return True
+        # Already exists — find it and PUT
+        if resp.status_code in (400, 409) or "already" in resp.text.lower() or "exists" in resp.text.lower() or "duplicate" in resp.text.lower():
+            list_resp = requests.get(
+                f"{base}/api/v1/orgs/{org_id}/configs",
+                headers=headers,
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            if list_resp.ok:
+                items = list_resp.json()
+                if not isinstance(items, list):
+                    items = items.get("records") or items.get("Records") or []
+                existing = next((c for c in items if c.get("name") == name), None)
+                if existing:
+                    put_payload = dict(existing)
+                    put_payload["value"] = value
+                    put_resp = requests.put(
+                        f"{base}/api/v1/orgs/{org_id}/configs/{existing['id']}",
+                        json=put_payload,
+                        headers=headers,
+                        timeout=_DEFAULT_TIMEOUT,
+                    )
+                    if put_resp.ok:
+                        return True
+                    print(f"  ✗ config {name} PUT: {put_resp.status_code}: {put_resp.text[:80]}", file=sys.stderr)
+                    return False
         print(f"  ✗ config {name}: {resp.status_code}: {resp.text[:80]}", file=sys.stderr)
         return False
     except Exception as exc:
@@ -114,6 +149,37 @@ def sync_configs(base_url: str, token: str, dry_run: bool = False) -> None:
             print(f"  ✓ config {config_name}={value}")
 
 
+def _trigger_now(client: FormicaryClient, base_url: str, token: str, job_type: str) -> None:
+    """Trigger a pending cron job to run immediately via POST /api/v1/jobs/requests/:id/trigger.
+
+    Cron jobs always have a PENDING request already scheduled — find and trigger it.
+    Only submits a new request if no PENDING exists (non-cron jobs).
+    """
+    jobs = client.find_jobs(state="WAITING", job_type=job_type)
+    if jobs:
+        job_id = jobs[0].get("id")
+        print(f"Found PENDING request {job_id} for {job_type}")
+    else:
+        print(f"No PENDING request for {job_type}, submitting ...")
+        job = client.submit(job_type, {})
+        if not job or not job.get("id"):
+            print(f"✗ submit failed for {job_type}", file=sys.stderr)
+            sys.exit(1)
+        job_id = job["id"]
+
+    resp = requests.post(
+        f"{base_url.rstrip('/')}/api/v1/jobs/requests/{job_id}/trigger",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    if resp.ok:
+        print(f"✓ triggered {job_type} (job {job_id}) — running now")
+        print(f"  {base_url.rstrip('/')}/dashboard/jobs/requests/{job_id}")
+    else:
+        print(f"✗ trigger failed: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deploy workflow YAMLs to Formicary")
     parser.add_argument("--dir", default=str(_DEFAULT_EXAMPLES_DIR),
@@ -125,6 +191,8 @@ def main() -> None:
                         help="List registered job definitions and exit")
     parser.add_argument("--set-configs", action="store_true",
                         help="Push env vars as org configs (FORMICARY_PUBLIC_URL, DEFAULT_TRACKER, SLACK_CHANNEL)")
+    parser.add_argument("--trigger", metavar="JOB_TYPE",
+                        help="Trigger a pending cron job to run immediately (e.g. ai-standup-jira)")
     parser.add_argument("--server", default=os.environ.get("FORMICARY_URL", "http://localhost:7777"),
                         help="Formicary base URL (env: FORMICARY_URL)")
     args = parser.parse_args()
@@ -135,6 +203,10 @@ def main() -> None:
         sys.exit(1)
 
     client = FormicaryClient(base_url=args.server, token=token)
+
+    if args.trigger:
+        _trigger_now(client, args.server, token, args.trigger)
+        return
 
     if args.list:
         defs = client.list_definitions()
@@ -149,7 +221,7 @@ def main() -> None:
     print(f"Syncing org configs to {args.server} ...")
     sync_configs(args.server, token, dry_run=args.dry_run)
 
-    if args.set_configs:
+    if args.set_configs and not args.file and not args.dir:
         return
 
     if args.file:

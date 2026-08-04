@@ -49,6 +49,7 @@ def run_claude(
     max_turns: int = 30,
     log_file: Path | None = None,
     extra_env: dict | None = None,
+    allowed_tools: str | None = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS",
 ) -> ClaudeResult:
     """Run claude CLI, return structured result.
 
@@ -60,7 +61,6 @@ def run_claude(
     # against Bedrock cross-region inference endpoints.
     # The replacement must explicitly include "follow existing conventions" — without it
     # Claude will rewrite files in a different language or style.
-    _TOOLS = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS"
     _SYSTEM_PROMPT = (
         "You are an expert software engineer. "
         "Follow the instructions in the user prompt exactly. "
@@ -72,8 +72,9 @@ def run_claude(
     cmd = [
         "claude", "--print", "--dangerously-skip-permissions",
         "--system-prompt", _SYSTEM_PROMPT,
-        "--allowedTools", _TOOLS,
     ]
+    if allowed_tools:
+        cmd += ["--allowedTools", allowed_tools]
     if model:
         cmd += ["--model", model]
     cmd += ["--max-turns", str(max_turns)]

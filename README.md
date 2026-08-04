@@ -301,9 +301,10 @@ The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that list
 
 | Command | What it does | Workflow |
 |---------|-------------|---------|
+| `@bot help` | List all available commands and instructions for adding new skills | — |
 | `@bot standup` | Compact daily brief: board status, per-person status, risks, discussion | `ai-standup-jira` / `ai-standup-gh` |
-| `@bot risk scan` | Ranked sprint risks: stale work, PR bottlenecks, dependency chains | `ai-adhoc` (ygs-risk-scan) |
-| `@bot prs` | Open PRs grouped by author vs reviewer, sorted by age | `ai-adhoc` |
+| `@bot risk` / `@bot risks` | Ranked sprint risks: stale work, PR bottlenecks, dependency chains | `ai-adhoc` (ygs-risk-scan) |
+| `@bot prs` | Open PRs grouped by reviewer status, sorted by age | `ai-adhoc` |
 | `@bot open prs` | Same as prs | `ai-adhoc` |
 | `@bot review queue` | Same as prs | `ai-adhoc` |
 | `@bot pr comments <url>` | All comments, inline feedback, and open tasks for a PR | `ai-adhoc` |
@@ -335,11 +336,14 @@ Add one entry to `scripts/slack/workflows.yml` to expose a new job type. Add one
 cd docs/examples
 ./deploy-ai-slack-router.sh --create-k8s-secret --set-configs \
   --slack-channel "$SLACK_CHANNEL" \
+  --bot-name "@your-bot-name" \
   --default-tracker jira    # or "github"
 ```
 
 Required secrets: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `FORMICARY_TOKEN`.
-Key config: `DEFAULT_TRACKER` — set to `jira` or `github` to control which workflows run for bare commands like `standup`.
+Key configs: `DEFAULT_TRACKER` — `jira` or `github`; `SLACK_BOT_NAME` — display name used in `@bot help` output.
+
+See [docs/slack-setup.md](docs/slack-setup.md) for the full Slack app creation walkthrough (OAuth scopes, Socket Mode, Event Subscriptions, screenshots).
 
 ---
 
@@ -465,6 +469,167 @@ Key variables:
 - [Kubernetes Deployment](docs/k8s-deployment.md) — K8s Jobs, CronJobs, PVC, RBAC
 - [Formicary Integration](docs/formicary-integration.md) — running via Formicary
 
+## Testing
+
+### Unit and integration tests
+
+```bash
+# Install dev deps
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Run all tests
+make test            # runs pytest tests/
+
+# Run with coverage
+make test-cov
+
+# Run a specific test module
+python3 -m pytest tests/test_router.py -v
+python3 -m pytest tests/test_formicary_client.py -v
+python3 -m pytest tests/test_standup_gather_pr_queue.py -v
+```
+
+---
+
+### Test Slack router locally (no Kubernetes)
+
+```bash
+source ~/.zshrc   # loads FORMICARY_TOKEN, FORMICARY_URL, etc.
+cd /path/to/ai-dev-tools
+
+# Simulate a standup trigger
+python3 -c "
+import os, sys
+sys.path.insert(0, '.')
+from scripts.slack.formicary_client import FormicaryClient
+c = FormicaryClient(base_url=os.environ['FORMICARY_URL'], token=os.environ['FORMICARY_TOKEN'])
+result = c.trigger_pending_or_submit('ai-standup-jira', {
+    'SlackChannel': os.environ.get('SLACK_CHANNEL', 'sb-test'),
+    'SlackThreadTs': 'local-test.000',
+})
+print('standup result:', result)
+# id → triggered; _already_executing → already running; _no_cron_slot → redeploy
+"
+
+# Simulate a PR queue submit
+python3 -c "
+import os, sys
+sys.path.insert(0, '.')
+from scripts.slack.formicary_client import FormicaryClient
+c = FormicaryClient(base_url=os.environ['FORMICARY_URL'], token=os.environ['FORMICARY_TOKEN'])
+result = c.submit('ai-adhoc', {
+    'Skill': 'ygs-pr-queue',
+    'Prompt': '',
+    'SlackChannel': os.environ.get('SLACK_CHANNEL', 'sb-test'),
+    'SlackThreadTs': 'local-test.001',
+    'DefaultTracker': 'jira',
+})
+print('pr-queue result:', result)
+"
+```
+
+---
+
+### Test standup gather locally
+
+```bash
+source ~/.zshrc
+
+JIRA_BASE_URL="$JIRA_BASE_URL" \
+JIRA_EMAIL="$JIRA_EMAIL" \
+JIRA_API_TOKEN="$JIRA_API_TOKEN" \
+JIRA_PROJECT="$JIRA_PROJECT" \
+BITBUCKET_WORKSPACE="$BITBUCKET_WORKSPACE" \
+BITBUCKET_REPO="$BITBUCKET_REPO" \
+BITBUCKET_USERNAME="$BITBUCKET_USERNAME" \
+BITBUCKET_TOKEN="$BITBUCKET_TOKEN" \
+WORKSPACE_DIR="/tmp/standup_test" \
+python3 -m scripts.standup.gather_jira
+
+cat /tmp/standup_test/signals.json | python3 -m json.tool | head -60
+```
+
+---
+
+### Test PR queue gather locally
+
+```bash
+source ~/.zshrc
+
+JIRA_BASE_URL="$JIRA_BASE_URL" \
+JIRA_EMAIL="$JIRA_EMAIL" \
+JIRA_API_TOKEN="$JIRA_API_TOKEN" \
+JIRA_PROJECT="$JIRA_PROJECT" \
+BITBUCKET_WORKSPACE="$BITBUCKET_WORKSPACE" \
+BITBUCKET_REPO="$BITBUCKET_REPO" \
+BITBUCKET_USERNAME="$BITBUCKET_USERNAME" \
+BITBUCKET_TOKEN="$BITBUCKET_TOKEN" \
+DEFAULT_TRACKER="jira" \
+WORKSPACE_DIR="/tmp/pr_queue_test" \
+python3 -m scripts.standup.gather_pr_queue
+
+# Should show: "N open PRs linked to sprint issues"
+cat /tmp/pr_queue_test/pr_queue.json | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(f'sprint: {d[\"sprint\"]}  pr_count: {d[\"pr_count\"]}')
+for pr in d['prs'][:5]:
+    print(f'  [{pr[\"jira_key\"]}] PR {pr[\"id\"]}: {pr[\"title\"][:50]}')
+    print(f'    approved_by={pr[\"approved_by\"]}  pending={pr[\"reviewers\"][:2]}')
+    print(f'    url={pr[\"url\"]}')
+"
+```
+
+---
+
+### Test ad-hoc skill locally
+
+```bash
+source ~/.zshrc
+
+# Run the ygs-pr-queue skill with the gathered pr_queue.json
+WORKSPACE_DIR="/tmp/pr_queue_test" \
+SLACK_CHANNEL="sb-test" \
+SLACK_THREAD_TS="" \
+SKILL_NAME="ygs-pr-queue" \
+SKILL_PROMPT="" \
+python3 -m scripts.adhoc.run_skill --skill ygs-pr-queue --prompt ""
+```
+
+---
+
+### Test via Slack (requires deployed router)
+
+After running `deploy-ai-slack-router.sh`, mention the bot in your channel:
+
+| Command | What to verify |
+|---|---|
+| `@bot standup` | Standup brief posted to thread; job appears in Formicary UI |
+| `@bot prs` | PR table posted: Jira key, PR number, description, status, reviewers |
+| `@bot risk` / `@bot risks` | Risk list posted |
+| `@bot review <pr-url>` | Review findings Block Kit posted with Approve / Request Changes buttons |
+
+**Check router logs for errors:**
+```bash
+kubectl logs -l app=ai-slack-router --tail=50 -f
+```
+
+**Verify job was created:**
+```bash
+source ~/.zshrc
+curl -s "$FORMICARY_URL/api/v1/jobs/requests?pageSize=5" \
+  -H "Authorization: Bearer $FORMICARY_TOKEN" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items = d if isinstance(d,list) else (d.get('records') or d.get('Records') or [])
+for j in items[:5]:
+    print(f'{j[\"id\"]:26s} {j[\"job_type\"]:30s} {j[\"job_state\"]}')
+"
+```
+
+---
+
 ## Development
 
 ```bash
@@ -472,7 +637,7 @@ Key variables:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run tests (198 tests)
+# Run tests (240 tests)
 make test
 
 # Run with coverage

@@ -141,9 +141,8 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
 
     # Step 3: complete the upload and share to channel
     ch = channel or config.get("SLACK_CHANNEL", "standup")
-    if not ch.startswith("#"):
-        ch = f"#{ch}"
-    channel_id = resolve_channel_id(token, ch.lstrip("#"))
+    ch = ch.lstrip("#")
+    channel_id = resolve_channel_id(token, ch)
     if not channel_id:
         print(f"[slack] channel '{ch}' not found — cannot complete upload", flush=True)
         return False
@@ -186,8 +185,9 @@ def post_message(config: dict, text: str, channel: str | None = None,
         return False
 
     ch = channel or config.get("SLACK_CHANNEL", "standup")
-    if not ch.startswith("#"):
-        ch = f"#{ch}"
+    # Slack's chat.postMessage accepts channel IDs (C0ABC123) and names (general) directly.
+    # Do NOT prepend '#' — channel IDs with '#' are invalid and cause channel_not_found.
+    ch = ch.lstrip("#")
 
     payload: dict = {"channel": ch, "text": text, "unfurl_links": False, "mrkdwn": True}
     ts = thread_ts or config.get("SLACK_THREAD_TS", "") or None

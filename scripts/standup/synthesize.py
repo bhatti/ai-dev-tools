@@ -31,7 +31,7 @@ from scripts.common.config import load_config, get_workspace_dir, validate_claud
 # ---------------------------------------------------------------------------
 
 _SYNTHESIZE_PROMPT = """\
-You are an expert engineering team lead generating an evidence-backed standup brief.
+You are an expert engineering team lead generating a concise, evidence-backed standup brief.
 
 TODAY: {today}
 
@@ -40,66 +40,64 @@ SIGNALS:
 
 TASK: Produce a standup brief. Do NOT call any tools or APIs. Use only the data above.
 
-===== OUTPUT FORMAT RULES — STRICTLY ENFORCED =====
+===== OUTPUT FORMAT — STRICTLY ENFORCED =====
 
-The output MUST contain exactly two section markers on their own lines:
+Output MUST start with exactly:
 
 #### STANDUP_BRIEF
+
+Then later:
+
 #### RISK_REPORT
 
-Everything between #### STANDUP_BRIEF and #### RISK_REPORT is the Slack message.
-Everything after #### RISK_REPORT is the detailed risk report.
+STANDUP_BRIEF RULES (any violation = wrong answer):
+1. NO markdown: no **, no __, no `, no #, no >, no ->, no →
+2. Bullets: • only (never -)
+3. Section headers ALL CAPS on their own line: BOARD STATUS, STATUS, RISKS, DISCUSSION
+4. RISKS: emoji prefix only (🔴 🟡), no bold, no arrows
+5. DISCUSSION: numbered 1. 2. 3.
+6. Max 1800 chars total
 
-STANDUP_BRIEF RULES (violation = wrong answer):
-1. NO markdown formatting at all: no **, no __, no `, no #, no >, no ->, no →, no arrows
-2. NO bullet dash (-) — use only the • character for bullets
-3. Section headers must be EXACTLY in ALL CAPS: BOARD STATUS, STATUS, RISKS, DISCUSSION
-4. RISKS lines start with emoji only: 🔴 or 🟡 — no **, no →
-5. DISCUSSION lines are numbered: 1. 2. 3.
-6. Max 1500 characters total in STANDUP_BRIEF
+EXACT TEMPLATE (fill in data, keep structure):
 
-STANDUP_BRIEF TEMPLATE — copy structure exactly, fill in data:
-
-📋 Standup Brief — {today}
+Standup Brief — {today}
 
 BOARD STATUS
-• <BoardName> Sprint <N> (<scope desc>): <total> total, <done> done, <in-prog> in-progress/review, <ns> not started — <days> days left
+• <SprintName> (<FirstName, FirstName, ...>): <N> total, <N> done, <N> in-prog/review, <N> not started — ends <date or "today">
 
 STATUS
-• <FirstName>: in review KEY (short title), KEY. PRs NNN/NNN open Nd, no reviewers. KEY not started stale Nd.
-• <FirstName>: working on KEY. BLOCKED on KEY (reason).
+• <FirstName>: <issues in-progress/review as KEY, KEY>. PRs <NNN/NNN> open <Nd> <reviewer status>. <stale/blocked notes>.
+(one • per person, 150 chars max, include PR numbers when associated with their issues)
 
 RISKS
-🔴 KEY (@FirstName): one-line reason — max 100 chars
-🟡 KEY (@FirstName): one-line reason — max 100 chars
+🔴 KEY (@FirstName): <reason, PR status if open> — max 100 chars
+🟡 KEY (@FirstName): <reason> — max 100 chars
 
 DISCUSSION
-1. KEY (@FirstName): one-line question requiring decision today
-2. KEY (@FirstName): one-line question requiring decision today
+1. KEY (@FirstName): <decision needed today>
 
-===== END FORMAT RULES =====
+===== ANALYSIS STEPS =====
 
-ANALYSIS STEPS:
+Step 1 — BOARD STATUS:
+  Use all_sprints[]. One bullet per sprint: name, team (first names), counts by status category, end date.
 
-Step 1 — BOARD STATUS: For each sprint in all_sprints[], one bullet:
-  board name + sprint name + scope (all team members comma-sep) + counts + days remaining
+Step 2 — STATUS (primary sprint — most issues):
+  One bullet per person. For each person's open/in-progress issues:
+  - List issue keys
+  - If the issue has an open PR in open_prs[] (match by title containing the key), include PR number and age
+  - Show reviewer status: "no reviewers", "N approved", "N pending"
+  - Flag stale (>3d no update) and BLOCKED
 
-Step 2 — STATUS (primary board only — the board with the most issues):
-  One bullet per person, 120 chars max.
-  Include: in-progress/review issues, open PRs >2d without review, blockers, not-started stale items.
-  Omit: Done issues with no open PR.
-  Every claim must trace to an issue key or PR number.
+Step 3 — RISKS:
+  🔴 HIGH: P0/P1 with open PR >3d no reviewers, BLOCKED, sprint ending today with unfinished P0/P1
+  🟡 MEDIUM: P2 stale >3d, open PR >2d no reviewers, sprint ending today with open work
 
-Step 3 — RISKS (all boards, HIGH and MEDIUM only):
-  HIGH 🔴: stale >5d, PR open >4d no review, Blocked label, sprint ending today with open P0/P1
-  MEDIUM 🟡: stale >3d, PR open >2d no review, sprint ending today with open work
-
-Step 4 — DISCUSSION (2-3 items): Only items needing a human decision today.
+Step 4 — DISCUSSION (2-3 items needing human decision today only):
 
 #### RISK_REPORT
-Full ranked risk report. Standard markdown is fine here — it goes to the artifact, not Slack.
+Full ranked risk report with details. Standard markdown OK here.
 
-Exit JSON (last line of your response, required):
+Exit JSON (last line, required):
 {{"status":"DONE","risk_count":<N>,"discussion_questions":<N>,"silence_count":<N>}}
 """
 

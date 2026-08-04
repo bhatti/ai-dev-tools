@@ -13,6 +13,8 @@ Required environment variables:
                       default: "jira"
 
 Optional:
+    SLACK_BOT_NAME                  Display name used in @bot help examples
+                                    (default: "@bot" — set to your bot's actual name)
     ANTHROPIC_DEFAULT_HAIKU_MODEL   Claude model used for classify_intent
                                     (default: claude-haiku-4-5-20251001-v1:0)
 
@@ -46,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any
@@ -55,6 +58,39 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from scripts.slack.formicary_client import FormicaryClient
 from scripts.slack.registry import Registry
+
+# ---------------------------------------------------------------------------
+# Slack mrkdwn normalisation
+# ---------------------------------------------------------------------------
+
+_SLACK_LINK_RE = re.compile(r"<(https?://[^|>]+)\|([^>]*)>")
+_SLACK_URL_RE = re.compile(r"<(https?://[^>]+)>")
+_JIRA_BROWSE_RE = re.compile(r"https?://[^/]+/browse/([A-Z][A-Z0-9_]+-\d+)", re.IGNORECASE)
+
+
+def _normalize_slack_text(text: str) -> str:
+    """Convert Slack mrkdwn links to plain text that the router can parse.
+
+    Slack auto-links Jira keys like CRIBL-40452 into:
+      <https://company.atlassian.net/browse/CRIBL-40452|Consider how...>
+    We want to extract just the Jira key (CRIBL-40452) from the URL, not the
+    display text which may be the issue title instead of the key.
+    For non-Jira URLs we keep the raw URL so PR URLs still route correctly.
+    """
+    def replace_link(m: re.Match) -> str:
+        url = m.group(1)
+        # If it's a Jira browse URL, extract the issue key
+        jira_match = _JIRA_BROWSE_RE.search(url)
+        if jira_match:
+            return jira_match.group(1)
+        # Otherwise keep the URL (e.g. GitHub PR URLs)
+        return url
+
+    text = _SLACK_LINK_RE.sub(replace_link, text)
+    # Also handle bare <url> without display text
+    text = _SLACK_URL_RE.sub(lambda m: m.group(1), text)
+    return text
+
 
 # ---------------------------------------------------------------------------
 # Globals initialised at import time (before main())
@@ -142,6 +178,7 @@ def _build_params(
     thread_ts: str,
     prompt: str = "",
     user_text: str = "",
+    default_tracker: str = "",
 ) -> dict[str, str]:
     params: dict[str, str] = {
         "SlackChannel": channel,
@@ -151,6 +188,11 @@ def _build_params(
         params[entry_id_var] = entity_id
     if skill:
         params["Skill"] = skill
+    # Pass DEFAULT_TRACKER for non-cron adhoc jobs (pr-queue, risk-scan, etc.) so the
+    # container's gather scripts know which tracker to use without guessing from env vars.
+    # Standup cron jobs derive their tracker from the job definition itself, not this param.
+    if default_tracker and default_tracker != "any" and skill:
+        params["DefaultTracker"] = default_tracker
     # Canned prompt from registry takes priority; fall back to user's message text.
     # Interpolate {PRUrl} and {entity_id} placeholders in canned prompts.
     resolved_prompt = prompt or user_text or ""
@@ -186,12 +228,21 @@ def handle_new_request(
 
     intent, target_kind, entity_id = result
 
-    # 3. Resolve workflow entry — use DEFAULT_TRACKER to break ties when target is ambiguous
+    # 3a. Help command — short-circuit before workflow resolution
+    if intent == "__help__":
+        bot_name = config.get("SLACK_BOT_NAME", os.environ.get("SLACK_BOT_NAME", "@bot"))
+        say(text=registry.help_message(bot_name=bot_name), thread_ts=ts)
+        return
+
+    # 3b. Resolve workflow entry — use DEFAULT_TRACKER to break ties when target is ambiguous
     default_tracker = config.get("DEFAULT_TRACKER", os.environ.get("DEFAULT_TRACKER", "any")).lower()
     entry = registry.resolve(intent, target_kind, default_tracker=default_tracker)
     if entry is None:
         say(
-            text="I don't have a workflow for that yet.",
+            text=(
+                "I don't have a workflow for that yet.\n"
+                "Type `@bot help` to see available commands and how to add new skills."
+            ),
             thread_ts=ts,
         )
         return
@@ -205,13 +256,44 @@ def handle_new_request(
         )
         return
 
-    # 5. Submit job
+    # 5. Submit (or trigger for cron) the job.
     params = _build_params(entry.id_var, entity_id, entry.skill, channel, ts,
-                           prompt=entry.prompt, user_text=text)
-    job = client.submit(entry.job_type, params)
+                           prompt=entry.prompt, user_text=text,
+                           default_tracker=default_tracker)
+    if entry.cron:
+        # Cron jobs always have a PENDING request — trigger it with the current params
+        # (SlackChannel, SlackThreadTs) so the job runs with the right Slack context.
+        job = client.trigger_pending_or_submit(entry.job_type, params)
+    else:
+        user_key = f"{entry.job_type}:{ts}" if ts else ""
+        job = client.submit(entry.job_type, params, user_key=user_key)
     if not job:
         say(
             text=f"Failed to submit `{entry.name}` — check Formicary connectivity.",
+            thread_ts=ts,
+        )
+        return
+    if job.get("_already_executing"):
+        job_id = job.get("id", "unknown")
+        public_url = (
+            config.get("FORMICARY_PUBLIC_URL")
+            or os.environ.get("FORMICARY_PUBLIC_URL")
+            or config.get("FORMICARY_URL", os.environ.get("FORMICARY_URL", ""))
+        ).rstrip("/")
+        job_url = f"{public_url}/dashboard/jobs/requests/{job_id}" if public_url else ""
+        link = f"  <{job_url}|View job>" if job_url else ""
+        say(
+            text=f"`{entry.name}` is already running — results will be posted here when it finishes.{link}",
+            thread_ts=ts,
+        )
+        return
+    if job.get("_no_cron_slot"):
+        say(
+            text=(
+                f"`{entry.name}` has no scheduled slot right now. "
+                "Go to Formicary → Job Definitions → disable then re-enable "
+                f"`{entry.job_type}` to restore the cron schedule, then try again."
+            ),
             thread_ts=ts,
         )
         return
@@ -325,6 +407,9 @@ def _dispatch(event: dict, say: Any, config: dict[str, str]) -> None:
         idx = text.find(">")
         if idx != -1:
             text = text[idx + 1:].strip()
+
+    # Normalise Slack mrkdwn links: <url|display> → url (or Jira key)
+    text = _normalize_slack_text(text)
 
     if thread_ts and thread_ts != ts:
         # This is a reply inside an existing thread

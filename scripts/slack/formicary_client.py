@@ -1,11 +1,16 @@
 """Thin wrapper over the Formicary REST API.
 
+All endpoints use the /api/v1/ prefix (gRPC-gateway).
+
 Formicary endpoints used:
-    POST   /api/jobs/requests              submit a new job
-    GET    /api/jobs/requests              list/query jobs
-    GET    /api/jobs/requests/:id          get single job
-    PUT    /api/jobs/requests/:id          update job params
-    POST   /api/jobs/requests/:id/trigger  resume/trigger a paused job
+    POST   /api/v1/jobs/requests               submit a new job
+    GET    /api/v1/jobs/requests               list/query jobs
+                                               params: job_state, job_type, q (free-text), pageSize
+    GET    /api/v1/jobs/requests/{id}          get single job
+    POST   /api/v1/jobs/requests/{id}/trigger  trigger a pending job (optional JSON body: {params})
+    POST   /api/v1/jobs/definitions            create job definition
+    PUT    /api/v1/jobs/definitions/{job_type} update job definition
+    GET    /api/v1/jobs/definitions            list job definitions
 
 Auth: Authorization: Bearer {token}
 """
@@ -51,20 +56,61 @@ class FormicaryClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def submit(self, job_type: str, params: dict[str, Any]) -> dict:
-        """Submit a new job.  Returns saved job dict (has ``id`` field) or ``{}`` on error."""
-        payload = {"job_type": job_type, "params": params}
+    def submit(self, job_type: str, params: dict[str, Any], user_key: str = "") -> dict:
+        """Submit a new job.  Returns job dict (has ``id`` field) or ``{}`` on error.
+
+        user_key, when set, is stored as the job's user_key (unique index in Formicary).
+        Pass SlackThreadTs so each Slack thread maps to exactly one job — a second submit
+        with the same user_key returns the existing job rather than creating a duplicate.
+
+        Response is wrapped: {"job_request": {...}} — unwrapped before returning.
+        """
+        payload: dict[str, Any] = {"job_type": job_type, "params": params}
+        if user_key:
+            payload["user_key"] = user_key
         try:
             resp = requests.post(
-                self._url("/api/jobs/requests"),
+                self._url("/api/v1/jobs/requests"),  # gRPC-gateway v1
                 json=payload,
                 headers=self._headers(),
                 timeout=_DEFAULT_TIMEOUT,
             )
             if not resp.ok:
+                # 409 Conflict (fixed server) or 500 with UNIQUE text (unfixed server):
+                # both mean a job with this user_key already exists — find and return it.
+                is_duplicate = (
+                    (resp.status_code == 409) or
+                    (resp.status_code == 500 and "UNIQUE" in resp.text)
+                )
+                if is_duplicate and user_key:
+                    # Fixed server returns existing job in 409 body
+                    if resp.status_code == 409:
+                        try:
+                            data = resp.json()
+                            existing = data.get("job_request", data) if isinstance(data, dict) else {}
+                            if existing.get("id"):
+                                print(f"[formicary] reusing existing job {existing.get('id')} for user_key={user_key!r}", flush=True)
+                                return existing
+                        except Exception:
+                            pass
+                    # Unfixed server (500): look up by SlackThreadTs
+                    thread_ts = params.get("SlackThreadTs", "")
+                    if thread_ts:
+                        existing_list = self.find_jobs(
+                            state="ANY",
+                            var_filter={"SlackThreadTs": thread_ts},
+                            job_type=job_type,
+                        )
+                        if existing_list:
+                            print(f"[formicary] reusing existing job {existing_list[0].get('id')} (user_key duplicate)", flush=True)
+                            return existing_list[0]
                 self._log_error(f"submit({job_type})", resp)
                 return {}
-            return resp.json()
+            data = resp.json()
+            # Unwrap {"job_request": {...}} envelope
+            if isinstance(data, dict) and "job_request" in data:
+                return data["job_request"]
+            return data
         except Exception as exc:
             print(f"[formicary] submit error: {exc}", file=sys.stderr, flush=True)
             return {}
@@ -74,15 +120,24 @@ class FormicaryClient:
         state: str = "PAUSED",
         var_filter: dict[str, str] | None = None,
         page_size: int = 50,
+        job_type: str | None = None,
     ) -> list[dict]:
         """List jobs matching state and optional variable filter.
 
         ``var_filter`` is applied client-side by checking each job's ``params`` dict.
+        ``job_type`` filters server-side when provided.
         """
+        # pageSize (camelCase) is what ParseParams reads; job_state is the server filter name.
+        # state="ANY" means no state filter — return jobs in any state.
+        api_params: dict = {"pageSize": page_size}
+        if state and state.upper() != "ANY":
+            api_params["job_state"] = state
+        if job_type:
+            api_params["job_type"] = job_type
         try:
             resp = requests.get(
-                self._url("/api/jobs/requests"),
-                params={"state": state, "page_size": page_size},
+                self._url("/api/v1/jobs/requests"),
+                params=api_params,
                 headers=self._headers(),
                 timeout=_DEFAULT_TIMEOUT,
             )
@@ -90,7 +145,6 @@ class FormicaryClient:
                 self._log_error(f"find_jobs(state={state})", resp)
                 return []
             data = resp.json()
-            # API may return a list directly or wrapped in a "records" / "jobs" key
             jobs: list[dict] = []
             if isinstance(data, list):
                 jobs = data
@@ -105,21 +159,106 @@ class FormicaryClient:
             print(f"[formicary] find_jobs error: {exc}", file=sys.stderr, flush=True)
             return []
 
+        # Client-side exact match on job_type (q= is LIKE, may match partial names)
+        if job_type:
+            jobs = [j for j in jobs if j.get("job_type") == job_type]
+
         if not var_filter:
             return jobs
 
         matched: list[dict] = []
         for job in jobs:
-            job_params: dict = job.get("params") or {}
+            raw = job.get("params") or {}
+            # Params may be a list [{name, value}] (from list API) or a flat dict (from detail API)
+            if isinstance(raw, list):
+                job_params = {p["name"]: p.get("value", "") for p in raw if "name" in p}
+            else:
+                job_params = raw
             if all(str(job_params.get(k, "")) == str(v) for k, v in var_filter.items()):
                 matched.append(job)
         return matched
+
+    def trigger_pending_or_submit(self, job_type: str, params: dict[str, Any]) -> dict:
+        """For cron jobs: find the PENDING scheduled request, inject params, and trigger it.
+
+        Cron jobs always have a PENDING request queued for their next scheduled time.
+        Submitting a duplicate hits a UNIQUE constraint on user_key — must trigger the
+        existing PENDING job instead.
+
+        Params (e.g. SlackThreadTs, SlackChannel) are sent in the POST body so the
+        server merges them into the job's param rows in a single atomic transaction
+        before moving the job to the ready queue.
+
+        Returns the job dict (has ``id``) on success, ``{"_no_cron_slot": True}`` when
+        no scheduled request exists (cron slot broken — do NOT fall back to submit),
+        or ``{}`` on HTTP/network failure.
+        """
+        # WAITING expands to PENDING|PAUSED|READY server-side — catches all pre-run states.
+        # Filter to cron-triggered slots only: a manually submitted job of the same job_type
+        # must not be confused with the scheduled cron slot.
+        pending = [j for j in self.find_jobs(state="WAITING", job_type=job_type)
+                   if j.get("cron_triggered")]
+        if not pending:
+            # Fall back to CANCELLED: the trigger endpoint now accepts CANCELLED cron slots
+            # and re-activates them (rotates user_key, sets state=PENDING, scheduled_at=now).
+            # This recovers a broken cron schedule without needing DB access.
+            cancelled = self.find_jobs(state="CANCELLED", job_type=job_type)
+            # Use the most recent CANCELLED record that is cron-triggered
+            pending = [j for j in cancelled if j.get("cron_triggered")]
+            if pending:
+                print(
+                    f"[formicary] no WAITING slot for {job_type!r}; found CANCELLED cron slot "
+                    f"{pending[0].get('id')!r} — will trigger to re-activate it",
+                    flush=True,
+                )
+            else:
+                # Check if a cron slot is currently EXECUTING — user just needs to wait.
+                executing = [j for j in self.find_jobs(state="EXECUTING", job_type=job_type)
+                             if j.get("cron_triggered")]
+                if executing:
+                    job_id = executing[0].get("id")
+                    print(
+                        f"[formicary] cron job {job_type!r} is already EXECUTING as {job_id!r}",
+                        flush=True,
+                    )
+                    return {"_already_executing": True, "id": job_id, "job_type": job_type}
+                print(
+                    f"[formicary] no PENDING/WAITING, CANCELLED, or EXECUTING request found for cron job {job_type!r} — "
+                    "the cron slot is missing entirely. Re-enable the job definition in Formicary.",
+                    flush=True,
+                )
+                # Never fall back to submit() for cron jobs: Formicary auto-assigns a
+                # deterministic user_key for the next scheduled slot, so submit() always
+                # hits a UNIQUE constraint when a CANCELLED record already owns that key.
+                return {"_no_cron_slot": True}
+
+        job_id = pending[0].get("id")
+        print(f"[formicary] found PENDING {job_id} for {job_type}, triggering with params", flush=True)
+
+        body: dict[str, Any] = {}
+        if params:
+            body["params"] = params
+        try:
+            resp = requests.post(
+                self._url(f"/api/v1/jobs/requests/{job_id}/trigger"),
+                json=body if body else None,
+                headers=self._headers(),
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            if not resp.ok:
+                self._log_error(f"trigger_pending_or_submit({job_id})", resp)
+                return {}
+        except Exception as exc:
+            print(f"[formicary] trigger error: {exc}", file=sys.stderr, flush=True)
+            return {}
+
+        return {"id": job_id, "job_type": job_type}
 
     def get_job(self, job_id: str) -> dict | None:
         """Fetch a single job by ID.  Returns ``None`` on error."""
         try:
             resp = requests.get(
-                self._url(f"/api/jobs/requests/{job_id}"),
+                self._url(f"/api/v1/jobs/requests/{job_id}"),
                 headers=self._headers(),
                 timeout=_DEFAULT_TIMEOUT,
             )
@@ -132,51 +271,25 @@ class FormicaryClient:
             return None
 
     def resume(self, job_id: str, variables: dict[str, Any] | None = None) -> bool:
-        """Resume/trigger a paused job.
+        """Resume/trigger a paused or pending job.
 
-        If ``variables`` are provided:
-        1. GET the current job to read existing params
-        2. Merge new variables into existing params
-        3. PUT the job with updated params
-        4. POST trigger
+        Optional variables are passed as params in the POST body so the server
+        merges them atomically before triggering — no separate GET/PUT needed.
 
         Returns ``True`` on success, ``False`` on any HTTP error.
         """
+        body: dict[str, Any] = {}
         if variables:
-            current = self.get_job(job_id)
-            if current is None:
-                print(
-                    f"[formicary] resume({job_id}): could not fetch current job",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                return False
-            merged_params: dict = dict(current.get("params") or {})
-            merged_params.update(variables)
-            updated = dict(current)
-            updated["params"] = merged_params
-            try:
-                put_resp = requests.put(
-                    self._url(f"/api/jobs/requests/{job_id}"),
-                    json=updated,
-                    headers=self._headers(),
-                    timeout=_DEFAULT_TIMEOUT,
-                )
-                if not put_resp.ok:
-                    self._log_error(f"resume PUT({job_id})", put_resp)
-                    return False
-            except Exception as exc:
-                print(f"[formicary] resume PUT error: {exc}", file=sys.stderr, flush=True)
-                return False
-
+            body["params"] = variables
         try:
-            trig_resp = requests.post(
-                self._url(f"/api/jobs/requests/{job_id}/trigger"),
+            resp = requests.post(
+                self._url(f"/api/v1/jobs/requests/{job_id}/trigger"),
+                json=body if body else None,
                 headers=self._headers(),
                 timeout=_DEFAULT_TIMEOUT,
             )
-            if not trig_resp.ok:
-                self._log_error(f"resume trigger({job_id})", trig_resp)
+            if not resp.ok:
+                self._log_error(f"resume trigger({job_id})", resp)
                 return False
             return True
         except Exception as exc:
@@ -205,7 +318,7 @@ class FormicaryClient:
                 return {}
 
             resp = requests.get(
-                self._url(f"/api/orgs/{org_id}/configs"),
+                self._url(f"/api/v1/orgs/{org_id}/configs"),
                 headers=self._headers(),
                 timeout=_DEFAULT_TIMEOUT,
             )
@@ -253,7 +366,7 @@ class FormicaryClient:
         headers["Content-Type"] = "application/x-yaml"
         try:
             resp = requests.post(
-                self._url("/api/jobs/definitions"),
+                self._url("/api/v1/jobs/definitions"),
                 data=yaml_content.encode(),
                 headers=headers,
                 timeout=_DEFAULT_TIMEOUT,
@@ -262,7 +375,7 @@ class FormicaryClient:
                 return True
             if resp.status_code == 409:
                 put_resp = requests.put(
-                    self._url(f"/api/jobs/definitions/{job_type}"),
+                    self._url(f"/api/v1/jobs/definitions/{job_type}"),
                     data=yaml_content.encode(),
                     headers=headers,
                     timeout=_DEFAULT_TIMEOUT,
@@ -281,7 +394,7 @@ class FormicaryClient:
         """Return all registered job definition summaries."""
         try:
             resp = requests.get(
-                self._url("/api/jobs/definitions"),
+                self._url("/api/v1/jobs/definitions"),
                 headers=self._headers(),
                 timeout=_DEFAULT_TIMEOUT,
             )

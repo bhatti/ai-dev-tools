@@ -29,6 +29,7 @@ class WorkflowEntry:
     target_kind: str  # "jira" | "github" | "any"
     description: str
     prompt: str = ""  # canned prompt for ai-adhoc entries; overrides free-text from message
+    cron: bool = False  # if True, trigger the existing PENDING request instead of submitting
 
 
 @dataclass
@@ -89,6 +90,7 @@ class Registry:
                 target_kind=w.get("target_kind", "any"),
                 description=w.get("description", ""),
                 prompt=w.get("prompt", ""),
+                cron=bool(w.get("cron", False)),
             )
             for w in wdata.get("workflows", [])
         ]
@@ -178,6 +180,9 @@ class Registry:
             "comments": "pr comments",
             "feedback": "pr feedback",
             "tasks": "pr tasks",
+            "help": "__help__",
+            "commands": "__help__",
+            "?": "__help__",
         }
 
         intent = verb_to_intent.get(verb_lower)
@@ -186,6 +191,37 @@ class Registry:
 
         target_kind = _infer_target_kind(entity_id)
         return (intent, target_kind, entity_id)
+
+    def help_message(self, bot_name: str = "@bot") -> str:
+        """Return a plain-text help message listing available commands and how to extend.
+
+        ``bot_name`` is the display name used in examples (e.g. "@mybot").
+        """
+        lines: list[str] = [f"*Available commands* (mention {bot_name} to use them):", ""]
+
+        # Deduplicate: one entry per unique first-trigger, skip help aliases
+        seen_triggers: set[str] = set()
+        for entry in self.workflows:
+            primary = entry.triggers[0] if entry.triggers else entry.name
+            if primary in seen_triggers:
+                continue
+            seen_triggers.add(primary)
+            aliases = "  |  ".join(f"`{bot_name} {t}`" for t in entry.triggers[:3])
+            lines.append(f"• {aliases}")
+            lines.append(f"  _{entry.description}_")
+
+        lines += [
+            "",
+            "*Adding a new skill*",
+            "1. Create `skills/ygs-<name>/SKILL.md` in <https://github.com/bhatti/you-got-skills|you-got-skills> (define what Claude does)",
+            "2. Add an entry to `scripts/slack/skills.yml` (name, path, description)",
+            "3. Add an entry to `scripts/slack/workflows.yml` (triggers, job_type, skill name)",
+            "4. If the skill needs a new Formicary workflow, add a YAML under `docs/examples/` and run `deploy-ai-jira-workflows.sh`",
+            "5. No router code changes needed — trigger words drive routing",
+            "",
+            f"_Tip: ad-hoc skills that just run a prompt and reply in Slack need only `job_type: ai-adhoc` with a `prompt:` field — no new workflow YAML needed._",
+        ]
+        return "\n".join(lines)
 
     def missing_required_vars(
         self, entry: WorkflowEntry, target_id: str

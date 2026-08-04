@@ -312,6 +312,7 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_h
 
     return {
         "key": key,
+        "id": str(raw.get("id", "")),   # numeric Jira issue ID — needed for dev-status API
         "summary": fields.get("summary", ""),
         "status": status,
         "assignee": assignee.get("displayName", "unassigned"),

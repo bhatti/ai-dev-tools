@@ -91,6 +91,7 @@ workflows:
     id_var: ""
     required_vars: []
     target_kind: jira
+    cron: true
     description: "Run a daily standup briefing from Jira"
 
   - name: standup-gh
@@ -101,6 +102,7 @@ workflows:
     id_var: ""
     required_vars: []
     target_kind: github
+    cron: true
     description: "Run a daily standup briefing from GitHub"
 
   - name: standup
@@ -111,9 +113,10 @@ workflows:
     id_var: ""
     required_vars: []
     target_kind: any
+    cron: true
     description: "Run a daily standup briefing (default: Jira)"
 
-  - name: risk-scan
+  - name: risk
     job_type: ai-adhoc
     shape: ai-adhoc
     triggers: ["risk", "risks", "what could go wrong", "risk scan"]
@@ -121,13 +124,13 @@ workflows:
     id_var: Prompt
     required_vars: []
     target_kind: any
-    description: "Scan for sprint risks"
+    description: "Scan the sprint for risks and blockers"
 
   - name: pr-queue
     job_type: ai-adhoc
     shape: ai-adhoc
     triggers: ["open prs", "my prs", "pr queue", "review queue", "prs to review", "pull requests"]
-    skill: ygs-risk-scan
+    skill: ygs-pr-queue
     id_var: ""
     required_vars: []
     target_kind: any
