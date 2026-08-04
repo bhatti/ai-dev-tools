@@ -215,6 +215,7 @@ def post_message(config: dict, text: str, channel: str | None = None,
 def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL") -> bool:
     """Post a notification to Slack using the channel from config[channel_key].
 
+    Replies in the originating thread when SlackThreadTs is present in config.
     Optional — returns True on success, False (logged, no exception) on any failure.
     Silently skips when SLACK_BOT_TOKEN or the channel env var is absent.
     """
@@ -226,7 +227,8 @@ def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL") -> bool:
     if not channel:
         print(f"[slack] {channel_key} not set — skipping notification", flush=True)
         return False
-    return post_message(config, text, channel=channel)
+    thread_ts = config.get("SlackThreadTs") or config.get("SLACK_THREAD_TS") or None
+    return post_message(config, text, channel=channel, thread_ts=thread_ts)
 
 
 if __name__ == "__main__":

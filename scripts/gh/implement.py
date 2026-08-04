@@ -47,21 +47,20 @@ You are an expert software engineer implementing a GitHub issue.
 
 ## Instructions
 
-1. Read CLAUDE.md, .cursorrules, .windsurfrules, or any repo-specific coding guidelines if they exist — follow them strictly. Never deviate from the existing language, style, and patterns of the repository.
-2. Before writing any implementation code, check `.claude/skills/` for relevant skills. If the plan names a skill, invoke it via the Skill tool rather than reimplementing its steps.
-3. Search for existing utilities in `utils/`, `shared/`, `common/` dirs before adding new abstractions. Prefer reusing what exists.
-4. Use TDD for non-trivial changes:
-   a. Write the failing test first and confirm it fails.
-   b. Implement the code.
-   c. Confirm the test passes.
-5. For each plan task:
+IMPORTANT: You have a limited number of turns. Start implementing immediately — trust the plan above which already identifies the files and approach. Do not spend turns broadly exploring the repo.
+
+1. Read CLAUDE.md, .cursorrules, .windsurfrules, or any repo-specific coding guidelines if they exist (one read, then proceed). Never deviate from the existing language, style, and patterns.
+2. Trust the plan — go straight to editing the specific files it identifies. Use `grep` to find exact locations when needed, not broad exploration.
+3. Before writing any implementation code, check `.claude/skills/` for relevant skills. If the plan names a skill, invoke it via the Skill tool rather than reimplementing its steps.
+4. For each plan task:
    - Make targeted file changes following the repo's existing patterns.
    - Do NOT modify files unrelated to the task.
+   - Run only the tests covering the changed code (not the full suite per task).
    - Commit with message: "task: <description>"
-6. After all tasks, run the full test suite. Do NOT run lint or eslint — only the test suite.
-7. If tests fail, iterate on the fix. Stop after 2 consecutive failed fix attempts.
-8. After tests pass, do a cleanup pass: remove any unused variables, imports, or dead code you introduced.
-9. Output ONLY this JSON on the last line (no text after it):
+5. After ALL tasks are done, run the full test suite once. Do NOT run lint or eslint.
+6. If tests fail, fix them immediately. Stop after 2 consecutive failed fix attempts.
+7. After tests pass, do a cleanup pass: remove any unused variables, imports, or dead code you introduced.
+8. Output ONLY this JSON on the last line (no text after it):
    {{"status":"DONE","files_changed":["file1","file2"],"commits":<N>,"tests_status":"passing","summary":"<one sentence>"}}
    Or if blocked / requirements unclear:
    {{"status":"CANNOT_IMPLEMENT","reason":"<explanation>"}}

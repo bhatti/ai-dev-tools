@@ -141,6 +141,38 @@ def test_notify_success(mock_post, tmp_workspace):
 
 
 @patch("scripts.standup.slack_client.requests.post")
+def test_notify_posts_to_thread_when_slack_thread_ts_set(mock_post, tmp_workspace):
+    """notify() replies in the originating thread when SlackThreadTs is in config."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    config = {
+        "WORKSPACE_DIR": str(tmp_workspace),
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "my-team",
+        "SlackThreadTs": "1785862519.738719",
+    }
+    ok = notify(config, "🤖 PR created: https://bitbucket.org/org/repo/pull-requests/123")
+    assert ok is True
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["channel"] == "my-team"
+    assert payload.get("thread_ts") == "1785862519.738719"
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_notify_no_thread_when_ts_absent(mock_post, tmp_workspace):
+    """notify() posts to channel root when no thread timestamp is set."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    config = {
+        "WORKSPACE_DIR": str(tmp_workspace),
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "my-team",
+    }
+    ok = notify(config, "🤖 PR created")
+    assert ok is True
+    payload = mock_post.call_args.kwargs["json"]
+    assert "thread_ts" not in payload
+
+
+@patch("scripts.standup.slack_client.requests.post")
 def test_notify_custom_channel_key(mock_post, tmp_workspace):
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
     config = {
