@@ -1,46 +1,68 @@
-"""Run a full PR review using the ygs-review-pr skill via Claude Code.
+"""Run a PR review or self-review using a ygs skill via Claude Code.
 
 Usage:
-    python -m scripts.review.run --pr-url <url> [--skill ygs-review-pr] [--issue-id <optional>]
+    # PR review (external)
+    python -m scripts.review.run --pr-url <url> [--skill ygs-review-pr]
+
+    # Self-review on a local diff (post-implement, pre-PR)
+    python -m scripts.review.run --mode self-review --issue-id <id> [--base-branch main]
 
 Required env: ANTHROPIC_API_KEY or CLAUDE_CODE_USE_BEDROCK=1
-Optional env: GH_TOKEN, BITBUCKET_TOKEN, BITBUCKET_USERNAME, GH_ORG, GH_REPO
 
-Reads:  env vars
-Writes: /workspace/review_result.json
-        /workspace/findings.json
-        /workspace/logs/review.log
-        /workspace/logs/review.prompt.txt
+Writes (PR review):   /workspace/review_result.json, findings.json, logs/review.*
+Writes (self-review): /workspace/<issue_id>/self_review.json, logs/self_review.*
 
-Exit codes: 0=done, 1=error
+Exit codes: 0=done, 1=error, 2=BLOCKED (self-review only — critical findings)
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import click
 
-from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
+from scripts.common.artifacts import read_text
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
+from scripts.common.config import get_workspace_dir, get_issue_dir, load_config, validate_claude_config
+from scripts.review.post_findings import render_report_md, render_report_html
+
+
+# Skill search paths — mirrors scripts/adhoc/run_skill.py _skill_search_paths()
+def _skill_search_paths() -> list[Path]:
+    paths: list[Path] = []
+    codebase_dir = os.environ.get("CODEBASE_DIR", "").strip()
+    if codebase_dir:
+        paths.append(Path(codebase_dir) / ".claude" / "skills")
+    paths.append(Path.home() / ".claude" / "skills")
+    paths.append(Path.home() / ".claude" / "skills" / "you-got-skills" / "skills")
+    return paths
+
+
+def _load_skill_md(skill: str) -> str | None:
+    for base in _skill_search_paths():
+        candidate = base / skill / "SKILL.md"
+        if candidate.exists():
+            print(f"[review] skill path: {candidate}", flush=True)
+            return candidate.read_text(encoding="utf-8")
+    return None
 
 
 REVIEW_PROMPT_TEMPLATE = """\
-You are an expert code reviewer. Your task is to review a pull request.
-
 ## PR URL
 
 {pr_url}
 
-## Instructions
+## Review Instructions
 
-1. Invoke the `/{skill}` skill to perform a full PR review of the PR at the URL above.
-   Pass the PR URL as context so the skill knows which PR to fetch and review.
+{skill_instructions}
 
-2. After the skill completes, write your findings to `findings.json` in the current
-   working directory using this exact structure:
+---
+
+After completing the review per the instructions above, write your findings to
+`findings.json` in the current working directory using this exact structure:
 
 ```json
 {{
@@ -62,24 +84,106 @@ You are an expert code reviewer. Your task is to review a pull request.
 }}
 ```
 
-3. If `findings.json` already exists from the skill run, do not overwrite it — leave it as-is.
+If `findings.json` already exists from a prior step, do not overwrite it.
 
-4. Output ONLY this JSON on the last line (no text after it):
-   {{"status":"DONE","findings_count":<N>,"verdict":"<APPROVE|REQUEST_CHANGES|COMMENT>","summary":"<one sentence>"}}
+Output ONLY this JSON on the last line (no text after it):
+{{"status":"DONE","findings_count":<N>,"verdict":"<APPROVE|REQUEST_CHANGES|COMMENT>","summary":"<one sentence>"}}
 
-   Or if something went wrong:
-   {{"status":"ERROR","reason":"<explanation>"}}
+Or if something went wrong:
+{{"status":"ERROR","reason":"<explanation>"}}
+"""
+
+
+SELF_REVIEW_PROMPT_TEMPLATE = """\
+You are performing a self-review of the changes you just implemented.
+
+## Self-Review Instructions
+
+{skill_instructions}
+
+---
+
+Run `git diff {base_branch}...HEAD` to get the full diff of your changes.
+
+Review the diff against the criteria above. Focus on:
+- Correctness: does the code do what was intended?
+- Failure modes: partial failure, concurrent access, edge cases
+- Code hygiene: debug code, TODOs, unused imports/variables, scope creep
+- Naming and consistency with the surrounding codebase
+
+Write your findings to `self_review.json` in the current working directory:
+```json
+{{
+  "status": "APPROVED",
+  "findings": [],
+  "notes": ""
+}}
+```
+Where status is:
+- "APPROVED" — no CRITICAL or HIGH findings (safe to create PR)
+- "NEEDS_FIX" — HIGH findings that you should fix before proceeding
+- "BLOCKED" — CRITICAL findings that require human review before creating a PR
+
+If status is NEEDS_FIX: fix the issues, re-run the test suite, then update self_review.json to APPROVED.
+If status is BLOCKED: document why in `notes` and do NOT attempt to fix (needs human judgment).
+
+Output ONLY this JSON on the last line (no text after it):
+{{"status":"DONE","self_review_status":"<APPROVED|NEEDS_FIX|BLOCKED>","findings_count":<N>,"notes":"<summary>"}}
+"""
+
+
+REVIEW_PROMPT_FALLBACK = """\
+## PR URL
+
+{pr_url}
+
+## Instructions
+
+Review the pull request at the URL above. Fetch the diff and description, then perform
+a code review covering: correctness, security, API surface, and SRE concerns.
+
+For Bitbucket PRs, use:
+  curl -sf "https://api.bitbucket.org/2.0/repositories/{{workspace}}/{{repo}}/pullrequests/{{id}}" \\
+    -u "$BITBUCKET_USERNAME:$BITBUCKET_TOKEN"
+  curl -sf ".../pullrequests/{{id}}/diff" -u "$BITBUCKET_USERNAME:$BITBUCKET_TOKEN"
+
+For GitHub PRs, use: gh pr view <number> --repo <owner/repo> --json title,body,changedFiles
+and: gh pr diff <number> --repo <owner/repo>
+
+Write findings to `findings.json` with this structure:
+{{
+  "pr_url": "{pr_url}",
+  "verdict": "APPROVE | REQUEST_CHANGES | COMMENT",
+  "findings": [{{"severity":"HIGH","confidence":"HIGH","title":"...","file":"","line":null,"domain":"correctness","description":"...","fix":"..."}}],
+  "summary": "one sentence"
+}}
+
+Output ONLY this JSON on the last line:
+{{"status":"DONE","findings_count":<N>,"verdict":"<verdict>","summary":"<one sentence>"}}
 """
 
 
 @click.command()
-@click.option("--pr-url", required=True, help="Full URL or number of the PR to review")
-@click.option("--skill", default="ygs-review-pr", show_default=True, help="Skill name to invoke")
-@click.option("--issue-id", default=None, help="Optional issue ID for namespacing (unused, kept for compat)")
-def main(pr_url: str, skill: str, issue_id: str | None) -> None:
+@click.option("--pr-url", default=None, help="Full URL or number of the PR to review")
+@click.option("--skill", default="ygs-review-pr", show_default=True, help="Skill name to load")
+@click.option("--issue-id", default=None, help="Issue ID (required for --mode self-review)")
+@click.option("--mode", default="review", type=click.Choice(["review", "self-review"]), show_default=True,
+              help="'review' = PR review; 'self-review' = diff review against local branch")
+@click.option("--base-branch", default=None, help="Base branch for self-review diff (falls back to BASE_BRANCH env)")
+def main(pr_url: str | None, skill: str, issue_id: str | None, mode: str, base_branch: str | None) -> None:
     config = load_config()
     validate_claude_config(config)
 
+    if mode == "self-review":
+        _run_self_review(config, issue_id, skill, base_branch)
+    else:
+        if not pr_url:
+            print("ERROR: --pr-url is required for review mode", file=sys.stderr, flush=True)
+            sys.exit(1)
+        _run_pr_review(config, pr_url, skill)
+
+
+def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
     logs_dir = workspace / "logs"
@@ -87,15 +191,24 @@ def main(pr_url: str, skill: str, issue_id: str | None) -> None:
 
     print(f"[review] pr_url={pr_url} skill={skill}", flush=True)
 
-    # Build prompt
-    prompt = REVIEW_PROMPT_TEMPLATE.format(pr_url=pr_url, skill=skill)
+    _ensure_ygs_skills()
 
-    # Save prompt for debugging
+    skill_md = _load_skill_md(skill)
+    if skill_md:
+        print(f"[review] loaded {skill} SKILL.md ({len(skill_md)} chars)", flush=True)
+        prompt = REVIEW_PROMPT_TEMPLATE.format(
+            pr_url=pr_url,
+            skill_instructions=skill_md,
+        )
+    else:
+        print(f"[review] WARNING: {skill}/SKILL.md not found — using fallback instructions", flush=True)
+        prompt = REVIEW_PROMPT_FALLBACK.format(pr_url=pr_url)
+
     prompt_path = logs_dir / "review.prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
 
     model = config.get("AI_MODEL")
-    max_turns = int(config.get("MAX_TURNS_IMPLEMENT", "100"))
+    max_turns = int(config.get("MAX_TURNS_REVIEW", "100"))
     log_path = logs_dir / "review.log"
 
     print(f"[review] Running review with model={model}, max_turns={max_turns}", flush=True)
@@ -106,6 +219,8 @@ def main(pr_url: str, skill: str, issue_id: str | None) -> None:
             model=model,
             max_turns=max_turns,
             log_file=log_path,
+            allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
+            system_prompt=SYSTEM_PROMPTS["review"],
         )
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)
@@ -113,11 +228,9 @@ def main(pr_url: str, skill: str, issue_id: str | None) -> None:
         _ensure_findings_stub(workspace / "findings.json", pr_url)
         sys.exit(1)
 
-    # Parse status JSON from result
     status_data: dict = result.status_json or {"status": result.status}
     _write_json(workspace / "review_result.json", status_data)
 
-    # Ensure findings.json exists (Claude should have written it; stub if not)
     findings_path = workspace / "findings.json"
     if not findings_path.exists():
         verdict = status_data.get("verdict", "COMMENT")
@@ -136,12 +249,118 @@ def main(pr_url: str, skill: str, issue_id: str | None) -> None:
     print(f"[review] status={status_data.get('status')} findings={findings_count} verdict={verdict}", flush=True)
     print(f"[review] summary: {summary}", flush=True)
 
-    if status_data.get("status") in ("DONE", "DONE_WITH_CONCERNS"):
+    try:
+        findings = json.loads(findings_path.read_text(encoding="utf-8"))
+        md_text = render_report_md(findings)
+        html_text = render_report_html(findings, md_text)
+        (workspace / "review_report.md").write_text(md_text, encoding="utf-8")
+        (workspace / "review_report.html").write_text(html_text, encoding="utf-8")
+        print(f"[review] wrote review_report.md + review_report.html", flush=True)
+        reports_dir = workspace / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / "report.md").write_text(md_text, encoding="utf-8")
+        (reports_dir / "report.html").write_text(html_text, encoding="utf-8")
+        (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
+        (reports_dir / "findings.json").write_text(findings_path.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"[review] wrote reports/report.md, reports/report.html, reports/result.json, reports/findings.json", flush=True)
+    except Exception as e:
+        print(f"[review] WARNING: could not render report: {e}", file=sys.stderr, flush=True)
+
+    status_val = status_data.get("status", "")
+    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}")
+    print(f"::add-task-context FINDINGS_COUNT::{findings_count}")
+    print(f"::add-task-context REVIEW_VERDICT::{verdict}")
+    if status_val in ("DONE", "DONE_WITH_CONCERNS", "MAX_TURNS_REACHED"):
         sys.exit(0)
 
-    # Any other status (ERROR, BLOCKED) is a failure
-    print(f"ERROR: unexpected review status '{status_data.get('status')}'", file=sys.stderr, flush=True)
+    print(f"ERROR: unexpected review status '{status_val}'", file=sys.stderr, flush=True)
     sys.exit(1)
+
+
+def _run_self_review(config: dict, issue_id: str | None, skill: str, base_branch: str | None) -> None:
+    if not issue_id:
+        print("ERROR: --issue-id is required for --mode self-review", file=sys.stderr, flush=True)
+        sys.exit(1)
+
+    issue_dir = get_issue_dir(config, issue_id)
+    repo_dir = issue_dir / "repo"
+    if not repo_dir.exists():
+        print(f"ERROR: repo dir not found at {repo_dir} — run clone-repo first", file=sys.stderr, flush=True)
+        sys.exit(1)
+
+    logs_dir = issue_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    branch = base_branch or config.get("BASE_BRANCH") or os.environ.get("BASE_BRANCH", "main")
+    review_skill = "ygs-code-review"  # self-review always uses code-review (not PR review)
+
+    print(f"[self-review] issue={issue_id} base_branch={branch} skill={review_skill}", flush=True)
+
+    _ensure_ygs_skills()
+
+    skill_md = _load_skill_md(review_skill)
+    if skill_md:
+        print(f"[self-review] loaded {review_skill} SKILL.md ({len(skill_md)} chars)", flush=True)
+        prompt = SELF_REVIEW_PROMPT_TEMPLATE.format(
+            base_branch=branch,
+            skill_instructions=skill_md,
+        )
+    else:
+        # Minimal fallback if skill not available
+        prompt = SELF_REVIEW_PROMPT_TEMPLATE.format(
+            base_branch=branch,
+            skill_instructions=(
+                "Review the diff for: correctness (logic errors, null dereference, race conditions), "
+                "code hygiene (unused variables, debug code, TODOs), failure modes (partial failure, "
+                "large inputs, concurrent access), and naming consistency."
+            ),
+        )
+
+    prompt_path = logs_dir / "self_review.prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    model = config.get("AI_MODEL")
+    max_turns = int(config.get("MAX_TURNS_REVIEW", "50"))
+    log_path = logs_dir / "self_review.log"
+
+    print(f"[self-review] model={model} max_turns={max_turns}", flush=True)
+    try:
+        result = run_claude(
+            prompt,
+            working_dir=repo_dir,
+            model=model,
+            max_turns=max_turns,
+            log_file=log_path,
+            allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
+            system_prompt=SYSTEM_PROMPTS["review"],
+        )
+    except RuntimeError as e:
+        print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)
+        _write_json(issue_dir / "self_review.json", {"status": "ERROR", "reason": str(e)})
+        sys.exit(1)
+
+    status_data: dict = result.status_json or {"status": result.status}
+    sr_status = status_data.get("self_review_status", "APPROVED")
+    findings_count = status_data.get("findings_count", 0)
+    notes = status_data.get("notes", "")
+
+    # Ensure self_review.json was written by Claude; create stub if not
+    sr_path = repo_dir / "self_review.json"
+    if not sr_path.exists():
+        _write_json(sr_path, {"status": sr_status, "findings": [], "notes": notes})
+
+    # Copy to issue_dir for artifact collection
+    import shutil
+    shutil.copy2(sr_path, issue_dir / "self_review.json")
+
+    print(f"[self-review] self_review_status={sr_status} findings={findings_count} notes={notes!r}", flush=True)
+
+    # Exit 2 if BLOCKED — pipeline should PAUSE_JOB for human review
+    if sr_status == "BLOCKED":
+        print(f"[self-review] BLOCKED — critical findings require human review before PR", flush=True)
+        sys.exit(2)
+
+    sys.exit(0)
 
 
 def _write_json(path: Path, data: dict) -> None:

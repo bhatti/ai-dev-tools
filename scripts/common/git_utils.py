@@ -132,14 +132,18 @@ def configure_git(repo_path: Path, name: str, email: str) -> None:
     _run(["git", "config", "user.email", email], cwd=repo_path)
 
 
-def create_branch(repo_path: Path, branch_name: str) -> str:
+def create_branch(repo_path: Path, branch_name: str, base_branch: str = "") -> str:
     """Create/checkout branch. Idempotent — reuses if it already exists.
+
+    base_branch: when creating a new branch, fork from this remote branch
+    (e.g. "stage" or "develop") instead of whatever HEAD the clone landed on.
+    If empty, forks from the current HEAD.
 
     Strategy (in order):
     1. Branch already exists locally → checkout
     2. refs/remotes/origin/<branch> exists → checkout -b tracking it
     3. Remote has the branch → fetch with explicit refspec (creates tracking ref), then checkout
-    4. None of the above → create new local branch
+    4. None of the above → create new branch, forking from origin/<base_branch> if specified
     """
     # 1. Already local
     result = _run(["git", "branch", "--list", branch_name], cwd=repo_path)
@@ -166,8 +170,21 @@ def create_branch(repo_path: Path, branch_name: str) -> str:
         _run(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"], cwd=repo_path)
         return branch_name
 
-    # 4. New branch
-    _run(["git", "checkout", "-b", branch_name], cwd=repo_path)
+    # 4. New branch — fork from origin/<base_branch> so unrelated commits on other
+    #    branches are excluded (e.g. if BASE_BRANCH=stage, branch from stage not main).
+    if base_branch:
+        # Ensure the base branch tracking ref exists; a shallow clone of a different
+        # default branch may not have fetched it yet.
+        base_tracking = _run(
+            ["git", "rev-parse", "--verify", f"refs/remotes/origin/{base_branch}"],
+            cwd=repo_path, check=False,
+        )
+        if base_tracking.returncode != 0:
+            refspec = f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}"
+            _run(["git", "fetch", "--depth", "100", "origin", refspec], cwd=repo_path)
+        _run(["git", "checkout", "-b", branch_name, f"origin/{base_branch}"], cwd=repo_path)
+    else:
+        _run(["git", "checkout", "-b", branch_name], cwd=repo_path)
     return branch_name
 
 
@@ -221,16 +238,23 @@ def push_branch(
 
 
 def get_commit_count(repo_path: Path, base_branch: str = "main") -> int:
-    """Count commits on current branch since base_branch."""
-    result = _run(
-        ["git", "rev-list", "--count", f"{base_branch}..HEAD"], cwd=repo_path, check=False
-    )
-    if result.returncode != 0:
-        return 0
-    try:
-        return int(result.stdout.strip())
-    except ValueError:
-        return 0
+    """Count commits on current branch since base_branch.
+
+    Prefers origin/<base_branch> so shallow clones that only have the
+    tracking ref (not a local branch) resolve correctly.
+    """
+    # Try origin/<base_branch> first — always present after fetch, even in
+    # shallow clones where no local branch named <base_branch> exists.
+    for ref in (f"origin/{base_branch}", base_branch):
+        result = _run(
+            ["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=repo_path, check=False
+        )
+        if result.returncode == 0:
+            try:
+                return int(result.stdout.strip())
+            except ValueError:
+                return 0
+    return 0
 
 
 def detect_repo_url(org: str, repo: str, use_ssh: bool = True) -> str:

@@ -1,11 +1,9 @@
 """BitBucket Cloud REST API v2 client using basic auth (username + app password).
 
 Required config keys:
-    BITBUCKET_USERNAME     — BitBucket account email for REST API Basic Auth
-                             (e.g. user@example.com — required by Bitbucket API v2)
-    BITBUCKET_GIT_USERNAME — BitBucket account nickname for git HTTPS clone/push
-                             (required by git credential helper; different from email)
-    BITBUCKET_TOKEN        — BitBucket App Password
+    BITBUCKET_USERNAME  — BitBucket account username (used for both REST API Basic Auth
+                          and git HTTPS clone/push credential helper)
+    BITBUCKET_TOKEN     — BitBucket App Password
 """
 
 import sys

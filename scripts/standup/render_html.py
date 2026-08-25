@@ -4,7 +4,6 @@ Usage:
     python -m scripts.standup.render_html
 
 Reads:  /workspace/signals.json
-        /workspace/standup_brief.md   (Slack-mrkdwn version)
         /workspace/risk_report.md     (optional, Markdown)
 Writes: /workspace/standup_report.html
 

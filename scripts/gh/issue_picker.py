@@ -88,11 +88,11 @@ def pick_issue(config: dict, issue: dict, transition_label: bool = True) -> bool
     print(f"  Written to workspace/issue.json")
     if transition_label:
         gh_transition_label(org, repo, issue_id, config["PICKUP_LABEL"], config["INPROGRESS_LABEL"])
-    print(f"::set-output name=IssueNumber::{issue_id}")
-    print(f"::set-output name=IssueTitle::{issue['title']}")
-    print(f"::set-output name=IssueURL::{issue['url']}")
-    print(f"::set-output name=GHOrg::{org}")
-    print(f"::set-output name=GHRepo::{repo}")
+    print(f"::add-job-context IssueNumber::{issue_id}")
+    print(f"::add-job-context IssueTitle::{issue['title']}")
+    print(f"::add-job-context IssueURL::{issue['url']}")
+    print(f"::add-job-context GHOrg::{org}")
+    print(f"::add-job-context GHRepo::{repo}")
     return True
 
 
@@ -158,7 +158,7 @@ def main(issue_id: str | None) -> None:
             launch_pipeline(issue_id_str)
 
     if issues_json_list:
-        print(f"::set-output name=IssuesJSON::{json.dumps(issues_json_list)}")
+        print(f"::add-job-context IssuesJSON::{json.dumps(issues_json_list)}")
     print(f"Picked {picked} issue(s)")
     sys.exit(0 if picked > 0 else 2)
 

@@ -247,10 +247,11 @@ def check_claude() -> None:
     if proxy_base.endswith("/bedrock"):
         proxy_base = proxy_base[: -len("/bedrock")]
 
+    from scripts.common.config import MODEL_BEDROCK_SONNET, MODEL_SONNET
     model = (
         os.environ.get("AI_MODEL")
         or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        or ("us.anthropic.claude-sonnet-4-6" if use_bedrock else "claude-sonnet-4-6")
+        or (MODEL_BEDROCK_SONNET if use_bedrock else MODEL_SONNET)
     )
 
     if use_bedrock:

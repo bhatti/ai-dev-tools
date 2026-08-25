@@ -9,6 +9,7 @@ from environment variables so the Slack router always has the right values.
 Usage:
     python -m scripts.slack.deploy_workflows [--dir PATH] [--file FILE] [--dry-run] [--list]
     python -m scripts.slack.deploy_workflows --set-configs  # push env vars as org configs only
+    python -m scripts.slack.deploy_workflows --set-config KEY VALUE  # set a single org config
     python -m scripts.slack.deploy_workflows --trigger ai-standup-jira  # run a cron job now
 
 Environment:
@@ -152,32 +153,27 @@ def sync_configs(base_url: str, token: str, dry_run: bool = False) -> None:
 def _trigger_now(client: FormicaryClient, base_url: str, token: str, job_type: str) -> None:
     """Trigger a pending cron job to run immediately via POST /api/v1/jobs/requests/:id/trigger.
 
-    Cron jobs always have a PENDING request already scheduled — find and trigger it.
-    Only submits a new request if no PENDING exists (non-cron jobs).
+    Uses trigger_pending_or_submit which correctly handles cron jobs by finding
+    the existing PENDING/SCHEDULED/WAITING/CANCELLED cron slot and triggering it.
+    Never falls back to submit for cron jobs (avoids UNIQUE constraint errors).
     """
-    jobs = client.find_jobs(state="WAITING", job_type=job_type)
-    if jobs:
-        job_id = jobs[0].get("id")
-        print(f"Found PENDING request {job_id} for {job_type}")
-    else:
-        print(f"No PENDING request for {job_type}, submitting ...")
-        job = client.submit(job_type, {})
-        if not job or not job.get("id"):
-            print(f"✗ submit failed for {job_type}", file=sys.stderr)
-            sys.exit(1)
-        job_id = job["id"]
-
-    resp = requests.post(
-        f"{base_url.rstrip('/')}/api/v1/jobs/requests/{job_id}/trigger",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=10,
-    )
-    if resp.ok:
-        print(f"✓ triggered {job_type} (job {job_id}) — running now")
-        print(f"  {base_url.rstrip('/')}/dashboard/jobs/requests/{job_id}")
-    else:
-        print(f"✗ trigger failed: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
+    result = client.trigger_pending_or_submit(job_type, {})
+    if result.get("_no_cron_slot"):
+        print(f"✗ no cron slot found for {job_type} — re-enable the job definition in Formicary", file=sys.stderr)
         sys.exit(1)
+    if result.get("_already_executing"):
+        job_id = result.get("id", "")
+        print(f"✓ {job_type} is already running (job {job_id})")
+        print(f"  {base_url.rstrip('/')}/dashboard/jobs/requests/{job_id}")
+        return
+    job_id = result.get("id", "")
+    if not job_id:
+        print(f"✗ trigger failed for {job_type} — no job ID returned", file=sys.stderr)
+        sys.exit(1)
+    print(f"✓ triggered {job_type} (job {job_id}) — running now")
+    print(f"  {base_url.rstrip('/')}/dashboard/jobs/requests/{job_id}")
+
+
 
 
 def main() -> None:
@@ -191,18 +187,47 @@ def main() -> None:
                         help="List registered job definitions and exit")
     parser.add_argument("--set-configs", action="store_true",
                         help="Push env vars as org configs (FORMICARY_PUBLIC_URL, DEFAULT_TRACKER, SLACK_CHANNEL)")
+    parser.add_argument("--set-config", nargs=2, metavar=("KEY", "VALUE"), action="append",
+                        dest="set_config_pairs", default=[],
+                        help="Set a single org config key=value (repeatable). "
+                             "Example: --set-config BASE_BRANCH stage --set-config UserTag alice")
     parser.add_argument("--trigger", metavar="JOB_TYPE",
                         help="Trigger a pending cron job to run immediately (e.g. ai-standup-jira)")
     parser.add_argument("--server", default=os.environ.get("FORMICARY_URL", "http://localhost:7777"),
                         help="Formicary base URL (env: FORMICARY_URL)")
     args = parser.parse_args()
 
-    token = os.environ.get("FORMICARY_TOKEN", "")
+    import re as _re
+    # Prefer ~/.zshrc over shell env — env token may be stale from an old session.
+    token = ""
+    zshrc = os.path.expanduser("~/.zshrc")
+    if os.path.exists(zshrc):
+        for _line in open(zshrc):
+            _m = _re.search(r'FORMICARY_TOKEN=["\']?([A-Za-z0-9_.~+/-]{20,})["\']?', _line)
+            if _m:
+                token = _m.group(1)
+                break
+    if not token:
+        token = os.environ.get("FORMICARY_TOKEN", "")
     if not token and not args.dry_run and not args.list:
-        print("✗ FORMICARY_TOKEN not set — export it before running", file=sys.stderr)
+        print("✗ FORMICARY_TOKEN not set — add it to ~/.zshrc or export before running", file=sys.stderr)
         sys.exit(1)
 
     client = FormicaryClient(base_url=args.server, token=token)
+
+    if args.set_config_pairs:
+        org_id = _resolve_org_id(token)
+        if not org_id:
+            print("✗ could not resolve org_id from FORMICARY_TOKEN", file=sys.stderr)
+            sys.exit(1)
+        for key, value in args.set_config_pairs:
+            if args.dry_run:
+                print(f"[dry-run] would set org config {key}={value}")
+            elif _push_org_config(args.server, token, org_id, key, value):
+                print(f"✓ config {key}={value}")
+            else:
+                sys.exit(1)
+        return
 
     if args.trigger:
         _trigger_now(client, args.server, token, args.trigger)

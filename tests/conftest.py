@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.common.config import MODEL_SONNET
+
 
 @pytest.fixture
 def tmp_workspace(tmp_path):
@@ -39,7 +41,7 @@ def sample_issue():
 def sample_config(tmp_workspace):
     return {
         "WORKSPACE_DIR": str(tmp_workspace),
-        "AI_MODEL": "claude-sonnet-4-6",
+        "AI_MODEL": MODEL_SONNET,
         "MAX_TURNS_PLAN": "30",
         "MAX_TURNS_IMPLEMENT": "100",
         "PICKUP_LABEL": "ai-ready",

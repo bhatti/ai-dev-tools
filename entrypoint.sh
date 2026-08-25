@@ -109,24 +109,51 @@ elif [ -n "${SSH_PRIVATE_KEY:-}" ]; then
 fi
 
 # --------------------------------------------------------------------------
-# 5. Install you-got-skills (claude skills)
-#    Skipped if already installed (marker file present) or network unavailable.
+# 5. Install you-got-skills (base skills — always fresh per pod)
+#    Clone into ~/.claude/skills/you-got-skills; symlink each skill directly
+#    under ~/.claude/skills/<name> so Claude Code's Skill tool discovers them.
 # --------------------------------------------------------------------------
-YGS_MARKER="${HOME}/.claude/.ygs-installed"
-if [ ! -f "${YGS_MARKER}" ]; then
-  echo "Installing you-got-skills..."
-  if git clone --depth 1 https://github.com/bhatti/you-got-skills.git /tmp/ygs 2>&1; then
-    (cd /tmp/ygs && [ -f setup.sh ] && bash setup.sh install && echo "you-got-skills installed")
-    rm -rf /tmp/ygs
-    touch "${YGS_MARKER}"
-  else
-    echo "WARNING: could not clone you-got-skills — continuing without skills" >&2
-  fi
+YGS_SKILLS_BASE="${HOME}/.claude/skills"
+YGS_INSTALL_DIR="${YGS_SKILLS_BASE}/you-got-skills"
+
+mkdir -p "${YGS_SKILLS_BASE}"
+echo "Installing you-got-skills..."
+if git clone --depth 1 https://github.com/bhatti/you-got-skills.git "${YGS_INSTALL_DIR}" 2>&1; then
+  for skill_dir in "${YGS_INSTALL_DIR}"/skills/ygs-*; do
+    skill_name="$(basename "$skill_dir")"
+    ln -snf "$skill_dir" "${YGS_SKILLS_BASE}/${skill_name}"
+  done
+  skill_count=$(ls -d "${YGS_INSTALL_DIR}"/skills/ygs-* 2>/dev/null | wc -l | tr -d ' ')
+  echo "you-got-skills: ${skill_count} skills installed → ${YGS_SKILLS_BASE}/"
 else
-  echo "you-got-skills already installed"
+  echo "WARNING: could not clone you-got-skills — continuing without base skills" >&2
 fi
 
 # --------------------------------------------------------------------------
-# 6. Execute the requested command
+# 6. Apply project-level skill overrides (highest precedence)
+#    If CODEBASE_DIR is set, scan <CODEBASE_DIR>/.claude/skills/ for any
+#    skill directories and symlink them over the base installs.  Project
+#    skills win over ygs defaults — same as /etc/init.d local overrides.
+# --------------------------------------------------------------------------
+_apply_project_skills() {
+  local proj_skills_dir="$1"
+  [ -d "$proj_skills_dir" ] || return 0
+  local count=0
+  for skill_dir in "$proj_skills_dir"/*/; do
+    [ -d "$skill_dir" ] || continue
+    local skill_name
+    skill_name="$(basename "$skill_dir")"
+    ln -snf "$(cd "$skill_dir" && pwd)" "${YGS_SKILLS_BASE}/${skill_name}"
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] && echo "Project skills: ${count} override(s) applied from ${proj_skills_dir}"
+}
+
+if [ -n "${CODEBASE_DIR:-}" ]; then
+  _apply_project_skills "${CODEBASE_DIR}/.claude/skills"
+fi
+
+# --------------------------------------------------------------------------
+# 7. Execute the requested command
 # --------------------------------------------------------------------------
 exec "$@"

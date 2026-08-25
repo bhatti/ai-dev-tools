@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from scripts.review.post_findings import _build_text, main
+from scripts.review.post_findings import _build_slack_text, render_report_md, render_report_html, main
 
 
 SAMPLE_FINDINGS = {
@@ -25,14 +25,14 @@ SAMPLE_FINDINGS = {
 }
 
 
-def test_build_text_contains_verdict():
-    text = _build_text(SAMPLE_FINDINGS)
+def test_build_slack_text_contains_verdict():
+    text = _build_slack_text(SAMPLE_FINDINGS)
     assert "REQUEST_CHANGES" in text
 
 
-def test_build_text_severity_order():
+def test_build_slack_text_severity_order():
     """HIGH findings appear before MEDIUM in the text."""
-    text = _build_text(SAMPLE_FINDINGS)
+    text = _build_slack_text(SAMPLE_FINDINGS)
     high_pos = text.find("HIGH")
     medium_pos = text.find("MEDIUM")
     assert high_pos != -1
@@ -40,17 +40,55 @@ def test_build_text_severity_order():
     assert high_pos < medium_pos
 
 
-def test_build_text_empty_findings():
+def test_build_slack_text_empty_findings():
     data = {"pr_url": "https://github.com/x/y/pull/1", "verdict": "APPROVE",
             "findings": [], "summary": "All good"}
-    text = _build_text(data)
+    text = _build_slack_text(data)
     assert "APPROVE" in text
     assert "All good" in text
 
 
-def test_build_text_includes_pr_url():
-    text = _build_text(SAMPLE_FINDINGS)
+def test_build_slack_text_includes_pr_url():
+    text = _build_slack_text(SAMPLE_FINDINGS)
     assert "https://github.com/org/repo/pull/42" in text
+
+
+def test_render_report_md_contains_verdict():
+    md = render_report_md(SAMPLE_FINDINGS)
+    assert "REQUEST_CHANGES" in md
+    assert "# " in md  # has a heading
+
+
+def test_render_report_md_severity_order():
+    md = render_report_md(SAMPLE_FINDINGS)
+    high_pos = md.find("HIGH")
+    medium_pos = md.find("MEDIUM")
+    assert high_pos < medium_pos
+
+
+def test_render_report_html_is_html():
+    md = render_report_md(SAMPLE_FINDINGS)
+    html = render_report_html(SAMPLE_FINDINGS, md)
+    assert html.startswith("<!DOCTYPE html>")
+    assert "REQUEST_CHANGES" in html
+
+
+def test_main_writes_report_files(tmp_workspace, monkeypatch):
+    """post_findings always writes review_report.md and review_report.html."""
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("SLACK_CHANNEL", "my-channel")
+
+    findings_path = tmp_workspace / "findings.json"
+    import json
+    findings_path.write_text(json.dumps(SAMPLE_FINDINGS))
+
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(main, ["--findings", str(findings_path)])
+    assert result.exit_code == 0
+    assert (tmp_workspace / "review_report.md").exists()
+    assert (tmp_workspace / "review_report.html").exists()
 
 
 @patch("scripts.review.post_findings.requests.post")

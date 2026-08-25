@@ -125,3 +125,80 @@ def test_validate_claude_config_bedrock_default_url(capsys):
     validate_claude_config(config)
     out = capsys.readouterr().out
     assert "mode=bedrock" in out
+
+
+# --- COMPLEXITY_MODEL_MAP ---
+
+def test_complexity_model_map_has_required_tiers():
+    from scripts.common.config import COMPLEXITY_MODEL_MAP, MODEL_BEDROCK_HAIKU, MODEL_BEDROCK_SONNET, MODEL_BEDROCK_OPUS
+    assert COMPLEXITY_MODEL_MAP["low"] == MODEL_BEDROCK_HAIKU
+    assert COMPLEXITY_MODEL_MAP["medium"] == MODEL_BEDROCK_SONNET
+    assert COMPLEXITY_MODEL_MAP["high"] == MODEL_BEDROCK_OPUS
+
+
+def test_complexity_model_map_covers_all_tiers():
+    from scripts.common.config import COMPLEXITY_MODEL_MAP
+    assert set(COMPLEXITY_MODEL_MAP.keys()) == {"low", "medium", "high"}
+
+
+def test_complexity_model_map_values_are_nonempty_strings():
+    from scripts.common.config import COMPLEXITY_MODEL_MAP
+    for tier, model_id in COMPLEXITY_MODEL_MAP.items():
+        assert isinstance(model_id, str) and model_id, f"tier={tier!r} has empty model ID"
+
+
+# --- .env file loading ---
+
+def test_load_config_reads_dotenv_when_present(tmp_path, monkeypatch):
+    """load_config reads KEY=VALUE from a .env file in cwd when key is absent from OS env."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEFAULT_TRACKER=jira\nSOME_VAR=test_value\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEFAULT_TRACKER", raising=False)
+    monkeypatch.delenv("SOME_VAR", raising=False)
+
+    config = load_config()
+    assert config["DEFAULT_TRACKER"] == "jira"
+    assert config["SOME_VAR"] == "test_value"
+
+
+def test_load_config_env_wins_over_dotenv(tmp_path, monkeypatch):
+    """.env value is ignored when OS env already sets the same key."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEFAULT_TRACKER=jira\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEFAULT_TRACKER", "github")
+
+    config = load_config()
+    assert config["DEFAULT_TRACKER"] == "github"
+
+
+def test_load_config_dotenv_ignores_comments_and_blanks(tmp_path, monkeypatch):
+    """.env parser skips comment lines and blank lines."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("# this is a comment\n\nTRACKER_KEY=from_dotenv\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TRACKER_KEY", raising=False)
+
+    config = load_config()
+    assert config["TRACKER_KEY"] == "from_dotenv"
+
+
+def test_load_config_dotenv_strips_quotes(tmp_path, monkeypatch):
+    """.env parser strips surrounding quotes from values."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text('MY_KEY="quoted_value"\nOTHER_KEY=\'single_quoted\'\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MY_KEY", raising=False)
+    monkeypatch.delenv("OTHER_KEY", raising=False)
+
+    config = load_config()
+    assert config["MY_KEY"] == "quoted_value"
+    assert config["OTHER_KEY"] == "single_quoted"
+
+
+def test_load_config_no_dotenv_is_fine(tmp_path, monkeypatch):
+    """load_config doesn't fail when no .env file exists."""
+    monkeypatch.chdir(tmp_path)  # empty dir, no .env
+    config = load_config()
+    assert "WORKSPACE_DIR" in config

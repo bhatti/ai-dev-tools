@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.standup.synthesize import _build_prompt, _clean_code_fence, _extract_section
+from scripts.standup.synthesize import _build_prompt, _clean_code_fence, _extract_section, _strip_markdown
 
 
 # ---------------------------------------------------------------------------
@@ -98,33 +98,35 @@ def test_clean_code_fence_no_fences():
 
 def test_build_prompt_includes_signals():
     signals = _make_signals()
+    signals["team_members"] = ["Alice", "Bob"]
     prompt = _build_prompt(signals)
-    assert "PROJ-1" in prompt
-    assert "Alice" in prompt
-    assert "STANDUP_BRIEF" in prompt
-    assert "RISK_REPORT" in prompt
+    # Prompt tells Claude to invoke /ygs-standup and read signals.json directly.
+    assert "ygs-standup" in prompt
+    assert "Alice" in prompt  # team member appears in TEAM ROSTER
+    assert "signals.json" in prompt
 
 
 def test_build_prompt_trims_long_comments():
+    # Prompt no longer embeds signals JSON, so comment trimming is no longer done here.
+    # This test just verifies _build_prompt runs without error on signals with long comments.
     signals = _make_signals()
     long_text = "x" * 500
     signals["issues"][0]["recent_comments"] = [
         {"author": "Bob", "text": long_text, "created": "2026-07-17T09:00:00Z"}
     ]
     prompt = _build_prompt(signals)
-    # After trimming, no full 500-char run should appear in the prompt
-    assert "x" * 400 not in prompt
+    assert "ygs-standup" in prompt
 
 
 def test_build_prompt_keeps_max_3_comments():
+    # Prompt no longer embeds signals JSON — just verify _build_prompt runs without error.
     signals = _make_signals()
     signals["issues"][0]["recent_comments"] = [
         {"author": f"User{i}", "text": f"comment {i}", "created": "2026-07-17T09:00:00Z"}
         for i in range(6)
     ]
     prompt = _build_prompt(signals)
-    # Should not include all 6 comments verbatim (trimmed to last 3)
-    assert "comment 0" not in prompt  # oldest dropped
+    assert "ygs-standup" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +152,49 @@ No HIGH risks.
 
 {"status":"DONE","risk_count":0,"discussion_questions":1,"silence_count":0}
 """
+
+
+# ---------------------------------------------------------------------------
+# _strip_markdown
+# ---------------------------------------------------------------------------
+
+def test_strip_markdown_preserves_bullet_bullets():
+    """Lines already starting with • must not be touched."""
+    text = "• Alice: working on PROJ-1\n• Bob: reviewing PRs"
+    assert _strip_markdown(text) == "• Alice: working on PROJ-1\n• Bob: reviewing PRs"
+
+
+def test_strip_markdown_converts_dash_bullets():
+    """'- item' lines at line-start are converted to '• item'."""
+    text = "- PROJ-1: in progress\n- PROJ-2: blocked"
+    result = _strip_markdown(text)
+    assert result == "• PROJ-1: in progress\n• PROJ-2: blocked"
+
+
+def test_strip_markdown_preserves_star_bold():
+    """'*Bold Header*' lines are preserved — single-star is valid Slack mrkdwn bold."""
+    text = "*Status*\n*Risks*"
+    result = _strip_markdown(text)
+    assert result == "*Status*\n*Risks*"
+
+
+def test_strip_markdown_does_not_touch_bullet_with_dash_in_text():
+    """A dash inside a bullet body must not trigger conversion."""
+    text = "• PROJ-1: in-progress update"
+    result = _strip_markdown(text)
+    assert result == "• PROJ-1: in-progress update"
+
+
+def test_strip_markdown_strips_bold_markers():
+    """**text** → *text* (converts markdown double-star to Slack single-star bold)."""
+    assert _strip_markdown("**STANDUP**") == "*STANDUP*"
+
+
+def test_strip_markdown_strips_heading_prefix():
+    """### heading lines have the # prefix removed."""
+    text = "### STATUS\nsome content"
+    result = _strip_markdown(text)
+    assert result.startswith("STATUS")
 
 
 @patch("scripts.standup.synthesize.validate_claude_config")

@@ -4,7 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.standup.slack_client import get_standup_messages, notify, post_message, resolve_channel_id, upload_file
+from scripts.standup.slack_client import (
+    build_issue_blocks, build_mrkdwn_blocks, build_pr_blocks,
+    get_standup_messages, notify, post_message, resolve_channel_id, upload_file,
+)
 
 
 @pytest.fixture
@@ -185,6 +188,33 @@ def test_notify_custom_channel_key(mock_post, tmp_workspace):
     assert mock_post.call_args.kwargs["json"]["channel"] == "standup-alerts"
 
 
+@patch("scripts.standup.slack_client.requests.post")
+def test_notify_with_blocks(mock_post, tmp_workspace):
+    """notify() passes blocks to post_message when provided."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    config = {
+        "WORKSPACE_DIR": str(tmp_workspace),
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "my-team",
+    }
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*Title*"}}]
+    ok = notify(config, "fallback text", blocks=blocks)
+    assert ok is True
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["blocks"] == blocks
+    assert payload["text"] == "fallback text"
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_message_no_blocks_by_default(mock_post, tmp_workspace):
+    """post_message() does not include blocks key when blocks=None."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    config = {"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_CHANNEL": "c"}
+    post_message(config, "hello")
+    payload = mock_post.call_args.kwargs["json"]
+    assert "blocks" not in payload
+
+
 # ---------------------------------------------------------------------------
 # upload_file
 # ---------------------------------------------------------------------------
@@ -236,3 +266,92 @@ def test_upload_file_get_url_fails(mock_post, config_with_slack, tmp_workspace):
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": False, "error": "not_allowed"})
     ok = upload_file(config_with_slack, str(html_file), "report.html")
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# build_mrkdwn_blocks
+# ---------------------------------------------------------------------------
+
+def test_build_mrkdwn_blocks_basic():
+    text = "Line one\nLine two\n\nParagraph two\nLine three"
+    blocks = build_mrkdwn_blocks(text)
+    # Should produce section blocks + divider
+    types = [b["type"] for b in blocks]
+    assert "section" in types
+    assert types[-1] == "divider"
+    # All text content should be mrkdwn
+    for b in blocks:
+        if b["type"] == "section":
+            assert b["text"]["type"] == "mrkdwn"
+
+
+def test_build_mrkdwn_blocks_splits_long_text():
+    # Build a text longer than 2900 chars in a single paragraph
+    long_para_a = "A " * 1000  # 2000 chars
+    long_para_b = "B " * 1000  # 2000 chars
+    text = long_para_a + "\n\n" + long_para_b
+    blocks = build_mrkdwn_blocks(text)
+    section_blocks = [b for b in blocks if b["type"] == "section"]
+    # Should split into at least 2 sections
+    assert len(section_blocks) >= 2
+
+
+# ---------------------------------------------------------------------------
+# build_pr_blocks
+# ---------------------------------------------------------------------------
+
+def test_build_pr_blocks_empty():
+    blocks = build_pr_blocks("PR Queue", {"sprint": "Sprint 5", "pr_count": 0, "prs": []})
+    texts = [b.get("text", {}).get("text", "") for b in blocks]
+    assert any("No open PRs" in t for t in texts)
+
+
+def test_build_pr_blocks_with_prs():
+    pr_data = {
+        "sprint": "Sprint 5",
+        "pr_count": 2,
+        "prs": [
+            {
+                "id": "42",
+                "jira_key": "PROJ-100",
+                "title": "Fix bug",
+                "jira_summary": "Fix important bug",
+                "url": "https://github.com/org/repo/pull/42",
+                "jira_url": "https://org.atlassian.net/browse/PROJ-100",
+                "author": "Alice Smith",
+                "age_days": 2,
+                "approved_by": ["Bob Jones"],
+                "reviewers": ["Charlie"],
+                "status": "In Review",
+            },
+            {
+                "id": "10",
+                "jira_key": "PROJ-200",
+                "title": "Stale PR",
+                "jira_summary": "Old work",
+                "url": "https://github.com/org/repo/pull/10",
+                "jira_url": "https://org.atlassian.net/browse/PROJ-200",
+                "author": "Dave",
+                "age_days": 8,
+                "approved_by": [],
+                "reviewers": [],
+                "status": "Open",
+            },
+        ],
+    }
+    blocks = build_pr_blocks("Sprint PR Queue", pr_data)
+    # Header block present
+    assert blocks[0]["type"] == "header"
+    # Both PRs appear as clickable links somewhere in text content
+    all_text = " ".join(
+        b.get("text", {}).get("text", "") for b in blocks if b["type"] == "section"
+    )
+    all_fields = " ".join(
+        f.get("text", "") for b in blocks if b["type"] == "section"
+        for f in (b.get("fields") or [])
+    )
+    assert "PROJ-100" in all_text
+    assert "PROJ-200" in all_text
+    assert "pull/42" in all_text
+    # Approved PR should have approved-by info in fields
+    assert "Bob" in all_fields

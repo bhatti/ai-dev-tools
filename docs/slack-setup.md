@@ -179,6 +179,7 @@ Trigger words drive routing entirely from YAML — `router.py` needs no changes.
 
 ## See Also
 
+- [Slack Router — How It Works](slack-router.md) — complete request flow, thread replies, Block Kit output, extension model
 - [Architecture](architecture.md) — how the router, formicary, and Claude fit together
-- [Configuration Reference](configuration.md) — all env vars
+- [Configuration Reference](configuration.md) — all env vars including `JIRA_TEAM_FIELD`, `JIRA_SPACE`, `SlackThreadTs`
 - [Kubernetes Deployment](k8s-deployment.md) — full K8s setup

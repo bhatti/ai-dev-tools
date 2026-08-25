@@ -23,11 +23,12 @@ file-based artifacts under `/workspace/{issue-id}/`:
 | File | Purpose |
 |------|---------|
 | `formicary/ai-gh-issue-picker.yaml` | Cron: pick `ai-ready` GitHub issues every 5 min |
-| `formicary/ai-gh-implement.yaml` | Pipeline: plan → implement → create_pr → monitor_pr (calls learn on exit) |
-| `formicary/ai-gh-review.yaml` | Pipeline: review PR → post Block Kit findings to Slack → PAUSE_JOB → apply decision |
+| `formicary/ai-gh-implement.yaml` | Pipeline: plan → implement → self-review → create_pr → monitor_pr (calls learn on exit) |
+| `formicary/ai-gh-review.yaml` | Pipeline: review PR → post Block Kit findings to Slack → PAUSE_JOB → apply decision; `ReviewDepth=deep` adds 3 extra passes |
 | `formicary/ai-jira-issue-picker.yaml` | Cron: pick `ai-ready` Jira issues every 5 min |
-| `formicary/ai-jira-implement.yaml` | Pipeline: plan → implement → create_pr → monitor_pr (calls learn on exit) |
-| `formicary/ai-jira-review.yaml` | Same review pipeline for Bitbucket/Jira PRs |
+| `formicary/ai-jira-implement.yaml` | Pipeline: plan → implement → self-review → create_pr → monitor_pr (calls learn on exit) |
+| `formicary/ai-jira-review.yaml` | Same review pipeline for Bitbucket/Jira PRs; `ReviewDepth=deep` adds 3 extra passes |
+| `formicary/ai-jira-query.yaml` | Search Jira/GitHub issues by free text, or analyze issues for root cause (Mode=analyze) |
 | `formicary/ai-adhoc.yaml` | Run any you-got-skills skill with a free-form prompt, post result to Slack |
 
 ## Signal-Based Pause/Resume (Review Workflows)

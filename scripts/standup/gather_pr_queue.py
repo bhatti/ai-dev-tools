@@ -38,8 +38,20 @@ from scripts.standup.gather_jira import (
     _jira_headers,
     _jira_base,
 )
+from scripts.standup.gather_gh import _parse_team_filter
+from scripts.standup.bb_helpers import get_open_prs as bb_get_open_prs
 
 _JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
+
+# Jira statuses that indicate a PR is actively in code review.
+_IN_REVIEW_STATUSES = {
+    "in review",
+    "code review",
+    "review",
+    "in code review",
+    "ready for review",
+    "peer review",
+}
 
 
 def _get_sprint_issues_with_ids(config: dict, workspace_dir: Path | None = None) -> tuple[list[dict], str]:
@@ -80,8 +92,9 @@ def _get_sprint_issues_with_ids(config: dict, workspace_dir: Path | None = None)
         sprint = active_sprints[0]
         sprint_name = sprint.get("name", "")
         sprint_id = sprint["id"]
+        team_filter = _parse_team_filter(config)
         print(f"[gather_pr_queue] active sprint: {sprint_name!r} (id={sprint_id})", flush=True)
-        for raw in get_sprint_issues(config, sprint_id):
+        for raw in get_sprint_issues(config, sprint_id, team_filter or None):
             key = raw.get("key", "")
             numeric_id = str(raw.get("id", ""))
             if key and numeric_id:
@@ -141,8 +154,63 @@ def _get_prs_for_issue(config: dict, issue_id: str) -> list[dict]:
         return []
 
 
+def _build_pr_entry_from_devstatus(pr: dict, issue: dict, config: dict) -> dict:
+    """Convert a dev-status PR dict into the canonical pr_queue entry shape."""
+    pr_id = str(pr.get("id", ""))
+    issue_key = issue["key"]
+
+    age_days: float = 0.0
+    for ts_field in ("created", "lastUpdate"):
+        ts = pr.get(ts_field, "")
+        if ts:
+            try:
+                age_days = (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                ).total_seconds() / 86400
+                break
+            except (ValueError, AttributeError):
+                pass
+
+    reviewers_raw = pr.get("reviewers", [])
+    approved_by: list[str] = [r.get("name", "") for r in reviewers_raw if r.get("approved")]
+    pending_reviewers: list[str] = [r.get("name", "") for r in reviewers_raw if not r.get("approved")]
+
+    pr_url = pr.get("url", "")
+    if re.search(r"\{[0-9a-f-]{36}\}", pr_url, re.IGNORECASE):
+        bb_ws = config.get("BITBUCKET_WORKSPACE", "")
+        bb_repo = config.get("BITBUCKET_REPO", "")
+        if bb_ws and bb_repo:
+            pr_url = f"https://bitbucket.org/{bb_ws}/{bb_repo}/pull-requests/{pr_id}"
+
+    jira_base = _jira_base(config).rstrip("/")
+    jira_url_link = f"{jira_base}/browse/{issue_key}" if jira_base and issue_key else ""
+
+    return {
+        "id": pr_id,
+        "title": pr.get("name", ""),
+        "author": (pr.get("author") or {}).get("name", "unknown"),
+        "url": pr_url,
+        "jira_url": jira_url_link,
+        "age_days": round(age_days, 1),
+        "jira_key": issue_key,
+        "jira_summary": issue.get("summary", ""),
+        "jira_status": issue.get("status", ""),
+        "reviewers": pending_reviewers,
+        "approved_by": approved_by,
+        "changes_requested_by": [],
+    }
+
+
 def _gather_jira(config: dict, workspace_dir: Path | None = None) -> dict:
-    """Gather PR queue from Jira dev-status API. Returns result dict."""
+    """Gather PR queue from Jira dev-status API with BB REST fallback.
+
+    Strategy:
+    1. Fetch sprint issues, prioritise those in "In Review" (or similar) status.
+    2. For each issue, query Jira dev-status API for linked Bitbucket PRs.
+    3. If dev-status returns 0 PRs across all issues, fall back to bb_helpers
+       (BB REST API) and match PRs to issues by Jira key in branch name or title.
+    """
     jira_url = config.get("JIRA_BASE_URL", "")
     jira_project = config.get("JIRA_PROJECT", "")
     if not jira_url or not jira_project:
@@ -159,84 +227,114 @@ def _gather_jira(config: dict, workspace_dir: Path | None = None) -> dict:
     if not sprint_issues:
         return {"sprint": sprint_name, "pr_count": 0, "prs": []}
 
-    # Query dev-status per issue — collect OPEN PRs, deduplicate by PR id
+    # Separate "In Review" issues from everything else — they are the primary signal.
+    in_review_issues = [
+        i for i in sprint_issues
+        if i.get("status", "").lower() in _IN_REVIEW_STATUSES
+    ]
+    other_issues = [i for i in sprint_issues if i not in in_review_issues]
+    if in_review_issues:
+        print(
+            f"[gather_pr_queue] {len(in_review_issues)} 'In Review' issues, "
+            f"{len(other_issues)} others",
+            flush=True,
+        )
+    else:
+        print(
+            f"[gather_pr_queue] no 'In Review' issues found — querying all {len(sprint_issues)} sprint issues",
+            flush=True,
+        )
+
+    # Order: In Review first so the output is sorted by priority.
+    ordered_issues = in_review_issues + other_issues
+
+    # --- Phase 1: try Jira dev-status API ---
     print("[gather_pr_queue] querying Jira dev-status API for linked PRs ...", flush=True)
     seen_pr_ids: set[str] = set()
     output_prs: list[dict] = []
 
-    for issue in sprint_issues:
-        issue_key = issue["key"]
-        issue_id = issue["id"]
-        raw_prs = _get_prs_for_issue(config, issue_id)
-
+    for issue in ordered_issues:
+        raw_prs = _get_prs_for_issue(config, issue["id"])
         for pr in raw_prs:
             pr_id = str(pr.get("id", ""))
-            pr_status = (pr.get("status") or "").upper()
-            if pr_status != "OPEN":
+            if (pr.get("status") or "").upper() != "OPEN":
                 continue
             if pr_id in seen_pr_ids:
                 continue
             seen_pr_ids.add(pr_id)
+            output_prs.append(_build_pr_entry_from_devstatus(pr, issue, config))
 
-            # Parse age from lastUpdate or created
-            age_days: float = 0.0
-            for ts_field in ("created", "lastUpdate"):
-                ts = pr.get(ts_field, "")
-                if ts:
-                    try:
-                        age_days = (
-                            datetime.now(timezone.utc)
-                            - datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        ).total_seconds() / 86400
-                        break
-                    except (ValueError, AttributeError):
-                        pass
+    if output_prs:
+        print(f"[gather_pr_queue] {len(output_prs)} open PRs via dev-status API", flush=True)
+        return {"sprint": sprint_name, "pr_count": len(output_prs), "prs": output_prs}
 
-            # Reviewers — dev-status returns {name, approved} per reviewer
-            reviewers_raw = pr.get("reviewers", [])
-            approved_by: list[str] = [
-                r.get("name", "") for r in reviewers_raw if r.get("approved")
-            ]
-            pending_reviewers: list[str] = [
-                r.get("name", "") for r in reviewers_raw if not r.get("approved")
-            ]
+    # --- Phase 2: dev-status returned nothing — fall back to BB REST API ---
+    print(
+        "[gather_pr_queue] dev-status returned 0 PRs — falling back to Bitbucket REST API",
+        flush=True,
+    )
+    bb_prs = bb_get_open_prs(config)
+    if not bb_prs:
+        print("[gather_pr_queue] BB REST API also returned 0 PRs", flush=True)
+        return {"sprint": sprint_name, "pr_count": 0, "prs": []}
 
-            # Fix Bitbucket URL — dev-status uses UUID placeholders like {uuid}, replace with real slug
-            pr_url = pr.get("url", "")
-            if re.search(r"\{[0-9a-f-]{36}\}", pr_url, re.IGNORECASE):
-                bb_ws = config.get("BITBUCKET_WORKSPACE", "")
-                bb_repo = config.get("BITBUCKET_REPO", "")
-                if bb_ws and bb_repo:
-                    pr_url = f"https://bitbucket.org/{bb_ws}/{bb_repo}/pull-requests/{pr_id}"
+    print(f"[gather_pr_queue] {len(bb_prs)} open BB PRs; matching to sprint issues ...", flush=True)
 
-            jira_base = _jira_base(config).rstrip("/")
-            jira_url = f"{jira_base}/browse/{issue_key}" if jira_base and issue_key else ""
+    # Build a lookup: jira_key → issue dict for fast matching.
+    issue_by_key: dict[str, dict] = {i["key"]: i for i in sprint_issues}
 
-            output_prs.append({
-                "id": pr_id,
-                "title": pr.get("name", ""),
-                "author": (pr.get("author") or {}).get("name", "unknown"),
-                "url": pr_url,
-                "jira_url": jira_url,
-                "age_days": round(age_days, 1),
-                "jira_key": issue_key,
-                "jira_summary": issue.get("summary", ""),
-                "jira_status": issue.get("status", ""),
-                "reviewers": pending_reviewers,
-                "approved_by": approved_by,
-                "changes_requested_by": [],
-            })
+    jira_base_url = _jira_base(config).rstrip("/")
 
-    print(f"[gather_pr_queue] {len(output_prs)} open PRs linked to sprint issues", flush=True)
-    return {
-        "sprint": sprint_name,
-        "pr_count": len(output_prs),
-        "prs": output_prs,
-    }
+    for pr in bb_prs:
+        branch = pr.get("branch", "")
+        title = pr.get("title", "")
+        # Extract all Jira keys from branch name and title.
+        keys_found = _JIRA_KEY_RE.findall(branch) + _JIRA_KEY_RE.findall(title)
+        matched_issue = next(
+            (issue_by_key[k] for k in keys_found if k in issue_by_key), None
+        )
+
+        # Only include PRs associated with a sprint Jira issue
+        # (optionally: prefer "In Review", but include all matches).
+        if not matched_issue:
+            continue
+
+        pr_id = str(pr.get("id", ""))
+        if pr_id in seen_pr_ids:
+            continue
+        seen_pr_ids.add(pr_id)
+
+        issue_key = matched_issue["key"]
+        jira_url_link = f"{jira_base_url}/browse/{issue_key}" if jira_base_url and issue_key else ""
+        age_days = round(pr.get("age_hours", 0) / 24, 1)
+
+        output_prs.append({
+            "id": pr_id,
+            "title": title,
+            "author": pr.get("author", "unknown"),
+            "url": pr.get("url", ""),
+            "jira_url": jira_url_link,
+            "age_days": age_days,
+            "jira_key": issue_key,
+            "jira_summary": matched_issue.get("summary", ""),
+            "jira_status": matched_issue.get("status", ""),
+            "reviewers": pr.get("reviewers", []),
+            "approved_by": [],
+            "changes_requested_by": [],
+        })
+
+    print(
+        f"[gather_pr_queue] {len(output_prs)} sprint-linked PRs via BB REST fallback",
+        flush=True,
+    )
+    return {"sprint": sprint_name, "pr_count": len(output_prs), "prs": output_prs}
 
 
 def _gather_github(config: dict) -> dict:
-    """Gather PR queue from GitHub via gh CLI. Returns result dict."""
+    """Gather PR queue from GitHub via gh CLI. Returns result dict.
+
+    Uses gather_gh.get_open_prs which already filters by team members.
+    """
     from scripts.standup.gather_gh import get_open_prs as gh_get_open_prs
 
     gh_org = config.get("GH_ORG", "")
@@ -247,7 +345,7 @@ def _gather_github(config: dict) -> dict:
 
     print(f"[gather_pr_queue] fetching open GitHub PRs for {gh_org}/{gh_repo} ...", flush=True)
     raw_prs = gh_get_open_prs(config)
-    print(f"[gather_pr_queue] {len(raw_prs)} total open PRs", flush=True)
+    print(f"[gather_pr_queue] {len(raw_prs)} team-relevant open PRs", flush=True)
 
     output_prs = []
     for pr in raw_prs:
@@ -263,14 +361,18 @@ def _gather_github(config: dict) -> dict:
         if "CHANGES_REQUESTED" in review_states:
             changes_requested_by = ["changes requested"]
 
-        jira_keys = _JIRA_KEY_RE.findall(pr.get("title", ""))
+        branch = pr.get("branch", "")
+        jira_keys = _JIRA_KEY_RE.findall(pr.get("title", "")) + _JIRA_KEY_RE.findall(branch)
         jira_key = jira_keys[0] if jira_keys else ""
+        jira_base_url = (config.get("JIRA_BASE_URL") or "").rstrip("/")
+        jira_url_link = f"{jira_base_url}/browse/{jira_key}" if jira_base_url and jira_key else ""
 
         output_prs.append({
             "id": pr["id"],
             "title": pr["title"],
             "author": pr["author"],
             "url": pr["url"],
+            "jira_url": jira_url_link,
             "age_days": age_days,
             "jira_key": jira_key,
             "jira_summary": "",

@@ -31,6 +31,9 @@ class FormicaryClient:
     def __init__(self, base_url: str, token: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
+        # Disable TLS verification when FORMICARY_TLS_VERIFY=false (self-signed cert).
+        tls_verify = os.environ.get("FORMICARY_TLS_VERIFY", "true").lower()
+        self._verify: bool | str = tls_verify not in ("false", "0", "no")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -45,6 +48,18 @@ class FormicaryClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    def _get(self, path: str, **kwargs) -> requests.Response:
+        return requests.get(self._url(path), headers=self._headers(),
+                            timeout=_DEFAULT_TIMEOUT, verify=self._verify, **kwargs)
+
+    def _post(self, url: str, **kwargs) -> requests.Response:
+        return requests.post(url, headers=self._headers(),
+                             timeout=_DEFAULT_TIMEOUT, verify=self._verify, **kwargs)
+
+    def _put(self, url: str, **kwargs) -> requests.Response:
+        return requests.put(url, headers=self._headers(),
+                            timeout=_DEFAULT_TIMEOUT, verify=self._verify, **kwargs)
+
     def _log_error(self, label: str, resp: requests.Response) -> None:
         print(
             f"[formicary] {label} HTTP {resp.status_code}: {resp.text[:200]}",
@@ -56,24 +71,26 @@ class FormicaryClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def submit(self, job_type: str, params: dict[str, Any], user_key: str = "") -> dict:
+    def submit(self, job_type: str, params: dict[str, Any], user_key: str = "", description: str = "") -> dict:
         """Submit a new job.  Returns job dict (has ``id`` field) or ``{}`` on error.
 
         user_key, when set, is stored as the job's user_key (unique index in Formicary).
         Pass SlackThreadTs so each Slack thread maps to exactly one job — a second submit
         with the same user_key returns the existing job rather than creating a duplicate.
 
+        description, when set, is stored as a short human-readable label for the job.
+
         Response is wrapped: {"job_request": {...}} — unwrapped before returning.
         """
         payload: dict[str, Any] = {"job_type": job_type, "params": params}
         if user_key:
             payload["user_key"] = user_key
+        if description:
+            payload["description"] = description[:100]
         try:
-            resp = requests.post(
+            resp = self._post(
                 self._url("/api/v1/jobs/requests"),  # gRPC-gateway v1
                 json=payload,
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
             )
             if not resp.ok:
                 # 409 Conflict (fixed server) or 500 with UNIQUE text (unfixed server):
@@ -135,12 +152,7 @@ class FormicaryClient:
         if job_type:
             api_params["job_type"] = job_type
         try:
-            resp = requests.get(
-                self._url("/api/v1/jobs/requests"),
-                params=api_params,
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
-            )
+            resp = self._get("/api/v1/jobs/requests", params=api_params)
             if not resp.ok:
                 self._log_error(f"find_jobs(state={state})", resp)
                 return []
@@ -178,7 +190,7 @@ class FormicaryClient:
                 matched.append(job)
         return matched
 
-    def trigger_pending_or_submit(self, job_type: str, params: dict[str, Any]) -> dict:
+    def trigger_pending_or_submit(self, job_type: str, params: dict[str, Any], description: str = "") -> dict:
         """For cron jobs: find the PENDING scheduled request, inject params, and trigger it.
 
         Cron jobs always have a PENDING request queued for their next scheduled time.
@@ -238,12 +250,12 @@ class FormicaryClient:
         body: dict[str, Any] = {}
         if params:
             body["params"] = params
+        if description:
+            body["description"] = description[:100]
         try:
-            resp = requests.post(
+            resp = self._post(
                 self._url(f"/api/v1/jobs/requests/{job_id}/trigger"),
                 json=body if body else None,
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
             )
             if not resp.ok:
                 self._log_error(f"trigger_pending_or_submit({job_id})", resp)
@@ -257,11 +269,7 @@ class FormicaryClient:
     def get_job(self, job_id: str) -> dict | None:
         """Fetch a single job by ID.  Returns ``None`` on error."""
         try:
-            resp = requests.get(
-                self._url(f"/api/v1/jobs/requests/{job_id}"),
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
-            )
+            resp = self._get(f"/api/v1/jobs/requests/{job_id}")
             if not resp.ok:
                 self._log_error(f"get_job({job_id})", resp)
                 return None
@@ -282,11 +290,9 @@ class FormicaryClient:
         if variables:
             body["params"] = variables
         try:
-            resp = requests.post(
+            resp = self._post(
                 self._url(f"/api/v1/jobs/requests/{job_id}/trigger"),
                 json=body if body else None,
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
             )
             if not resp.ok:
                 self._log_error(f"resume trigger({job_id})", resp)
@@ -317,11 +323,7 @@ class FormicaryClient:
             if not org_id:
                 return {}
 
-            resp = requests.get(
-                self._url(f"/api/v1/orgs/{org_id}/configs"),
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
-            )
+            resp = self._get(f"/api/v1/orgs/{org_id}/configs")
             if not resp.ok:
                 return {}
             data = resp.json()
@@ -330,9 +332,11 @@ class FormicaryClient:
             )
 
             def _to_upper(name: str) -> str:
-                # CamelCase → UPPER_SNAKE_CASE
-                s = re.sub(r"([A-Z])", r"_\1", name).lstrip("_").upper()
-                return s
+                # CamelCase → UPPER_SNAKE_CASE: handles consecutive capitals
+                # correctly (e.g. SlackBotURL → SLACK_BOT_URL, not SLACK_BOT_U_R_L)
+                s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+                s = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s)
+                return s.upper()
 
             result: dict[str, str] = {}
             for item in items:
@@ -362,23 +366,26 @@ class FormicaryClient:
             print("[formicary] deploy_definition: missing or unparseable job_type", file=sys.stderr)
             return False
 
-        headers = dict(self._headers())
-        headers["Content-Type"] = "application/x-yaml"
+        # Use /api/jobs/definitions (not /api/v1/) — the gRPC-gateway is JSON-only;
+        # the Echo controller at /api/jobs/definitions accepts YAML content-type.
+        yaml_headers = {"Content-Type": "application/x-yaml"}
         try:
             resp = requests.post(
-                self._url("/api/v1/jobs/definitions"),
+                self._url("/api/jobs/definitions"),
                 data=yaml_content.encode(),
-                headers=headers,
+                headers={**self._headers(), **yaml_headers},
                 timeout=_DEFAULT_TIMEOUT,
+                verify=self._verify,
             )
             if resp.status_code in (200, 201):
                 return True
             if resp.status_code == 409:
                 put_resp = requests.put(
-                    self._url(f"/api/v1/jobs/definitions/{job_type}"),
+                    self._url(f"/api/jobs/definitions/{job_type}"),
                     data=yaml_content.encode(),
-                    headers=headers,
+                    headers={**self._headers(), **yaml_headers},
                     timeout=_DEFAULT_TIMEOUT,
+                    verify=self._verify,
                 )
                 if put_resp.ok:
                     return True
@@ -393,11 +400,7 @@ class FormicaryClient:
     def list_definitions(self) -> list[dict]:
         """Return all registered job definition summaries."""
         try:
-            resp = requests.get(
-                self._url("/api/v1/jobs/definitions"),
-                headers=self._headers(),
-                timeout=_DEFAULT_TIMEOUT,
-            )
+            resp = self._get("/api/v1/jobs/definitions")
             if not resp.ok:
                 self._log_error("list_definitions", resp)
                 return []
@@ -418,11 +421,27 @@ class FormicaryClient:
 
     @classmethod
     def from_env(cls) -> FormicaryClient:
-        """Construct a client from environment variables.
+        """Construct a client from environment variables or ~/.zshrc.
 
         FORMICARY_URL   — default http://localhost:7777
         FORMICARY_TOKEN — required for authenticated endpoints
+
+        ~/.zshrc is preferred over the shell env because the env token may be
+        stale from an old session; the user explicitly refreshes the token in zshrc.
         """
+        import re as _re
         base_url = os.environ.get("FORMICARY_URL", "http://localhost:7777")
-        token = os.environ.get("FORMICARY_TOKEN", "")
+        token = ""
+        zshrc = os.path.expanduser("~/.zshrc")
+        if os.path.exists(zshrc):
+            try:
+                for _line in open(zshrc):
+                    _m = _re.search(r'FORMICARY_TOKEN=["\']?([A-Za-z0-9_.~+/-]{20,})["\']?', _line)
+                    if _m:
+                        token = _m.group(1)
+                        break
+            except Exception:
+                pass
+        if not token:
+            token = os.environ.get("FORMICARY_TOKEN", "")
         return cls(base_url=base_url, token=token)

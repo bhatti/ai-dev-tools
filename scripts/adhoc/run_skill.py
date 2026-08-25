@@ -15,6 +15,7 @@ Exit codes: 0=done, 1=error
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,26 +24,42 @@ import re
 import click
 import requests
 
-from scripts.common.claude_runner import run_claude
-from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
+from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
+from scripts.standup.slack_client import build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify
 
 # Maximum chars of Claude output to post back to Slack
 _MAX_SLACK_CHARS = 3000
 
-# Directories to search for skill SKILL.md files (in priority order)
-_SKILL_SEARCH_PATHS = [
-    Path("/workspace/skills"),
-    Path("/workspace/you-got-skills/skills"),
-    Path.home() / ".claude" / "skills" / "you-got-skills" / "skills",
-    Path.home() / "workplace" / "you-got-skills" / "skills",
-]
+
+def _skill_search_paths() -> list[Path]:
+    """Return skill search paths in priority order (highest priority first).
+
+    Resolution order:
+    1. Codebase-local skills: CODEBASE_DIR/.claude/skills/<name>/SKILL.md
+       (applied as symlink overrides by entrypoint.sh; also checked here for
+       direct Python-side SKILL.md loading)
+    2. Installed skills: ~/.claude/skills/<name>/SKILL.md
+       (ygs base + project overrides, symlinked by entrypoint.sh on startup)
+    3. Local dev fallback: ~/.claude/skills/you-got-skills/skills
+       (the you-got-skills repo itself, symlinked there by entrypoint.sh or
+        the you-got-skills/setup script when running outside a container)
+    """
+    paths: list[Path] = []
+    codebase_dir = os.environ.get("CODEBASE_DIR", "").strip()
+    if codebase_dir:
+        paths.append(Path(codebase_dir) / ".claude" / "skills")
+    paths.append(Path.home() / ".claude" / "skills")
+    paths.append(Path.home() / ".claude" / "skills" / "you-got-skills" / "skills")
+    return paths
 
 
 def _load_skill_md(skill: str) -> str | None:
     """Search known paths for <skill>/SKILL.md and return its content, or None."""
-    for base in _SKILL_SEARCH_PATHS:
+    for base in _skill_search_paths():
         candidate = base / skill / "SKILL.md"
         if candidate.exists():
+            print(f"[adhoc] skill path: {candidate}", flush=True)
             return candidate.read_text(encoding="utf-8")
     return None
 
@@ -90,22 +107,38 @@ def post_to_thread(config: dict, text: str, thread_ts: str | None = None) -> boo
     return True
 
 
+def _table_row_to_bullet(line: str) -> str:
+    """Convert a markdown table data row '| col1 | col2 |' to '• col1 · col2'."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    cells = [c for c in cells if c]
+    return "• " + " · ".join(cells) if cells else ""
+
+
 def _strip_for_slack(text: str) -> str:
     """Remove markdown formatting that Slack renders literally.
 
-    Strips bold/italic markers, inline code, heading prefixes, markdown tables,
-    and replaces dash bullets with •. Leaves emoji and plain text intact.
+    Converts markdown table rows to • bullet rows (col1 · col2).
+    Preserves • bullets already in the correct format.
     Skips trailing JSON status line.
     """
     # Remove trailing status JSON line
     lines = text.splitlines()
     if lines and lines[-1].strip().startswith("{") and '"status"' in lines[-1]:
         lines = lines[:-1]
-    text = "\n".join(lines).strip()
 
-    # Remove markdown tables (lines that are all pipes/dashes)
-    text = re.sub(r"^\|.*\|.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*\|?[-| :]+\|?\s*$", "", text, flags=re.MULTILINE)
+    # Convert markdown tables: data rows → bullets, separator rows → blank
+    converted: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^\|", stripped):
+            # Separator row (e.g. |---|---|) — drop it
+            if re.match(r"^\|[\s|:-]+\|$", stripped):
+                converted.append("")
+            else:
+                converted.append(_table_row_to_bullet(stripped))
+        else:
+            converted.append(line)
+    text = "\n".join(converted).strip()
 
     # Remove bold/italic markers
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
@@ -116,11 +149,11 @@ def _strip_for_slack(text: str) -> str:
     # Remove inline code backticks
     text = re.sub(r"`(.+?)`", r"\1", text)
 
-    # Remove markdown heading prefixes
+    # Remove markdown heading prefixes (ALL-CAPS section headers are already correct)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
 
-    # Replace markdown dash bullets with •
-    text = re.sub(r"^\s*[-*]\s+", "• ", text, flags=re.MULTILINE)
+    # Convert '- item' / '* item' dash bullets to • — preserve lines already starting with •
+    text = re.sub(r"^[ \t]*[-*][ \t]+", "• ", text, flags=re.MULTILINE)
 
     # Remove horizontal rules
     text = re.sub(r"^---+\s*$", "", text, flags=re.MULTILINE)
@@ -134,13 +167,45 @@ def _strip_for_slack(text: str) -> str:
     return text.strip()
 
 
+_TRACKER_SKILLS = {"ygs-risk-scan", "ygs-standup", "ygs-pr-queue"}
+
+
+# Built-in fallback descriptions for skills that may not have a SKILL.md installed.
+# These short descriptions steer Claude when no detailed skill file is found.
+_SKILL_FALLBACK_DESCRIPTIONS: dict[str, str] = {
+    "ygs-ask": (
+        "Answer the user's question directly using your knowledge and, when relevant, "
+        "Jira/GitHub API calls via Bash to fetch project-specific data. "
+        "You do NOT need a local codebase or any source files — answer from knowledge. "
+        "If the question is general (not project-specific), respond immediately from knowledge. "
+        "Keep the answer concise and Slack-formatted."
+    ),
+}
+
+
 def _build_prompt(skill: str, prompt: str, skill_md: str | None,
-                  sprint_team: list[str] | None = None,
-                  pr_queue_data: dict | None = None) -> str:
+                  sprint_team: list[str] | None = None) -> str:
     if skill_md:
         skill_section = f"## Skill: {skill}\n\n{skill_md}"
+    elif skill in _SKILL_FALLBACK_DESCRIPTIONS:
+        skill_section = f"## Skill: {skill}\n\n{_SKILL_FALLBACK_DESCRIPTIONS[skill]}"
     else:
         skill_section = f"## Skill: {skill}\n\n(No SKILL.md found — apply your best judgment for this skill.)"
+
+    # Tracker skills run in a bare workspace with no git repo.
+    # Claude must use Jira/Bitbucket/GitHub APIs for all data — never git commands.
+    env_context = ""
+    if skill in _TRACKER_SKILLS:
+        env_context = """\
+
+## Execution Environment
+
+IMPORTANT: You are running in a bare workspace directory. There is NO git repository here.
+Do NOT run git commands. Do NOT look for source code.
+All data MUST come from the Jira/Bitbucket/GitHub APIs using the credentials available
+in environment variables (JIRA_AUTH, JIRA_BASE_URL, GH_TOKEN, etc.).
+The `.ygs/tracker.yml` file in the current directory has the project/board configuration.
+"""
 
     team_section = ""
     if sprint_team:
@@ -156,23 +221,9 @@ STRICT: Only include PRs/issues authored by or assigned to these people.
 Do NOT include PRs where they are only listed as reviewer.
 """
 
-    data_section = ""
-    if pr_queue_data is not None:
-        data_section = f"""\
-
-## Pre-Fetched PR Data (USE THIS — do NOT make any API calls)
-
-The following JSON contains ALL sprint team PRs already gathered. Format this data.
-DO NOT call any tools to fetch PRs or issues — the data is complete below.
-
-```json
-{json.dumps(pr_queue_data, indent=2)}
-```
-"""
-
     return f"""\
 {skill_section}
-{team_section}{data_section}
+{env_context}{team_section}
 ## Request
 
 {prompt}
@@ -193,56 +244,37 @@ def _resolve_sprint_team(config: dict) -> list[str]:
     """
     try:
         from scripts.standup.gather_jira import (
-            _get_my_sprint_ids,
-            _fetch_project_boards,
+            get_active_sprints,
             get_sprint_issues,
         )
-        import requests as _req
 
         jira_url = config.get("JIRA_BASE_URL", "")
         jira_project = config.get("JIRA_PROJECT", "")
         if not jira_url or not jira_project:
             raise ValueError("no jira config")
 
-        my_sprint_ids = _get_my_sprint_ids(config)
-        if not my_sprint_ids:
-            raise ValueError("no sprint ids found for current user")
+        active_sprints = get_active_sprints(config)
+        if not active_sprints:
+            raise ValueError("no active sprints found")
 
-        all_boards = _fetch_project_boards(config)
-        scrum_boards = [b for b in all_boards if b.get("type", "").lower() == "scrum"]
-
-        # Collect issues from the user's sprints across all boards
         seen_keys: set[str] = set()
         team_names: list[str] = []
         seen_names: set[str] = set()
 
-        for board in scrum_boards:
-            board_id = board["id"]
-            # Check if any of the user's sprint ids appear in this board's active sprints
-            base = jira_url.rstrip("/")
-            resp = _req.get(
-                f"{base}/rest/agile/1.0/board/{board_id}/sprint",
-                params={"state": "active"},
-                headers={"Authorization": f"Basic {config.get('JIRA_AUTH', '')}",
-                         "Accept": "application/json"},
-                timeout=10,
-            )
-            if not resp.ok:
+        for sprint in active_sprints:
+            sprint_id = sprint.get("id")
+            if not sprint_id:
                 continue
-            board_sprints = resp.json().get("values", [])
-            for sprint in board_sprints:
-                if sprint["id"] not in my_sprint_ids:
+            for issue in get_sprint_issues(config, sprint_id):
+                key = issue.get("key", "")
+                if key in seen_keys:
                     continue
-                for issue in get_sprint_issues(config, sprint["id"]):
-                    key = issue.get("key", "")
-                    if key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    assignee = (issue.get("fields") or {}).get("assignee") or {}
-                    name = assignee.get("displayName", "")
-                    if name and name not in seen_names:
-                        seen_names.add(name)
-                        team_names.append(name)
+                seen_keys.add(key)
+                assignee = (issue.get("fields") or {}).get("assignee") or {}
+                name = assignee.get("displayName", "")
+                if name and name not in seen_names:
+                    seen_names.add(name)
+                    team_names.append(name)
 
         if team_names:
             return team_names
@@ -348,12 +380,37 @@ def _setup_environment(config: dict) -> list[str]:
     return sprint_team
 
 
+_SKILL_SYSTEM_PROMPT_MAP: dict[str, str] = {
+    "ygs-standup": "standup",
+    "ygs-risk-scan": "standup",
+    "ygs-pr-queue": "standup",
+    "ygs-review-pr": "review",
+    "ygs-code-review": "review",
+    "ygs-security-review": "review",
+    "ygs-sre-review": "review",
+    "ygs-api-review": "review",
+    "ygs-ui-review": "review",
+    "ygs-implement": "implement",
+    "ygs-ship": "implement",
+    "ygs-learn": "learn",
+    "ygs-retro": "learn",
+    "ygs-ask": "adhoc",
+}
+
+
+def _system_prompt_for_skill(skill: str) -> str:
+    """Return the appropriate system prompt key for a given skill name."""
+    key = _SKILL_SYSTEM_PROMPT_MAP.get(skill, "adhoc")
+    return SYSTEM_PROMPTS[key]
+
+
 @click.command()
 @click.option("--skill", required=True, help="Skill name to invoke (e.g. ygs-standup)")
 @click.option("--prompt", "prompt_text", required=True, help="Free-form instruction")
 def main(skill: str, prompt_text: str) -> None:
     config = load_config()
-    validate_claude_config(config)
+    # NOTE: validate_claude_config is called AFTER the ygs-pr-queue early-exit branch
+    # so skills that never invoke Claude don't fail on missing credentials.
     sprint_team = _setup_environment(config)
 
     workspace = get_workspace_dir(config)
@@ -363,14 +420,16 @@ def main(skill: str, prompt_text: str) -> None:
 
     print(f"[adhoc] skill={skill} prompt={prompt_text[:80]}...", flush=True)
 
+    # Ensure YGS skills are installed before attempting to load SKILL.md
+    _ensure_ygs_skills()
     skill_md = _load_skill_md(skill)
     if skill_md:
         print(f"[adhoc] loaded SKILL.md for {skill} ({len(skill_md)} chars)", flush=True)
     else:
         print(f"[adhoc] no SKILL.md found for {skill} — using fallback prompt", flush=True)
 
-    # For ygs-pr-queue: load pre-fetched pr_queue.json and embed in prompt so Claude
-    # formats the data rather than making its own API calls.
+    # For ygs-pr-queue: load pre-fetched pr_queue.json and build Block Kit directly —
+    # no Claude invocation needed; the data is already structured.
     pr_queue_data: dict | None = None
     pr_queue_path = workspace / "pr_queue.json"
     if skill == "ygs-pr-queue":
@@ -381,20 +440,50 @@ def main(skill: str, prompt_text: str) -> None:
             except Exception as e:
                 print(f"[adhoc] warn: could not load pr_queue.json: {e}", flush=True)
         if pr_queue_data is None:
-            # Always embed an empty result rather than letting Claude call APIs
             pr_queue_data = {"sprint": "", "pr_count": 0, "prs": []}
-            print("[adhoc] pr_queue.json missing — embedding empty result, no API calls", flush=True)
+            print("[adhoc] pr_queue.json missing — using empty result", flush=True)
+
+        # Build and post Block Kit directly — skip Claude for pr-queue
+        from datetime import date as _date
+        sprint = pr_queue_data.get("sprint", "")
+        title = f"PR Queue — {sprint} — {_date.today().isoformat()}" if sprint else f"PR Queue — {_date.today().isoformat()}"
+        blocks = build_pr_blocks(title, pr_queue_data)
+        pr_count = pr_queue_data.get("pr_count", 0)
+        fallback_text = f"PR Queue — {pr_count} open PR(s) in {sprint}" if sprint else f"PR Queue — {pr_count} open PR(s)"
+        slack_notify(config, fallback_text, blocks=blocks)
+
+        status_data = {
+            "status": "DONE",
+            "summary": f"{pr_count} sprint PR(s): {fallback_text}",
+        }
+        _write_result(workspace, status_data)
+        print(f"[adhoc] pr-queue posted {pr_count} PRs to Slack", flush=True)
+        sys.exit(0)
+
+    # Validate Claude credentials only for skills that actually call Claude.
+    # ygs-pr-queue exits above without ever invoking the Claude CLI.
+    validate_claude_config(config)
 
     full_prompt = _build_prompt(skill, prompt_text, skill_md,
-                                sprint_team=sprint_team or None,
-                                pr_queue_data=pr_queue_data)
-    model = config.get("AI_MODEL")
-    max_turns = int(config.get("MAX_TURNS_IMPLEMENT", "100"))
-    log_path = logs_dir / "adhoc.log"
+                                sprint_team=sprint_team or None)
 
-    # When pr_queue data is embedded, Claude only needs to format text — no tools needed.
-    # Passing allowed_tools=None prevents Claude from calling Bash/curl to fetch its own data.
-    tools = None if pr_queue_data is not None else "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS"
+    # Resolve model: AI_MODEL_OVERRIDE (from router model-override parsing) >
+    # AI_MODEL config (from Formicary job variable) > default (claude picks).
+    model = config.get("AI_MODEL")
+    model_override = os.getenv("AI_MODEL_OVERRIDE", "").strip()
+    if model_override and model_override not in ("<no value>", "{{.AiModel}}"):
+        # Resolve short names ("haiku", "sonnet", "opus", "sonnet-5", …) to full model IDs.
+        # config values (from env/job params) take precedence over the module constants.
+        _shortnames = {
+            "haiku":  config.get("ANTHROPIC_DEFAULT_HAIKU_MODEL",  MODEL_SHORTNAMES["haiku"]),
+            "sonnet": config.get("ANTHROPIC_DEFAULT_SONNET_MODEL", MODEL_SHORTNAMES["sonnet"]),
+            "opus":   config.get("ANTHROPIC_DEFAULT_OPUS_MODEL",   MODEL_SHORTNAMES["opus"]),
+            **{k: v for k, v in MODEL_SHORTNAMES.items() if k not in ("haiku", "sonnet", "opus")},
+        }
+        model = _shortnames.get(model_override.lower(), model_override)
+
+    max_turns = int(config.get("MAX_TURNS_ADHOC", config.get("MAX_TURNS_IMPLEMENT", "50")))
+    log_path = logs_dir / "adhoc.log"
 
     try:
         result = run_claude(
@@ -403,35 +492,84 @@ def main(skill: str, prompt_text: str) -> None:
             model=model,
             max_turns=max_turns,
             log_file=log_path,
-            allowed_tools=tools,
+            allowed_tools="Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS,Skill",
+            system_prompt=_system_prompt_for_skill(skill),
         )
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)
         _write_result(workspace, {"status": "ERROR", "reason": str(e)})
-        # Post error to thread
-        post_to_thread(config, f"⚠️ Skill `/{skill}` failed: {str(e)[:500]}")
+        slack_notify(config, f"⚠️ Skill `/{skill}` failed: {str(e)[:500]}")
         sys.exit(1)
 
     status_data = result.status_json or {"status": result.status}
     _write_result(workspace, status_data)
 
-    # Post a meaningful slice of the output back to Slack
-    output_to_post = _strip_for_slack(result.output.strip())
+    # For tracker skills, check if Claude wrote a report file (risk_report.md, etc.)
+    # and use it as the output if result.output is only the JSON status line.
+    output_text = result.output.strip()
+    report_candidates = ["risk_report.md", "adhoc_report.md", "pr_queue_report.md"]
+    for candidate in report_candidates:
+        report_path = workspace / candidate
+        if report_path.exists():
+            file_content = report_path.read_text(encoding="utf-8").strip()
+            if file_content:
+                output_text = file_content
+                print(f"[adhoc] using report from {candidate} ({len(file_content)} chars)", flush=True)
+                # Generate HTML companion if not already present
+                html_path = workspace / candidate.replace(".md", ".html")
+                if not html_path.exists():
+                    try:
+                        from scripts.common.report_renderer import render_simple_html
+                        html_path.write_text(render_simple_html(skill, file_content), encoding="utf-8")
+                        print(f"[adhoc] wrote {html_path.name}", flush=True)
+                    except Exception as _he:
+                        print(f"[adhoc] WARNING: could not write HTML: {_he}", flush=True)
+                # Also write standardized reports/ directory
+                try:
+                    from scripts.common.report_renderer import render_simple_html
+                    reports_dir = workspace / "reports"
+                    reports_dir.mkdir(parents=True, exist_ok=True)
+                    (reports_dir / "report.md").write_text(file_content, encoding="utf-8")
+                    (reports_dir / "report.html").write_text(render_simple_html(skill, file_content), encoding="utf-8")
+                    (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
+                    print(f"[adhoc] wrote reports/report.md, reports/report.html, reports/result.json", flush=True)
+                except Exception as _re:
+                    print(f"[adhoc] WARNING: could not write reports/: {_re}", flush=True)
+                break
+
+    # If no report candidate found but Claude produced output, still write reports/
+    else:
+        if output_text and output_text != json.dumps(status_data):
+            try:
+                from scripts.common.report_renderer import render_simple_html
+                reports_dir = workspace / "reports"
+                reports_dir.mkdir(parents=True, exist_ok=True)
+                (reports_dir / "report.md").write_text(output_text, encoding="utf-8")
+                (reports_dir / "report.html").write_text(render_simple_html(skill, output_text), encoding="utf-8")
+                (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
+                print(f"[adhoc] wrote reports/ from Claude output", flush=True)
+            except Exception as _re:
+                print(f"[adhoc] WARNING: could not write reports/: {_re}", flush=True)
+
+    output_to_post = _strip_for_slack(output_text)
     if len(output_to_post) > _MAX_SLACK_CHARS:
-        # Prefer the end of the output (likely to have the summary)
         output_to_post = "…\n" + output_to_post[-_MAX_SLACK_CHARS:]
 
-    if output_to_post:
-        post_to_thread(config, output_to_post)
+    blocks = build_mrkdwn_blocks(output_to_post) if output_to_post else None
+
+    if output_to_post or blocks:
+        slack_notify(config, output_to_post or f"✅ `/{skill}` complete.", blocks=blocks)
     else:
         summary = status_data.get("summary", "")
-        post_to_thread(config, f"✅ `/{skill}` complete. {summary}")
+        slack_notify(config, f"✅ `/{skill}` complete. {summary}")
 
     print(f"[adhoc] status={status_data.get('status')}", flush=True)
+    print(f"::add-task-context SELECTED_MODEL::{model or ''}")
+    print(f"::add-task-context SKILL::{skill}")
 
-    if status_data.get("status") in ("DONE", "DONE_WITH_CONCERNS", "MAX_TURNS_REACHED"):
-        sys.exit(0)
-    sys.exit(1)
+    # If we reach here, Claude itself exited 0 (non-zero Claude exit raises RuntimeError
+    # and calls sys.exit(1) above). Exit 0 so Formicary collects artifacts.
+    sys.exit(0)
 
 
 def _write_result(workspace: Path, data: dict) -> None:

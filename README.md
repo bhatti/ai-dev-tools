@@ -277,7 +277,7 @@ formicary submit formicary/ai-jira-review.yaml \
 
 ### What happens
 
-1. `scripts.review.run` — Claude invokes `/ygs-review-pr`, writes `findings.json`
+1. `scripts.review.run` — Claude invokes `/ygs-review-pr` (or `/ygs-review-deep` when `ReviewDepth=deep`), writes `findings.json`
 2. `scripts.review.post_findings` — reads findings, posts Block Kit to Slack, **exits 3 → PAUSE_JOB**
 3. Human clicks Approve or Request Changes in Slack
 4. Slack router resumes the job with `Decision=approve` or `Decision=request-changes`
@@ -290,6 +290,22 @@ formicary submit formicary/ai-gh-review.yaml \
   --var PRUrl=https://github.com/org/repo/pull/42 \
   --var Skill=ygs-security-review   # override default ygs-review-pr
 ```
+
+### Self-review in the implement pipeline
+
+The implement workflow (`ai-gh-implement` / `ai-jira-implement`) runs a self-review pass automatically before creating the PR. After `implement`, `scripts.review.run` is called with `--mode self-review`; if it returns exit code 2 (BLOCKED), the job pauses for human review before the PR is created. This catches obvious mistakes before they hit the review queue.
+
+### Complexity-tiered model selection
+
+The `plan` step writes a `plan_complexity.txt` file (`low`, `medium`, or `high`). The `implement` step reads it and selects the model tier automatically:
+
+| Complexity | Model |
+|------------|-------|
+| `low` | Claude Haiku (fast, cheap) |
+| `medium` | Claude Sonnet (balanced) |
+| `high` | Claude Opus (most capable) |
+
+Override any step with `--var ModelId=...` when submitting the job.
 
 ---
 
@@ -313,8 +329,15 @@ The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that list
 | `@bot review <bitbucket-pr-url>` | Same for Bitbucket | `ai-jira-review` |
 | `@bot security review <pr-url>` | OWASP-style security audit | `ai-gh-review` (ygs-security-review) |
 | `@bot sre review <pr-url>` | Failure mode and operational risk review | `ai-gh-review` (ygs-sre-review) |
+| `@bot deep review <pr-url>` | Seven-domain deep review (adds performance, testing quality, architecture) | `ai-gh-review` (`ReviewDepth=deep`) |
 | `@bot implement PROJ-123` | Implement a Jira issue | `ai-jira-implement` |
 | `@bot implement 42` | Implement a GitHub issue | `ai-gh-implement` |
+| `@bot jira query <keywords>` | Search Jira issues by keyword | `ai-jira-query` |
+| `@bot search jira <keywords>` | Same as jira query | `ai-jira-query` |
+| `@bot jira-analyze PROJ-1,PROJ-2` | Analyze and summarize a set of Jira issues | `ai-jira-query` (Mode=analyze) |
+| `@bot gh-query <keywords>` | Search GitHub issues by keyword | `ai-jira-query` (DefaultTracker=github) |
+| `@bot gh-analyze #123,#456` | Analyze GitHub issues for root cause and fixes | `ai-jira-query` (Mode=analyze, DefaultTracker=github) |
+| `@bot doctor` | Connectivity check against all configured services | `ai-connectivity-check` |
 
 When a paused job is waiting in a thread, replying in that thread resumes the job with `ReplyText` set to your message.
 
@@ -322,7 +345,7 @@ When a paused job is waiting in a thread, replying in that thread resumes the jo
 
 1. **Slash-command parse** — deterministic match on the first word (`review`, `implement`, `standup`, `pr`, `risk`, `security`, `sre`)
 2. **Haiku LLM fallback** — free-text classification when no verb matches
-3. **`DEFAULT_TRACKER`** — when intent has no URL/issue key (e.g. bare `standup`), `DEFAULT_TRACKER` env var (`jira` or `github`) picks the right workflow. Default: `jira`.
+3. **`DEFAULT_TRACKER`** — when intent has no URL/issue key (e.g. bare `standup`), `DEFAULT_TRACKER` env var (`jira` or `github`) picks the right workflow. Default: `jira`. The router also auto-detects the tracker from URLs and keywords in the message — a Bitbucket URL always routes to Jira even if DEFAULT_TRACKER=github.
 4. **Registry lookup** — `scripts/slack/workflows.yml` maps `(intent, target_kind)` → formicary `job_type`
 5. **Submit** to formicary with `SlackThreadTs` stored as a job variable (formicary is the sole source of truth for paused state — no Redis needed)
 
@@ -361,6 +384,54 @@ formicary submit formicary/ai-adhoc.yaml \
   --var Skill=ygs-standup \
   --var Prompt="summarize open PRs for this week"
 ```
+
+---
+
+## Skills Management — EXTRA_SKILLS_REPOS
+
+Load additional skill repositories at job startup without rebuilding the Docker image.
+Set the `EXTRA_SKILLS_REPOS` org config (or env var) to a JSON array or a plain name:
+
+```bash
+# Plain bare name — auto-expands using DEFAULT_TRACKER + BITBUCKET_WORKSPACE / GH_ORG
+EXTRA_SKILLS_REPOS=my-skills-repo
+
+# Full URL
+EXTRA_SKILLS_REPOS=https://github.com/org/agent-skills.git
+
+# JSON array — full control
+EXTRA_SKILLS_REPOS='[
+  {
+    "url": "https://bitbucket.org/myorg/myrepo.git",
+    "skills_dir": "skills",    # auto-detected if omitted: .claude/skills → skills → .skills
+    "sparse": true             # default true — sparse-checkout the skills_dir only
+  },
+  {
+    "url": "https://github.com/vercel-labs/agent-skills",
+    "type": "skills-cli"       # delegate to: npx skills add <repo> --agent claude-code
+  }
+]'
+```
+
+**Auto-credentials**: Bitbucket URLs use `BITBUCKET_TOKEN`/`BITBUCKET_USERNAME` automatically.
+GitHub URLs use `GH_TOKEN`.  Override with explicit `token_env` / `username_env` in the entry.
+
+**Sparse checkout** (default `true`): Downloads only the skills subdirectory — essential for
+large monorepos.  Set `"sparse": false` for dedicated skills repos.
+
+**`type: "skills-cli"`**: Delegates to the
+[vercel-labs/skills](https://github.com/vercel-labs/skills) CLI (`npx skills add`),
+which is compatible with [you-got-skills](https://github.com/bhatti/you-got-skills) SKILL.md
+format.  Does not support sparse checkout.
+
+**Process timeout**: Set `MAX_CLAUDE_PROCESS_TIMEOUT` (seconds) to kill the Claude process
+if it exceeds that limit (prevents hitting the 25-minute Formicary task timeout):
+
+```bash
+MAX_CLAUDE_PROCESS_TIMEOUT=270   # 4.5 minutes
+```
+
+For full documentation see [docs/system-reference.md § 10b](docs/system-reference.md).
 
 ---
 
@@ -494,38 +565,62 @@ python3 -m pytest tests/test_standup_gather_pr_queue.py -v
 
 ### Test Slack router locally (no Kubernetes)
 
+Use the interactive Slack REPL — it simulates the full @bot mention flow without a real Slack workspace:
+
 ```bash
-source ~/.zshrc   # loads FORMICARY_TOKEN, FORMICARY_URL, etc.
+source ~/.zshrc   # loads FORMICARY_URL, FORMICARY_TOKEN, SLACK_CHANNEL, DEFAULT_TRACKER
 cd /path/to/ai-dev-tools
 
-# Simulate a standup trigger
+# Live mode (default) — submits real jobs to your Formicary server:
+python3 scripts/slack/slack_repl.py
+
+# Dry-run mode — prints what would be submitted, no network calls:
+python3 scripts/slack/slack_repl.py --dry-run
+
+# Override channel and tracker:
+python3 scripts/slack/slack_repl.py --channel C0123ABC --tracker github
+```
+
+Once inside the REPL, type commands exactly as you would in Slack (without the @mention):
+
+```
+you> standup
+you> prs
+you> risk
+you> review https://github.com/org/repo/pull/42
+you> security review https://github.com/org/repo/pull/42
+you> jira query open authentication bugs
+you> implement PROJ-123
+you> /workflows       ← list all loaded workflows
+you> /skills          ← list all skills
+you> /mode            ← show live vs dry-run
+you> /tracker github  ← switch DEFAULT_TRACKER mid-session
+you> /thread approve  ← simulate a thread reply to the last job
+```
+
+**Tab-completion** is built in — press Tab to complete trigger words and REPL commands.
+
+**Why `source ~/.zshrc` is required before live mode:** the REPL builds the Formicary client from the current shell env. If `FORMICARY_URL` is not exported, it falls back to `localhost:7777` and fails with connection errors. The REPL prints a clear error and exits if the required vars are missing.
+
+See [`docs/slack-router.md`](docs/slack-router.md#testing-locally) for the full REPL reference.
+
+---
+
+**Low-level one-liners** (when you need to call a specific Formicary API directly without the router):
+
+```bash
+# Trigger the standup cron slot
 python3 -c "
 import os, sys
 sys.path.insert(0, '.')
 from scripts.slack.formicary_client import FormicaryClient
 c = FormicaryClient(base_url=os.environ['FORMICARY_URL'], token=os.environ['FORMICARY_TOKEN'])
 result = c.trigger_pending_or_submit('ai-standup-jira', {
-    'SlackChannel': os.environ.get('SLACK_CHANNEL', 'sb-test'),
+    'SlackChannel': os.environ.get('SLACK_CHANNEL', ''),
     'SlackThreadTs': 'local-test.000',
 })
 print('standup result:', result)
 # id → triggered; _already_executing → already running; _no_cron_slot → redeploy
-"
-
-# Simulate a PR queue submit
-python3 -c "
-import os, sys
-sys.path.insert(0, '.')
-from scripts.slack.formicary_client import FormicaryClient
-c = FormicaryClient(base_url=os.environ['FORMICARY_URL'], token=os.environ['FORMICARY_TOKEN'])
-result = c.submit('ai-adhoc', {
-    'Skill': 'ygs-pr-queue',
-    'Prompt': '',
-    'SlackChannel': os.environ.get('SLACK_CHANNEL', 'sb-test'),
-    'SlackThreadTs': 'local-test.001',
-    'DefaultTracker': 'jira',
-})
-print('pr-queue result:', result)
 "
 ```
 
@@ -590,7 +685,7 @@ source ~/.zshrc
 
 # Run the ygs-pr-queue skill with the gathered pr_queue.json
 WORKSPACE_DIR="/tmp/pr_queue_test" \
-SLACK_CHANNEL="sb-test" \
+SLACK_CHANNEL="${SLACK_CHANNEL:-}" \
 SLACK_THREAD_TS="" \
 SKILL_NAME="ygs-pr-queue" \
 SKILL_PROMPT="" \

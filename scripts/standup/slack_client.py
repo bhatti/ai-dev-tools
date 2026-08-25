@@ -71,7 +71,7 @@ def get_standup_messages(config: dict, lookback_hours: int = 26) -> list[dict]:
         print("[slack] SLACK_BOT_TOKEN not set — skipping Slack signals", flush=True)
         return []
 
-    channel_name = config.get("SLACK_CHANNEL", "standup")
+    channel_name = config.get("SLACK_CHANNEL", "")
     channel_id = resolve_channel_id(token, channel_name)
     if not channel_id:
         print(f"[slack] channel '{channel_name}' not found — skipping", flush=True)
@@ -140,7 +140,10 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
         return False
 
     # Step 3: complete the upload and share to channel
-    ch = channel or config.get("SLACK_CHANNEL", "standup")
+    ch = channel or config.get("SLACK_CHANNEL", "")
+    if not ch:
+        print("[slack] no channel set — skipping file upload", flush=True)
+        return False
     ch = ch.lstrip("#")
     channel_id = resolve_channel_id(token, ch)
     if not channel_id:
@@ -172,19 +175,215 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
     return True
 
 
+def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
+    """Wrap plain mrkdwn text in Block Kit section blocks.
+
+    Slack section text is capped at 3000 chars.  Split on blank lines so each
+    paragraph becomes its own section block — this produces a readable table-like
+    layout for standup / risk-scan output that already uses mrkdwn formatting.
+    """
+    # Split on double newlines (paragraph breaks) to keep sections under 3000 chars
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.strip() == "":
+            if current:
+                paragraphs.append("\n".join(current))
+                current = []
+        else:
+            current.append(line)
+    if current:
+        paragraphs.append("\n".join(current))
+
+    blocks: list = []
+    chunk: list[str] = []
+    chunk_len = 0
+    for para in paragraphs:
+        para_len = len(para) + 2  # +2 for \n\n separator
+        if chunk_len + para_len > max_chars and chunk:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "\n\n".join(chunk)},
+            })
+            chunk = []
+            chunk_len = 0
+        chunk.append(para)
+        chunk_len += para_len
+    if chunk:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n\n".join(chunk)},
+        })
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def build_pr_blocks(title: str, pr_data: dict) -> list:
+    """Build Block Kit blocks from a pr_queue.json dict.
+
+    Each PR becomes a section block with a Jira link + PR link, author, age,
+    status, and reviewer info.  Groups are shown as header blocks.
+    """
+    prs: list[dict] = pr_data.get("prs", [])
+    sprint = pr_data.get("sprint", "")
+    header_text = title or f"PR Queue — {sprint}" if sprint else "PR Queue"
+
+    blocks: list = [
+        {"type": "header", "text": {"type": "plain_text", "text": header_text[:150], "emoji": True}},
+        {"type": "divider"},
+    ]
+    if not prs:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "_No open PRs found._"}})
+        return blocks
+
+    # Group PRs: approved, needs review, stale, in review
+    def _group(pr: dict) -> str:
+        days = pr.get("age_days", 0)
+        approved = pr.get("approved_by") or []
+        if approved and days <= 5:
+            return "APPROVED — READY TO MERGE"
+        if days > 5 and not approved:
+            return "STALE / AT RISK (>5d, no approvals)"
+        if not approved and days > 1:
+            return "NEEDS REVIEW (>1d, no approvals)"
+        return "IN REVIEW"
+
+    group_order = [
+        "APPROVED — READY TO MERGE",
+        "NEEDS REVIEW (>1d, no approvals)",
+        "STALE / AT RISK (>5d, no approvals)",
+        "IN REVIEW",
+    ]
+    grouped: dict[str, list] = {g: [] for g in group_order}
+    for pr in prs:
+        grouped[_group(pr)].append(pr)
+
+    for group_name in group_order:
+        group_prs = grouped[group_name]
+        if not group_prs:
+            continue
+        blocks.append({
+            "type": "header",
+            "text": {"type": "plain_text", "text": group_name, "emoji": False},
+        })
+        for pr in group_prs:
+            jira_key = pr.get("jira_key", "")
+            jira_url = pr.get("jira_url", "")
+            pr_url = pr.get("url", "")
+            pr_num = pr_url.rstrip("/").split("/")[-1] if pr_url else pr.get("id", "")
+            title_text = (pr.get("jira_summary") or pr.get("title") or "(no title)")[:60]
+            author = (pr.get("author") or "?").split()[0]
+            days = pr.get("age_days", 0)
+            approved_by = pr.get("approved_by") or []
+            pending = pr.get("reviewers") or []
+
+            # Build clickable links
+            jira_link = f"<{jira_url}|{jira_key}>" if jira_url and jira_key else jira_key
+            pr_link = f"<{pr_url}|PR #{pr_num}>" if pr_url and pr_num else f"PR #{pr_num}"
+
+            reviewer_info = ""
+            if approved_by:
+                reviewer_info += f"approved-by: {', '.join('@' + n.split()[0] for n in approved_by[:3])}"
+            if pending:
+                if reviewer_info:
+                    reviewer_info += "  "
+                reviewer_info += f"pending: {', '.join('@' + n.split()[0] for n in pending[:4])}"
+            if not reviewer_info:
+                reviewer_info = "no reviewers"
+
+            line = f"{jira_link}  {pr_link}  @{author} ({days}d)  {title_text}"
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": line},
+                "fields": [
+                    {"type": "mrkdwn", "text": reviewer_info},
+                ],
+            })
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def build_issue_blocks(title: str, issues: list, base_url: str) -> list:
+    """Build Slack Block Kit blocks for a list of Jira issues.
+
+    Each issue gets a section block with a clickable link + metadata fields.
+    Pass the result as the `blocks` argument to post_message() / notify().
+    `text` in post_message should be a plain-text fallback for notifications.
+    """
+    blocks: list = [
+        {"type": "header", "text": {"type": "plain_text", "text": title[:150], "emoji": True}},
+        {"type": "divider"},
+    ]
+    for issue in issues:
+        key = issue.get("key", "?")
+        fields = issue.get("fields", {})
+        summary = (fields.get("summary") or "(no title)")[:80]
+        status = (fields.get("status") or {}).get("name", "?")
+        issuetype = (fields.get("issuetype") or {}).get("name", "")
+        assignee = (fields.get("assignee") or {}).get("displayName") or "Unassigned"
+        priority = (fields.get("priority") or {}).get("name") or "—"
+        created = (fields.get("created") or "")[:10] or "—"
+        url = f"{base_url.rstrip('/')}/browse/{key}"
+
+        type_tag = f"[{issuetype}] " if issuetype else ""
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"<{url}|{key}> {type_tag}*{summary}*"},
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Status:* {status}   *Priority:* {priority}"},
+                {"type": "mrkdwn", "text": f"*Assignee:* {assignee}   *Date:* {created}"},
+            ],
+        })
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def build_gh_issue_blocks(title: str, issues: list) -> list:
+    """Build Slack Block Kit blocks for a list of GitHub issues."""
+    blocks: list = [
+        {"type": "header", "text": {"type": "plain_text", "text": title[:150], "emoji": True}},
+        {"type": "divider"},
+    ]
+    for issue in issues:
+        number = issue.get("number", "?")
+        issue_title = (issue.get("title") or "(no title)")[:80]
+        url = issue.get("url", "")
+        assignees = issue.get("assignees") or []
+        assignee = assignees[0].get("login", "Unassigned") if assignees else "Unassigned"
+        labels = [lbl["name"] for lbl in (issue.get("labels") or [])]
+        label_str = ", ".join(labels[:3]) or "—"
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"<{url}|#{number}> *{issue_title}*"},
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Assignee:* {assignee}"},
+                {"type": "mrkdwn", "text": f"*Labels:* {label_str}"},
+            ],
+        })
+    blocks.append({"type": "divider"})
+    return blocks
+
+
 def post_message(config: dict, text: str, channel: str | None = None,
-                 thread_ts: str | None = None) -> bool:
+                 thread_ts: str | None = None,
+                 blocks: list | None = None) -> bool:
     """Post a message to Slack. Returns True on success, False (no exception) on failure.
 
     If thread_ts is provided (or SLACK_THREAD_TS is set in config), the message
     is posted as a thread reply instead of to the channel root.
+
+    If blocks is provided, it is sent as the Block Kit payload alongside text (used as
+    the fallback for notifications). When blocks is None, the message is plain mrkdwn.
     """
     token = config.get("SLACK_BOT_TOKEN", "")
     if not token:
         print("[slack] SLACK_BOT_TOKEN not set — cannot post brief", flush=True)
         return False
 
-    ch = channel or config.get("SLACK_CHANNEL", "standup")
+    ch = channel or config.get("SLACK_CHANNEL", "")
+    if not ch:
+        print("[slack] no channel set — skipping post_message", flush=True)
+        return False
     # Slack's chat.postMessage accepts channel IDs (C0ABC123) and names (general) directly.
     # Do NOT prepend '#' — channel IDs with '#' are invalid and cause channel_not_found.
     ch = ch.lstrip("#")
@@ -193,6 +392,8 @@ def post_message(config: dict, text: str, channel: str | None = None,
     ts = thread_ts or config.get("SLACK_THREAD_TS", "") or None
     if ts:
         payload["thread_ts"] = ts
+    if blocks:
+        payload["blocks"] = blocks
 
     resp = requests.post(
         "https://slack.com/api/chat.postMessage",
@@ -212,12 +413,15 @@ def post_message(config: dict, text: str, channel: str | None = None,
     return True
 
 
-def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL") -> bool:
+def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL",
+           blocks: list | None = None) -> bool:
     """Post a notification to Slack using the channel from config[channel_key].
 
     Replies in the originating thread when SlackThreadTs is present in config.
     Optional — returns True on success, False (logged, no exception) on any failure.
     Silently skips when SLACK_BOT_TOKEN or the channel env var is absent.
+
+    Pass blocks for structured Block Kit output (text is used as fallback).
     """
     token = config.get("SLACK_BOT_TOKEN", "")
     if not token:
@@ -228,13 +432,17 @@ def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL") -> bool:
         print(f"[slack] {channel_key} not set — skipping notification", flush=True)
         return False
     thread_ts = config.get("SlackThreadTs") or config.get("SLACK_THREAD_TS") or None
-    return post_message(config, text, channel=channel, thread_ts=thread_ts)
+    return post_message(config, text, channel=channel, thread_ts=thread_ts, blocks=blocks)
 
 
 if __name__ == "__main__":
     import os
     import sys
     _config = dict(os.environ)
+    _channel = _config.get("SLACK_CHANNEL", "")
+    if not _channel:
+        print("[slack] SLACK_CHANNEL not set — skipping notification", flush=True)
+        sys.exit(0)
     _ts = _config.get("SLACK_THREAD_TS") or None
     _skill = _config.get("SKILL_NAME") or _config.get("JOB_TYPE", "job")
     _text = _config.get("MESSAGE") or (sys.argv[1] if len(sys.argv) > 1 else f":x: {_skill} failed. Check Formicary logs.")

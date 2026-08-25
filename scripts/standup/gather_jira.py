@@ -5,10 +5,12 @@ Usage:
 
 Required env: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT
 Optional env:
+    JIRA_BOARDS           comma-separated board IDs (e.g. "4161") — skips board scan when set.
+                          Find your board ID in the Jira URL: /boards/<ID>.
+                          Leave unset to auto-discover boards where you have active work.
+    STANDUP_TEAM_MEMBERS  comma-separated Jira displayNames; default = all sprint assignees
     BITBUCKET_WORKSPACE, BITBUCKET_REPO, BITBUCKET_USERNAME, BITBUCKET_TOKEN
     SLACK_BOT_TOKEN, SLACK_CHANNEL (default: standup)
-    STANDUP_TEAM_MEMBERS  comma-separated Jira displayNames to scope brief;
-                          default is all assignees with open sprint work
     STANDUP_LOOKBACK_HOURS   hours of history to consider (default: 26)
     STANDUP_STALE_DAYS       days without update before an issue is stale (default: 2)
 
@@ -108,112 +110,212 @@ def _fetch_project_boards(config: dict) -> list[dict]:
     return boards
 
 
-def _get_my_sprint_ids(config: dict) -> set[int]:
-    """Return sprint IDs of all open sprints that contain currentUser()'s issues."""
+def _get_active_sprint_for_board(config: dict, board_id: int) -> dict | None:
+    """Return the active sprint for a board, or None."""
     resp = requests.get(
-        f"{_jira_base(config)}/rest/api/3/search/jql",
+        f"{_jira_base(config)}/rest/agile/1.0/board/{board_id}/sprint",
         headers=_jira_headers(config),
-        params={
-            "jql": "assignee = currentUser() AND sprint in openSprints()",
-            "maxResults": 100,
-            "fields": "customfield_10010",  # sprint field (Jira Cloud standard)
-        },
-        timeout=30,
+        params={"state": "active", "maxResults": 1},
+        timeout=20,
     )
     if not resp.ok:
-        return set()
-    sprint_ids: set[int] = set()
-    for issue in resp.json().get("issues", []):
-        for s in (issue.get("fields", {}).get("customfield_10010") or []):
-            if isinstance(s, dict) and s.get("state") == "active":
-                sprint_ids.add(s["id"])
-    return sprint_ids
+        return None
+    sprints = resp.json().get("values", [])
+    return sprints[0] if sprints else None
 
 
-def get_active_sprints(config: dict) -> list[dict]:
-    """Return active sprints relevant to the current user.
+def _parse_board_ids(config: dict) -> set[int]:
+    """Parse JIRA_BOARDS env var — comma-separated numeric board IDs.
 
-    Strategy:
-    1. Find all sprint IDs that contain the current user's open issues.
-    2. Find those sprints on all scrum boards (to get board name + sprint detail).
-    3. Fall back to the first board's sprint if user has no sprint-based issues.
+    When set, the sprint-board scan is skipped entirely (faster, cheaper).
+    Find your board ID in the Jira URL: /jira/software/c/projects/PROJ/boards/<ID>
     """
-    my_sprint_ids = _get_my_sprint_ids(config)
-    print(f"[gather_jira] current user is in {len(my_sprint_ids)} active sprint(s): {my_sprint_ids}", flush=True)
+    raw = config.get("JIRA_BOARDS", "").strip()
+    if raw in ("<no value>", "{{.JiraBoards}}", ""):
+        return set()
+    return {int(p.strip()) for p in raw.split(",") if p.strip().isdigit()}
 
-    all_boards = _fetch_project_boards(config)
-    scrum_boards = [b for b in all_boards if b.get("type", "").lower() == "scrum"]
+
+def _fetch_board_metadata(config: dict, board_id: int) -> dict:
+    """Fetch board name and type for an explicit board ID."""
+    resp = requests.get(
+        f"{_jira_base(config)}/rest/agile/1.0/board/{board_id}",
+        headers=_jira_headers(config),
+        timeout=20,
+    )
+    if resp.ok:
+        return resp.json()
+    return {"id": board_id, "name": str(board_id), "type": "scrum"}
+
+
+def get_active_sprints(config: dict, me: dict | None = None, team_filter: list[str] | None = None) -> list[dict]:
+    """Return active sprints on boards where the current user or team has work.
+
+    When JIRA_BOARDS is set, uses those board IDs directly — no project config needed,
+    no board scan.  This is the fast path and works even without JIRA_PROJECT set.
+
+    When JIRA_BOARDS is empty, auto-discovers relevant boards by scanning all scrum
+    boards for JIRA_PROJECT, fetching each active sprint's issues, and checking assignees.
+
+    Each returned sprint is tagged with _board_id, _board_name, _board_names.
+    """
+    board_id_override = _parse_board_ids(config)
+
+    if board_id_override:
+        # Fast path: explicit board IDs — bypass _fetch_project_boards entirely.
+        # This works regardless of JIRA_PROJECT setting (board ID is authoritative).
+        scrum_boards = [_fetch_board_metadata(config, bid) for bid in sorted(board_id_override)]
+        print(f"[gather_jira] using explicit JIRA_BOARDS={sorted(board_id_override)} → {len(scrum_boards)} board(s)", flush=True)
+    else:
+        all_boards = _fetch_project_boards(config)
+        scrum_boards = [b for b in all_boards if b.get("type", "").lower() == "scrum"]
+        print(f"[gather_jira] scanning {len(scrum_boards)} scrum board(s) for team work...", flush=True)
+
+    me_account_id = me.get("accountId", "") if me else ""
+    me_display_name = me.get("displayName", "") if me else ""
+
+    relevant_account_ids: set[str] = {me_account_id} if me_account_id else set()
+    relevant_display_names: set[str] = set(team_filter) if team_filter else set()
+    if me_display_name:
+        relevant_display_names.add(me_display_name)
 
     base = _jira_base(config)
     headers = _jira_headers(config)
+    all_active: dict[int, dict] = {}  # sprint_id → sprint
 
-    # Collect all active sprints from all scrum boards, tag with board name
-    all_active: dict[int, dict] = {}  # sprint_id → sprint (with _board_name list)
     for board in scrum_boards:
         board_id = board["id"]
         board_name = board.get("name", str(board_id))
-        resp = requests.get(
-            f"{base}/rest/agile/1.0/board/{board_id}/sprint",
-            headers=headers,
-            params={"state": "active", "maxResults": 10},
-            timeout=20,
-        )
-        if not resp.ok:
+
+        sprint = _get_active_sprint_for_board(config, board_id)
+        if not sprint:
             continue
-        for sprint in resp.json().get("values", []):
-            sid = sprint["id"]
-            if sid not in all_active:
-                sprint["_board_names"] = [board_name]
-                sprint["_board_name"] = board_name
-                all_active[sid] = sprint
-            else:
-                all_active[sid]["_board_names"].append(board_name)
+        sid = sprint["id"]
+
+        # When board IDs are explicit we trust them — skip the membership scan
+        if not board_id_override:
+            board_relevant = False
+            start = 0
+            while not board_relevant:
+                resp = requests.get(
+                    f"{base}/rest/agile/1.0/sprint/{sid}/issue",
+                    headers=headers,
+                    params={"fields": "assignee", "maxResults": 200, "startAt": start},
+                    timeout=20,
+                )
+                if not resp.ok:
+                    break
+                data = resp.json()
+                for i in data.get("issues", []):
+                    a = i.get("fields", {}).get("assignee") or {}
+                    if (a.get("accountId", "") in relevant_account_ids
+                            or a.get("displayName", "") in relevant_display_names):
+                        board_relevant = True
+                        break
+                fetched = len(data.get("issues", []))
+                total = data.get("total", 0)
+                start += fetched
+                if board_relevant or fetched == 0 or start >= total:
+                    break
+            if not board_relevant:
+                continue
+
+        print(f"[gather_jira] relevant board: {board_name} (id={board_id}) sprint={sprint.get('name', sid)}", flush=True)
+
+        if sid not in all_active:
+            sprint["_board_id"] = board_id
+            sprint["_board_names"] = [board_name]
+            sprint["_board_name"] = board_name
+            all_active[sid] = sprint
+        else:
+            all_active[sid]["_board_names"].append(board_name)
 
     if not all_active:
         return []
 
-    # If we know which sprints the user is in, return only those
-    if my_sprint_ids:
-        relevant = [all_active[sid] for sid in my_sprint_ids if sid in all_active]
-        if relevant:
-            names = [(s.get("name","?"), s.get("_board_names",[])) for s in relevant]
-            print(f"[gather_jira] user's sprints: {names}", flush=True)
-            return relevant
-
-    # Fallback: return the first active sprint found (configured project board)
-    first = next(iter(all_active.values()))
-    print(f"[gather_jira] fallback: using first active sprint {first.get('name')} on {first.get('_board_name')}", flush=True)
-    return [first]
+    sprints = list(all_active.values())
+    print(f"[gather_jira] {len(sprints)} relevant active sprint(s)", flush=True)
+    return sprints
 
 
-def get_active_sprint(config: dict) -> dict | None:
+def get_active_sprint(config: dict, me: dict | None = None) -> dict | None:
     """Return the first active sprint found across all boards, or None."""
-    sprints = get_active_sprints(config)
+    sprints = get_active_sprints(config, me=me)
     return sprints[0] if sprints else None
 
 
-def get_sprint_issues(config: dict, sprint_id: int) -> list[dict]:
-    """Fetch all issues in a sprint, including embedded comments."""
+def get_sprint_issues(
+    config: dict,
+    sprint_id: int | None = None,
+    team_filter: list[str] | None = None,
+    board_id: int | None = None,
+) -> list[dict]:
+    """Fetch sprint issues for a board sprint or project-wide open sprints.
+
+    When board_id is provided, issues are fetched via the agile board endpoint so
+    only issues on that board are returned (correct scoping).  When sprint_id is
+    also provided it is used as an additional filter.  When neither is set the
+    fallback is project-wide openSprints() JQL.
+
+    Each returned raw issue is tagged with '_board_id' when board_id is known.
+    """
+    project = config.get("JIRA_PROJECT", "")
+    base = _jira_base(config)
+    headers = _jira_headers(config)
+    field_list = "summary,status,assignee,updated,labels,priority,comment"
+
+    if board_id is not None:
+        # Board-scoped fetch: returns only issues currently on that board
+        endpoint = f"{base}/rest/agile/1.0/board/{board_id}/issue"
+        if sprint_id is not None:
+            endpoint = f"{base}/rest/agile/1.0/sprint/{sprint_id}/issue"
+        params: dict = {"fields": field_list, "maxResults": 200}
+        resp = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        if not resp.ok:
+            print(f"[gather_jira] board {board_id} issues error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+            return []
+        issues = resp.json().get("issues", [])
+        for i in issues:
+            i["_board_id"] = board_id
+        return issues
+
+    # Fallback: project-wide JQL
+    if sprint_id is not None:
+        sprint_clause = f"sprint = {sprint_id}"
+    else:
+        sprint_clause = f'project = "{project}" AND sprint in openSprints()'
+
+    if team_filter:
+        members_jql = ", ".join(f'"{m}"' for m in team_filter)
+        jql = f"{sprint_clause} AND assignee in ({members_jql})"
+    else:
+        jql = f"{sprint_clause} AND assignee is not EMPTY"
+
     resp = requests.get(
-        f"{_jira_base(config)}/rest/agile/1.0/sprint/{sprint_id}/issue",
-        headers=_jira_headers(config),
-        params={
-            "fields": "summary,status,assignee,updated,labels,priority,comment",
-            "maxResults": 200,
-        },
+        f"{base}/rest/api/3/search/jql",
+        headers=headers,
+        params={"jql": jql, "fields": field_list, "maxResults": 200},
         timeout=30,
     )
     if not resp.ok:
-        print(f"[gather_jira] sprint issues error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+        print(f"[gather_jira] sprint issues JQL error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
         return []
     return resp.json().get("issues", [])
 
 
-def search_open_issues(config: dict) -> list[dict]:
-    """JQL fallback when there is no active sprint. Requests all needed fields."""
-    project = config["JIRA_PROJECT"]
+def search_open_issues(config: dict, team_filter: list[str] | None = None) -> list[dict]:
+    """JQL fallback when there is no active sprint. Scoped to team or all assignees."""
+    project = config.get("JIRA_PROJECT", "")
+    if not project:
+        print("[gather_jira] search_open_issues: JIRA_PROJECT not set — cannot run JQL fallback", file=sys.stderr)
+        return []
+    if team_filter:
+        members_jql = ", ".join(f'"{m}"' for m in team_filter)
+        assignee_clause = f"AND assignee in ({members_jql})"
+    else:
+        assignee_clause = "AND assignee is not EMPTY"
     jql = (
-        f'project = "{project}" AND statusCategory != Done ORDER BY updated DESC'
+        f'project = "{project}" {assignee_clause} AND statusCategory != Done ORDER BY updated DESC'
     )
     resp = requests.get(
         f"{_jira_base(config)}/rest/api/3/search/jql",
@@ -232,17 +334,19 @@ def search_open_issues(config: dict) -> list[dict]:
 
 
 def search_my_open_issues(config: dict) -> list[dict]:
-    """Return all open issues assigned to currentUser() across all projects.
+    """Return open issues assigned to currentUser() within the configured project.
 
-    This catches work that lives outside any sprint (backlog, kanban, cross-project).
+    Scoped to JIRA_PROJECT to avoid pulling unrelated tickets from other boards.
     """
-    jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+    project = config.get("JIRA_PROJECT", "")
+    project_clause = f'project = "{project}" AND ' if project else ""
+    jql = f"{project_clause}assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
     resp = requests.get(
         f"{_jira_base(config)}/rest/api/3/search/jql",
         headers=_jira_headers(config),
         params={
             "jql": jql,
-            "maxResults": 100,
+            "maxResults": 50,
             "fields": "summary,status,assignee,updated,labels,priority,comment",
         },
         timeout=30,
@@ -251,7 +355,7 @@ def search_my_open_issues(config: dict) -> list[dict]:
         print(f"[gather_jira] my-issues search error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
         return []
     issues = resp.json().get("issues", [])
-    print(f"[gather_jira] {len(issues)} open issues assigned to currentUser()", flush=True)
+    print(f"[gather_jira] {len(issues)} open issues assigned to currentUser() in {project or 'all projects'}", flush=True)
     return issues
 
 
@@ -301,18 +405,16 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_h
     assignee = fields.get("assignee") or {}
     status = fields.get("status", {}).get("name", "unknown")
     labels = fields.get("labels", [])
-    # substring match so "blocked-by-dep", "is-blocked" etc. are all caught
     is_blocked = (
         any("blocked" in lbl.lower() for lbl in labels)
         or "blocked" in status.lower()
     )
 
-    # Use the comments already embedded in the response — avoids N+1 HTTP calls
     recent_comments = _extract_embedded_comments(fields, lookback_hours)
 
     return {
         "key": key,
-        "id": str(raw.get("id", "")),   # numeric Jira issue ID — needed for dev-status API
+        "id": str(raw.get("id", "")),
         "summary": fields.get("summary", ""),
         "status": status,
         "assignee": assignee.get("displayName", "unassigned"),
@@ -325,6 +427,7 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_h
         "priority": fields.get("priority", {}).get("name", ""),
         "recent_comments": recent_comments,
         "url": f"{_jira_base(config)}/browse/{key}",
+        "board_id": raw.get("_board_id"),   # None when not board-scoped
     }
 
 
@@ -336,9 +439,14 @@ def main() -> None:
     config = load_config(required=[
         "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN",
     ])
+    board_ids = _parse_board_ids(config)
     if not config.get("JIRA_PROJECT"):
-        config["JIRA_PROJECT"] = _discover_jira_project(config)
-        print(f"[gather_jira] auto-discovered project: {config['JIRA_PROJECT']}", flush=True)
+        if board_ids:
+            # Board IDs are explicit — project lookup is not needed.
+            print("[gather_jira] JIRA_BOARDS set — skipping JIRA_PROJECT auto-discovery", flush=True)
+        else:
+            config["JIRA_PROJECT"] = _discover_jira_project(config)
+            print(f"[gather_jira] auto-discovered project: {config['JIRA_PROJECT']}", flush=True)
     workspace_dir = get_workspace_dir(config)
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -346,16 +454,18 @@ def main() -> None:
     stale_days = int(config.get("STANDUP_STALE_DAYS", "2"))
     stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
     raw_team = config.get("STANDUP_TEAM_MEMBERS", "").strip()
-    # Treat Formicary's un-set template value as empty
     if raw_team in ("<no value>", "{{.StandupTeamMembers}}"):
         raw_team = ""
     team_filter = [m.strip() for m in raw_team.split(",") if m.strip()]
 
-    print(f"[gather_jira] project={config['JIRA_PROJECT']} lookback={lookback_hours}h stale_after={stale_days}d", flush=True)
+    print(
+        f"[gather_jira] project={config.get('JIRA_PROJECT', '(from board)')} "
+        f"lookback={lookback_hours}h stale_after={stale_days}d",
+        flush=True,
+    )
 
     me = get_current_jira_user(config)
     if not me:
-        # Strip credentials from the URL before logging (https://user:token@host → https://host)
         raw_url = config["JIRA_BASE_URL"]
         parsed = urlparse(raw_url)
         safe_url = urlunparse(parsed._replace(netloc=parsed.hostname or ""))
@@ -365,77 +475,121 @@ def main() -> None:
         )
     print(f"[gather_jira] logged in as: {me.get('displayName', '?')}", flush=True)
 
-    active_sprints = get_active_sprints(config)
+    # Auto-discover boards where the current user or configured team has active work.
+    # No manual JIRA_BOARDS config required.
+    active_sprints = get_active_sprints(config, me=me, team_filter=team_filter or None)
     sprint_info: dict = {}
     all_sprint_infos: list[dict] = []
+    # board_id → sprint_info (for signals)
+    board_sprint_map: dict[int, dict] = {}
     seen_keys: set[str] = set()
     raw_issues: list[dict] = []
+
     if active_sprints:
-        # Dedupe sprints by sprint id — multiple boards often share the same sprint
         seen_sprint_ids: set[int] = set()
         for sprint in active_sprints:
+            board_id = sprint.get("_board_id")
             board_names = sprint.get("_board_names") or [sprint.get("_board_name", "")]
             s_info = {
                 "id": sprint["id"],
+                "board_id": board_id,
                 "name": sprint.get("name", ""),
                 "board": " · ".join(board_names),
                 "state": sprint.get("state", ""),
                 "start_date": sprint.get("startDate", ""),
                 "end_date": sprint.get("endDate", ""),
             }
-            all_sprint_infos.append(s_info)
-            if sprint["id"] in seen_sprint_ids:
-                continue
-            seen_sprint_ids.add(sprint["id"])
-            print(f"[gather_jira] sprint: {s_info['name']} (boards: {s_info['board']}) ends {s_info['end_date']}", flush=True)
-            for issue in get_sprint_issues(config, sprint["id"]):
+            if sprint["id"] not in seen_sprint_ids:
+                seen_sprint_ids.add(sprint["id"])
+                all_sprint_infos.append(s_info)
+                if board_id:
+                    board_sprint_map[board_id] = s_info
+                print(
+                    f"[gather_jira] sprint: {s_info['name']} board_id={board_id} "
+                    f"(boards: {s_info['board']}) ends {s_info['end_date']}",
+                    flush=True,
+                )
+        sprint_info = all_sprint_infos[0]
+
+        # Fetch issues per board so each issue carries its board_id.
+        # When board_id_filter is set we already have the target boards; otherwise
+        # fall back to project-wide openSprints() JQL (no board attribution).
+        all_boards_with_sprints = {s.get("_board_id") for s in active_sprints if s.get("_board_id")}
+        if all_boards_with_sprints:
+            for bid in all_boards_with_sprints:
+                # Use the sprint id if we know it (one active sprint per board is typical)
+                sprint_for_board = next(
+                    (s for s in active_sprints if s.get("_board_id") == bid), None
+                )
+                sid = sprint_for_board["id"] if sprint_for_board else None
+                print(f"[gather_jira] fetching issues for board {bid} sprint {sid}...", flush=True)
+                for issue in get_sprint_issues(
+                    config, sprint_id=sid, team_filter=team_filter or None, board_id=bid
+                ):
+                    if issue.get("key") not in seen_keys:
+                        seen_keys.add(issue["key"])
+                        raw_issues.append(issue)
+        else:
+            print("[gather_jira] fetching all open-sprint issues (project-wide fallback)...", flush=True)
+            for issue in get_sprint_issues(config, sprint_id=None, team_filter=team_filter or None):
                 if issue.get("key") not in seen_keys:
                     seen_keys.add(issue["key"])
                     raw_issues.append(issue)
-        sprint_info = all_sprint_infos[0]
     else:
         print("[gather_jira] no active sprint — querying open project issues", flush=True)
-        for issue in search_open_issues(config):
+        for issue in search_open_issues(config, team_filter or None):
             if issue.get("key") not in seen_keys:
                 seen_keys.add(issue["key"])
                 raw_issues.append(issue)
 
-    # Always merge issues assigned to the current user — they may be in a different
-    # board/sprint or not in any sprint (backlog/kanban). This ensures the standup
-    # includes the authenticated user's own work regardless of sprint structure.
-    my_issues = search_my_open_issues(config)
-    for issue in my_issues:
-        if issue.get("key") not in seen_keys:
-            seen_keys.add(issue["key"])
-            raw_issues.append(issue)
-
-    print(f"[gather_jira] {len(raw_issues)} issues total after merging my issues", flush=True)
+    print(f"[gather_jira] {len(raw_issues)} issues total (raw)", flush=True)
     issues = [_normalise_issue(r, stale_cutoff, config, lookback_hours) for r in raw_issues]
 
     if team_filter:
         issues = [i for i in issues if i["assignee"] in team_filter]
         print(f"[gather_jira] filtered to {len(issues)} issues for team {team_filter}", flush=True)
 
+    # Derive team members from the actual assignees on board issues (not current_user)
+    team_members = sorted({i["assignee"] for i in issues if i["assignee"] != "unassigned"})
+    print(f"[gather_jira] team members from issues: {team_members}", flush=True)
+
     open_prs = get_open_prs(config)
-    print(f"[gather_jira] {len(open_prs)} open Bitbucket PRs", flush=True)
+    # Filter PRs to team members derived from board issues
+    if team_members:
+        filtered_prs = [
+            pr for pr in open_prs
+            if pr.get("author", "") in team_members
+            or any(r in team_members for r in pr.get("reviewers", []))
+        ]
+        print(
+            f"[gather_jira] {len(open_prs)} open Bitbucket PRs → "
+            f"{len(filtered_prs)} after team filter",
+            flush=True,
+        )
+        open_prs = filtered_prs
+    else:
+        print(f"[gather_jira] {len(open_prs)} open Bitbucket PRs (no team filter)", flush=True)
 
     slack_messages = get_standup_messages(config, lookback_hours)
 
     signals = {
         "gathered_at": datetime.now(timezone.utc).isoformat(),
         "tracker": "jira",
-        "current_user": me,
+        # Omit current_user from signals — it is the API auth identity only and
+        # must not anchor the per-person analysis in synthesize.
+        "team_members": team_members,
         "sprint": sprint_info,
         "all_sprints": all_sprint_infos,
+        "board_sprint_map": {str(k): v for k, v in board_sprint_map.items()},
         "issues": issues,
         "open_prs": open_prs,
         "slack_messages": slack_messages,
         "config_summary": {
-            "jira_project": config["JIRA_PROJECT"],
+            "jira_project": config.get("JIRA_PROJECT", ""),
             "jira_base_url": config["JIRA_BASE_URL"],
             "lookback_hours": lookback_hours,
             "stale_days": stale_days,
-            "slack_channel": config.get("SLACK_CHANNEL", "standup"),
+            "slack_channel": config.get("SLACK_CHANNEL", ""),
             "team_filter": team_filter,
         },
     }
@@ -448,13 +602,21 @@ def main() -> None:
         "pr_count": len(open_prs),
         "slack_message_count": len(slack_messages),
         "sprint": sprint_info.get("name", ""),
+        "team_member_count": len(team_members),
     }, indent=2))
 
     print(
         f"[gather_jira] done: {len(issues)} issues, {len(open_prs)} PRs, "
-        f"{len(slack_messages)} Slack msgs",
+        f"{len(slack_messages)} Slack msgs, {len(team_members)} team members",
         flush=True,
     )
+    print(f"::add-task-context SELECTED_TRACKER::jira")
+    print(f"::add-task-context ISSUE_COUNT::{len(issues)}")
+    print(f"::add-task-context PR_COUNT::{len(open_prs)}")
+    print(f"::add-task-context SLACK_MESSAGE_COUNT::{len(slack_messages)}")
+    print(f"::add-task-context TEAM_MEMBER_COUNT::{len(team_members)}")
+    if sprint_info:
+        print(f"::add-task-context SPRINT_NAME::{sprint_info.get('name', '')}")
     sys.exit(0)
 
 

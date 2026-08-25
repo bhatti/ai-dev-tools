@@ -77,11 +77,11 @@ def pick_issue(config: dict, raw: dict) -> bool:
     })
     print(f"  Written to workspace/issue.json")
     jira_transition_label(config, issue_key, config["PICKUP_LABEL"], config["INPROGRESS_LABEL"])
-    print(f"::set-output name=IssueNumber::{issue_key}")
-    print(f"::set-output name=IssueTitle::{title}")
-    print(f"::set-output name=IssueURL::{config['JIRA_BASE_URL']}/browse/{issue_key}")
-    print(f"::set-output name=BitbucketWorkspace::{workspace}")
-    print(f"::set-output name=BitbucketRepo::{repo}")
+    print(f"::add-job-context IssueNumber::{issue_key}")
+    print(f"::add-job-context IssueTitle::{title}")
+    print(f"::add-job-context IssueURL::{config['JIRA_BASE_URL']}/browse/{issue_key}")
+    print(f"::add-job-context BitbucketWorkspace::{workspace}")
+    print(f"::add-job-context BitbucketRepo::{repo}")
     return True
 
 
@@ -142,7 +142,7 @@ def main(issue_id: str | None) -> None:
             _launch_pipeline(issue_key)
 
     if issues_json_list:
-        print(f"::set-output name=IssuesJSON::{_json.dumps(issues_json_list)}")
+        print(f"::add-job-context IssuesJSON::{_json.dumps(issues_json_list)}")
     print(f"Picked {picked} issue(s)")
     sys.exit(0 if picked > 0 else 2)
 

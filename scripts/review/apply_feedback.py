@@ -320,7 +320,7 @@ def _verify_findings(findings: dict, workspace: Path, config: dict) -> dict:
     Returns the (possibly updated) findings dict.
     """
     try:
-        from scripts.common.claude_runner import run_claude  # noqa: PLC0415
+        from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS  # noqa: PLC0415
     except ImportError:
         print("[apply_feedback] claude_runner not available — skipping verify", flush=True)
         return findings
@@ -368,6 +368,7 @@ Output ONLY this JSON on the last line:
             model=config.get("AI_MODEL"),
             max_turns=int(config.get("MAX_TURNS_IMPLEMENT", "40")),
             log_file=logs_dir / "verify.log",
+            system_prompt=SYSTEM_PROMPTS["respond"],
         )
     except RuntimeError as e:
         print(f"[apply_feedback] verify claude error: {e}", file=sys.stderr, flush=True)

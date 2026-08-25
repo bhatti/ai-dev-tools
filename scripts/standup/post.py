@@ -25,8 +25,21 @@ import json
 import sys
 from datetime import date
 
+import re
+
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.standup.slack_client import post_message
+
+
+def _format_for_slack(text: str) -> str:
+    """Convert single-backtick inline code containing JSON/braces to proper triple-backtick blocks.
+
+    Slack renders ```code``` as a code block but `code` as inline-code which
+    doesn't handle multi-line content or JSON objects well.
+    """
+    # Convert `{...}` or `\n{...}\n` patterns (JSON blobs) to triple-backtick blocks
+    text = re.sub(r"`\s*(\{[^`]*\})\s*`", r"```\n\1\n```", text, flags=re.DOTALL)
+    return text
 
 
 def main() -> None:
@@ -72,12 +85,19 @@ def main() -> None:
     if risk_report:
         combined_parts += ["", "---", "", "## Full Risk Report", "", risk_report]
 
-    (workspace_dir / "standup_report.md").write_text("\n".join(combined_parts))
+    report_text = "\n".join(combined_parts)
+
+    # Print full report to stdout so it appears in Formicary task logs
+    print("\n" + "=" * 60, flush=True)
+    print(report_text, flush=True)
+    print("=" * 60 + "\n", flush=True)
+
+    (workspace_dir / "standup_report.md").write_text(report_text)
     print("[post] standup_report.md written", flush=True)
 
-    # Post plain text brief to Slack — always reply to the thread when SlackThreadTs is set
+    # Post brief to Slack — convert single-backtick JSON spans to proper code blocks first
     thread_ts = config.get("SLACK_THREAD_TS") or None
-    slack_ok = post_message(config, brief, thread_ts=thread_ts)
+    slack_ok = post_message(config, _format_for_slack(brief), thread_ts=thread_ts)
 
     post_result = {
         "status": "DONE",
@@ -100,7 +120,7 @@ def main() -> None:
         f"questions={post_result['discussion_questions']}",
         flush=True,
     )
-    print(json.dumps(post_result))
+    print(f"[post] result: {json.dumps(post_result)}")
     sys.exit(0)
 
 

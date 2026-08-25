@@ -48,7 +48,7 @@ All configuration is via environment variables. Set them in a `.env` file for lo
 |----------|---------|-------------|
 | `AI_MODEL` | `claude-sonnet-4-6` | Default Claude model |
 | `MAX_TURNS_PLAN` | `50` | Max claude turns for planning step |
-| `MAX_TURNS_IMPLEMENT` | `100` | Max claude turns for implementation step |
+| `MAX_TURNS_IMPLEMENT` | `200` | Max claude turns for implementation step |
 | `CLAUDE_EFFORT_LEVEL` | `medium` | Claude effort level (`low`, `medium`, `high`) |
 
 ## Bedrock / Anthropic Variables
@@ -75,11 +75,75 @@ Required only when running the Slack agent router (`scripts/slack/router.py`).
 | `FORMICARY_URL` | Yes* | `http://localhost:7777` | Formicary server base URL |
 | `FORMICARY_TOKEN` | Yes* | — | Formicary API bearer token |
 | `SLACK_CHANNEL` | No | — | Default Slack channel ID for job notifications |
-| `SLACK_THREAD_TS` | No | — | Thread timestamp (injected by the router as a job variable; no need to set manually) |
-| `DEFAULT_TRACKER` | No | `jira` | Default ticket system when no URL/key present in message: `jira` or `github`. Controls which standup/implement workflow is chosen for bare commands like `standup` or `implement PROJ-123`. |
-| `FORMICARY_PUBLIC_URL` | No | — | Public-facing Formicary URL included as a clickable link in the "Started job" Slack message (e.g. `http://localhost:7777` when port-forwarding). If unset, no link is shown. |
+| `SLACK_THREAD_TS` / `SlackThreadTs` | No | — | Thread timestamp injected by the router as a job variable. Skills reply in-thread when present. No need to set manually. |
+| `DEFAULT_TRACKER` | No | `jira` | Default ticket system: `jira` or `github`. Controls standup/implement routing for bare commands. |
+| `SLACK_BOT_NAME` | No | `@bot` | Display name used in `@bot help` examples. Set to your bot's actual name. |
+| `FORMICARY_PUBLIC_URL` | No | — | Public-facing Formicary URL for clickable "View job" links in Slack messages. |
 
 *Required for Slack router only.
+
+## Standup Variables
+
+Used by `scripts/standup/gather_jira.py` and `scripts/standup/synthesize.py`.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `JIRA_BOARDS` | No | `""` | Comma-separated board ID(s) to use for standup. When set, skips the board auto-discovery scan and goes straight to the specified board(s). Leave empty to auto-discover based on sprint membership. Find your board ID from the Jira URL when viewing a sprint board: `.../boards/<ID>`. |
+| `STANDUP_TEAM_MEMBERS` | No | `""` | Comma/newline-separated list of display names to restrict standup output to. When empty, team is auto-derived from sprint board assignees. Example: `"Alice Smith,Bob Jones"`. |
+| `STANDUP_LOOKBACK_HOURS` | No | `26` | How many hours back to fetch Slack messages and activity for the standup context window. |
+| `STANDUP_STALE_DAYS` | No | `2` | Issues with no update older than this many days are flagged as stale. |
+
+### Board auto-discovery
+
+When `JIRA_BOARDS` is empty, `gather_jira.py` auto-discovers which sprint board(s) are relevant to the current user:
+
+1. Fetches all scrum boards for the Jira instance (`GET /rest/agile/1.0/board?type=scrum`)
+2. For each board, fetches the active sprint and up to 200 sprint issues (paginated)
+3. Checks whether the current user's `accountId` or `displayName` appears in any issue's assignee
+4. Boards where the user has at least one issue are included; others are skipped
+
+**Fast path**: Set `JIRA_BOARDS` to your board ID (found in the Jira URL: `.../boards/<ID>`) to skip the scan entirely — saves ~50 API calls on large Jira instances. The deploy scripts support `--jira-boards <id>` to set this as a Formicary org config.
+
+### Team member derivation
+
+Team members are derived from the actual sprint board assignees (not from `STANDUP_TEAM_MEMBERS` or the API user):
+
+1. After fetching all sprint issues from the selected board(s), collect all non-null assignee display names
+2. This becomes the `team_members` list in `signals.json`
+3. PRs are filtered to this team (author or reviewer must be in the list)
+4. `synthesize.py` passes the list to Claude as `TEAM ROSTER` — a strict filter: Claude only reports people in this list
+
+`STANDUP_TEAM_MEMBERS` can still be set as an explicit filter applied before board fetch, but it is no longer required. The board-derived list is authoritative.
+
+## Jira Query / Analyze Variables
+
+Used by `scripts/jira/query_issues.py` and `scripts/jira/analyze_issues.py` (triggered by `@bot qjira` / `@bot jira-analyze`).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `JIRA_PROJECT` | Yes | — | Jira project key (e.g. `PROJ`) |
+| `JIRA_EMAIL` | Yes | — | Atlassian account email |
+| `JIRA_API_TOKEN` | Yes | — | Jira API token |
+| `JIRA_BASE_URL` | Yes | — | Atlassian URL (e.g. `https://org.atlassian.net`) |
+| `JIRA_SPACE` | No | `$BITBUCKET_WORKSPACE` | Team/area filter value matched against `JIRA_TEAM_FIELD`. Defaults to `BITBUCKET_WORKSPACE`. Set to `""` to disable. |
+| `JIRA_TEAM_FIELD` | No | `EngScrumTeam` | Jira custom field name for the team dimension. The field ID is resolved dynamically via `/rest/api/3/field`. Set to `""` to disable the filter. |
+
+### How `@bot qjira` works
+
+1. Builds a JQL query scoped to `JIRA_PROJECT`, open status, and optionally the team field.
+2. Runs `summary ~ "<query>"` to match free-text.
+3. Posts results as a Slack thread reply with `<url|PROJ-NNN>` links, type, assignee, status, priority, date.
+
+Example: `@bot qjira flaky tests` → finds all open issues with "flaky" in the summary, scoped to your project.
+
+### How `@bot jira-analyze` works
+
+Pass one or more issue keys or Jira URLs (comma-separated). Claude analyzes root cause and possible fixes:
+
+```
+@bot jira-analyze PROJ-1001, PROJ-1002
+@bot jira-analyze https://yourorg.atlassian.net/browse/PROJ-1001
+```
 
 ### Required Slack App Setup
 

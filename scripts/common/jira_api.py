@@ -38,7 +38,7 @@ def search_issues(config: dict, jql: str, max_results: int = 20) -> list[dict]:
     resp = requests.get(
         url,
         headers=_auth_headers(config),
-        params={"jql": jql, "maxResults": max_results, "fields": "summary,description,labels,status"},
+        params={"jql": jql, "maxResults": max_results, "fields": "summary,description,labels,status,assignee,priority,issuetype,created"},
         timeout=30,
     )
     if not resp.ok:

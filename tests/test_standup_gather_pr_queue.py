@@ -24,15 +24,15 @@ def test_get_sprint_info_reads_signals_json(tmp_path):
     signals = {
         "sprint": {"name": "Chupacabra 379"},
         "issues": [
-            {"key": "CRIBL-100", "id": "100001", "summary": "do stuff", "status": "In Progress"},
-            {"key": "CRIBL-101", "id": "100002", "summary": "more stuff", "status": "In Review"},
+            {"key": "PROJ-100", "id": "100001", "summary": "do stuff", "status": "In Progress"},
+            {"key": "PROJ-101", "id": "100002", "summary": "more stuff", "status": "In Review"},
         ],
     }
     (tmp_path / "signals.json").write_text(json.dumps(signals))
 
     issues, name = _get_sprint_issues_with_ids({}, workspace_dir=tmp_path)
 
-    assert {i["key"] for i in issues} == {"CRIBL-100", "CRIBL-101"}
+    assert {i["key"] for i in issues} == {"PROJ-100", "PROJ-101"}
     assert all(i.get("id") for i in issues), "numeric id required"
     assert name == "Chupacabra 379"
 
@@ -46,13 +46,13 @@ def test_get_sprint_info_falls_back_when_signals_empty(tmp_path):
          patch("scripts.standup.gather_pr_queue.get_sprint_issues") as mock_issues:
         mock_sprints.return_value = [{"id": 42, "name": "Sprint 1"}]
         mock_issues.return_value = [
-            {"key": "CRIBL-200", "id": "200001", "fields": {"summary": "s", "status": {"name": "Open"}}},
-            {"key": "CRIBL-201", "id": "200002", "fields": {"summary": "t", "status": {"name": "Open"}}},
+            {"key": "PROJ-200", "id": "200001", "fields": {"summary": "s", "status": {"name": "Open"}}},
+            {"key": "PROJ-201", "id": "200002", "fields": {"summary": "t", "status": {"name": "Open"}}},
         ]
 
         issues, name = _get_sprint_issues_with_ids({}, workspace_dir=tmp_path)
 
-    assert {i["key"] for i in issues} == {"CRIBL-200", "CRIBL-201"}
+    assert {i["key"] for i in issues} == {"PROJ-200", "PROJ-201"}
     assert name == "Sprint 1"
     mock_sprints.assert_called_once()
 
@@ -63,12 +63,12 @@ def test_get_sprint_info_falls_back_when_no_signals_file(tmp_path):
          patch("scripts.standup.gather_pr_queue.get_sprint_issues") as mock_issues:
         mock_sprints.return_value = [{"id": 7, "name": "Sprint X"}]
         mock_issues.return_value = [
-            {"key": "CRIBL-999", "id": "999001", "fields": {"summary": "x", "status": {"name": "In Progress"}}},
+            {"key": "PROJ-999", "id": "999001", "fields": {"summary": "x", "status": {"name": "In Progress"}}},
         ]
 
         issues, name = _get_sprint_issues_with_ids({}, workspace_dir=tmp_path)
 
-    assert any(i["key"] == "CRIBL-999" for i in issues)
+    assert any(i["key"] == "PROJ-999" for i in issues)
     assert name == "Sprint X"
 
 
@@ -92,14 +92,14 @@ def test_get_sprint_info_falls_back_to_open_issues_when_no_sprint_keys(tmp_path)
         mock_sprints.return_value = []
         mock_sprint_issues.return_value = []
         mock_search.return_value = [
-            {"key": "CRIBL-500", "id": "500001", "fields": {"summary": "a", "status": {"name": "Open"}}},
-            {"key": "CRIBL-501", "id": "500002", "fields": {"summary": "b", "status": {"name": "Open"}}},
+            {"key": "PROJ-500", "id": "500001", "fields": {"summary": "a", "status": {"name": "Open"}}},
+            {"key": "PROJ-501", "id": "500002", "fields": {"summary": "b", "status": {"name": "Open"}}},
         ]
 
         issues, name = _get_sprint_issues_with_ids({}, workspace_dir=tmp_path)
 
-    assert any(i["key"] == "CRIBL-500" for i in issues)
-    assert any(i["key"] == "CRIBL-501" for i in issues)
+    assert any(i["key"] == "PROJ-500" for i in issues)
+    assert any(i["key"] == "PROJ-501" for i in issues)
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ def test_main_selects_jira_tracker(tmp_path, monkeypatch):
     monkeypatch.setenv("DEFAULT_TRACKER", "jira")
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setenv("JIRA_BASE_URL", "https://jira.example.com")
-    monkeypatch.setenv("JIRA_PROJECT", "CRIBL")
+    monkeypatch.setenv("JIRA_PROJECT", "PROJ")
 
     with patch("scripts.standup.gather_pr_queue._gather_jira") as mock_jira, \
          patch("scripts.standup.gather_pr_queue._gather_github") as mock_gh:
@@ -147,7 +147,7 @@ def test_main_infers_jira_from_env(tmp_path, monkeypatch):
     monkeypatch.delenv("DEFAULT_TRACKER", raising=False)
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setenv("JIRA_BASE_URL", "https://jira.example.com")
-    monkeypatch.setenv("JIRA_PROJECT", "CRIBL")
+    monkeypatch.setenv("JIRA_PROJECT", "PROJ")
 
     with patch("scripts.standup.gather_pr_queue._gather_jira") as mock_jira, \
          patch("scripts.standup.gather_pr_queue._gather_github") as mock_gh:
@@ -189,15 +189,15 @@ def test_main_infers_github_from_env(tmp_path, monkeypatch):
 def test_gather_jira_uses_dev_status_api(mock_sprint, mock_prs, tmp_path):
     """_gather_jira calls dev-status API per issue and collects OPEN PRs."""
     mock_sprint.return_value = (
-        [{"key": "CRIBL-100", "id": "100001", "summary": "do stuff", "status": "In Progress"}],
+        [{"key": "PROJ-100", "id": "100001", "summary": "do stuff", "status": "In Progress"}],
         "Sprint 1",
     )
     mock_prs.return_value = [
         {
             "id": "43677",
-            "name": "CRIBL-100: Fix thing",
+            "name": "PROJ-100: Fix thing",
             "status": "OPEN",
-            "url": "https://bitbucket.org/cribl/cribl/pull-requests/43677",
+            "url": "https://bitbucket.org/myorg/myrepo/pull-requests/43677",
             "author": {"name": "Shahzad Bhatti"},
             "reviewers": [
                 {"name": "Alice", "approved": True},
@@ -208,17 +208,17 @@ def test_gather_jira_uses_dev_status_api(mock_sprint, mock_prs, tmp_path):
 
     config = {
         "JIRA_BASE_URL": "https://jira.example.com",
-        "JIRA_PROJECT": "CRIBL",
+        "JIRA_PROJECT": "PROJ",
         "JIRA_EMAIL": "user@example.com",
         "JIRA_API_TOKEN": "token",
-        "BITBUCKET_WORKSPACE": "cribl",
-        "BITBUCKET_REPO": "cribl",
+        "BITBUCKET_WORKSPACE": "myorg",
+        "BITBUCKET_REPO": "myrepo",
     }
     result = _gather_jira(config, workspace_dir=tmp_path)
 
     assert result["pr_count"] == 1
     assert result["prs"][0]["id"] == "43677"
-    assert result["prs"][0]["jira_key"] == "CRIBL-100"
+    assert result["prs"][0]["jira_key"] == "PROJ-100"
     assert result["prs"][0]["approved_by"] == ["Alice"]
     assert result["prs"][0]["reviewers"] == ["Bob"]
 
@@ -228,7 +228,7 @@ def test_gather_jira_uses_dev_status_api(mock_sprint, mock_prs, tmp_path):
 def test_gather_jira_filters_non_open_prs(mock_sprint, mock_prs, tmp_path):
     """Only OPEN PRs are included; MERGED and DECLINED are excluded."""
     mock_sprint.return_value = (
-        [{"key": "CRIBL-100", "id": "100001", "summary": "s", "status": "Done"}],
+        [{"key": "PROJ-100", "id": "100001", "summary": "s", "status": "Done"}],
         "Sprint 1",
     )
     mock_prs.return_value = [
@@ -237,7 +237,7 @@ def test_gather_jira_filters_non_open_prs(mock_sprint, mock_prs, tmp_path):
         {"id": "3", "name": "PR3", "status": "DECLINED", "url": "", "author": {"name": "C"}, "reviewers": []},
     ]
 
-    config = {"JIRA_BASE_URL": "https://x", "JIRA_PROJECT": "CRIBL", "JIRA_EMAIL": "u", "JIRA_API_TOKEN": "t"}
+    config = {"JIRA_BASE_URL": "https://x", "JIRA_PROJECT": "PROJ", "JIRA_EMAIL": "u", "JIRA_API_TOKEN": "t"}
     result = _gather_jira(config, workspace_dir=tmp_path)
 
     assert result["pr_count"] == 1
@@ -250,8 +250,8 @@ def test_gather_jira_deduplicates_prs_across_issues(mock_sprint, mock_prs, tmp_p
     """Same PR linked to multiple issues appears only once."""
     mock_sprint.return_value = (
         [
-            {"key": "CRIBL-100", "id": "100001", "summary": "a", "status": "Open"},
-            {"key": "CRIBL-101", "id": "100002", "summary": "b", "status": "Open"},
+            {"key": "PROJ-100", "id": "100001", "summary": "a", "status": "Open"},
+            {"key": "PROJ-101", "id": "100002", "summary": "b", "status": "Open"},
         ],
         "Sprint 1",
     )
@@ -260,7 +260,7 @@ def test_gather_jira_deduplicates_prs_across_issues(mock_sprint, mock_prs, tmp_p
         {"id": "9999", "name": "Shared PR", "status": "OPEN", "url": "", "author": {"name": "Z"}, "reviewers": []},
     ]
 
-    config = {"JIRA_BASE_URL": "https://x", "JIRA_PROJECT": "CRIBL", "JIRA_EMAIL": "u", "JIRA_API_TOKEN": "t"}
+    config = {"JIRA_BASE_URL": "https://x", "JIRA_PROJECT": "PROJ", "JIRA_EMAIL": "u", "JIRA_API_TOKEN": "t"}
     result = _gather_jira(config, workspace_dir=tmp_path)
 
     assert result["pr_count"] == 1

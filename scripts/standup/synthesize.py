@@ -1,4 +1,4 @@
-"""Synthesize standup brief from gathered signals using Claude + ygs-standup skill.
+"""Synthesize standup brief from gathered signals using the /ygs-standup skill.
 
 Usage:
     python -m scripts.standup.synthesize
@@ -18,12 +18,37 @@ Exit codes: 0=done, 1=error
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import date
+from pathlib import Path
 
-from scripts.common.claude_runner import run_claude
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
 from scripts.common.config import load_config, get_workspace_dir, validate_claude_config
+
+
+# ---------------------------------------------------------------------------
+# Skill loading — read SKILL.md directly (same pattern as adhoc/run_skill.py)
+# ---------------------------------------------------------------------------
+
+def _skill_search_paths() -> list[Path]:
+    paths: list[Path] = []
+    codebase_dir = os.environ.get("CODEBASE_DIR", "").strip()
+    if codebase_dir:
+        paths.append(Path(codebase_dir) / ".claude" / "skills")
+    paths.append(Path.home() / ".claude" / "skills")
+    paths.append(Path.home() / ".claude" / "skills" / "you-got-skills" / "skills")
+    return paths
+
+
+def _load_skill_md(skill: str) -> str | None:
+    for base in _skill_search_paths():
+        candidate = base / skill / "SKILL.md"
+        if candidate.exists():
+            print(f"[synthesize] skill path: {candidate}", flush=True)
+            return candidate.read_text(encoding="utf-8")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -31,99 +56,117 @@ from scripts.common.config import load_config, get_workspace_dir, validate_claud
 # ---------------------------------------------------------------------------
 
 _SYNTHESIZE_PROMPT = """\
-You are an expert engineering team lead generating a concise, evidence-backed standup brief.
+Generate today's standup brief using the instructions below.
+
+The signals have already been gathered and saved to signals.json in the working directory.
+Do NOT re-fetch data from Jira, GitHub, or Slack — use only what is in signals.json.
 
 TODAY: {today}
 
-SIGNALS:
-{signals_json}
+SIGNALS FILE: signals.json (already written to the working directory)
 
-TASK: Produce a standup brief. Do NOT call any tools or APIs. Use only the data above.
+TEAM: {team_members_note}
 
-===== OUTPUT FORMAT — STRICTLY ENFORCED =====
+BOARDS: {boards_json}
 
-Output MUST start with exactly:
+STRICT DATA RULES:
+• Use ONLY data from signals.json — never fetch or invent additional issues or PRs.
+• Report on all sprint assignees — do NOT add notes about team roster or configuration files.
+• Only show PRs from open_prs[] in signals.json. Never add aged/org-wide/unrelated PRs.
+
+## Standup Skill Instructions
+
+{skill_instructions}
+
+After completing, write:
+• standup_brief.md  — the STANDUP_BRIEF section content
+• risk_report.md    — the RISK_REPORT section content
+
+Output ONLY this JSON on the last line:
+{{"status":"DONE","risk_count":<N>,"discussion_questions":<N>,"silence_count":<N>}}
+"""
+
+_SYNTHESIZE_PROMPT_FALLBACK = """\
+Generate today's standup brief from signals.json in the working directory.
+
+The signals have already been gathered. Do NOT re-fetch data from Jira, GitHub, or Slack.
+
+TODAY: {today}
+
+TEAM: {team_members_note}
+
+BOARDS: {boards_json}
+
+STRICT DATA RULES:
+• Use ONLY data from signals.json — never fetch or invent additional issues or PRs.
+• Report on all sprint assignees — do NOT add notes about team roster or configuration files.
+• Only show PRs from open_prs[] in signals.json. Never add aged/org-wide/unrelated PRs.
+
+## Instructions
+
+1. Read signals.json from the current working directory.
+2. For each team member in TEAM ROSTER, summarise:
+   - Issues they are working on (status, blockers)
+   - Open PRs awaiting review
+   - Any stale items (not updated in 2+ days)
+3. Identify risks: sprint burn-down, blocked issues, PRs with no reviewer.
+4. Format output in two sections:
 
 #### STANDUP_BRIEF
-
-Then later:
-
-#### RISK_REPORT
-
-STANDUP_BRIEF RULES (any violation = wrong answer):
-1. NO markdown: no **, no __, no `, no #, no >, no ->, no →
-2. Bullets: • only (never -)
-3. Section headers ALL CAPS on their own line: BOARD STATUS, STATUS, RISKS, DISCUSSION
-4. RISKS: emoji prefix only (🔴 🟡), no bold, no arrows
-5. DISCUSSION: numbered 1. 2. 3.
-6. Max 1800 chars total
-
-EXACT TEMPLATE (fill in data, keep structure):
-
-Standup Brief — {today}
-
-BOARD STATUS
-• <SprintName> (<FirstName, FirstName, ...>): <N> total, <N> done, <N> in-prog/review, <N> not started — ends <date or "today">
-
-STATUS
-• <FirstName>: <issues in-progress/review as KEY, KEY>. PRs <NNN/NNN> open <Nd> <reviewer status>. <stale/blocked notes>.
-(one • per person, 150 chars max, include PR numbers when associated with their issues)
-
-RISKS
-🔴 KEY (@FirstName): <reason, PR status if open> — max 100 chars
-🟡 KEY (@FirstName): <reason> — max 100 chars
-
-DISCUSSION
-1. KEY (@FirstName): <decision needed today>
-
-===== ANALYSIS STEPS =====
-
-Step 1 — BOARD STATUS:
-  Use all_sprints[]. One bullet per sprint: name, team (first names), counts by status category, end date.
-
-Step 2 — STATUS (primary sprint — most issues):
-  One bullet per person. For each person's open/in-progress issues:
-  - List issue keys
-  - If the issue has an open PR in open_prs[] (match by title containing the key), include PR number and age
-  - Show reviewer status: "no reviewers", "N approved", "N pending"
-  - Flag stale (>3d no update) and BLOCKED
-
-Step 3 — RISKS:
-  🔴 HIGH: P0/P1 with open PR >3d no reviewers, BLOCKED, sprint ending today with unfinished P0/P1
-  🟡 MEDIUM: P2 stale >3d, open PR >2d no reviewers, sprint ending today with open work
-
-Step 4 — DISCUSSION (2-3 items needing human decision today only):
+Slack-safe mrkdwn. One bullet per person. Keep it to 3-5 lines total.
+Format: *Name* — <what they're working on> [BLOCKED: reason if blocked]
 
 #### RISK_REPORT
-Full ranked risk report with details. Standard markdown OK here.
+Bullet list of risks ranked by severity. One line each.
 
-Exit JSON (last line, required):
+Write standup_brief.md with the STANDUP_BRIEF content and risk_report.md with the RISK_REPORT content.
+
+Output ONLY this JSON on the last line:
 {{"status":"DONE","risk_count":<N>,"discussion_questions":<N>,"silence_count":<N>}}
 """
 
 
 def _build_prompt(signals: dict) -> str:
-    lookback = signals.get("config_summary", {}).get("lookback_hours", 26)
-    # Trim comments to keep prompt size manageable (Bedrock has strict input limits)
-    trimmed = json.loads(json.dumps(signals))
-    for issue in trimmed.get("issues", []):
-        comments = issue.get("recent_comments", [])
-        # Keep only 3 most recent comments, truncate long bodies
-        short = []
-        for c in comments[-3:]:
-            text = c.get("text", "")
-            short.append({**c, "text": text[:300] + ("..." if len(text) > 300 else "")})
-        issue["recent_comments"] = short
-    # Trim Slack message text
-    for msg in trimmed.get("slack_messages", []):
-        if len(msg.get("text", "")) > 200:
-            msg["text"] = msg["text"][:200] + "..."
+    team_members = signals.get("team_members", [])
 
-    return _SYNTHESIZE_PROMPT.format(
+    # Build boards summary: board_id → {board_name, sprint_name, end_date}
+    boards_map: dict[str, dict] = {}
+    for s in signals.get("all_sprints", []):
+        bid = s.get("board_id")
+        if bid is not None:
+            boards_map[str(bid)] = {
+                "board_name": s.get("board", ""),
+                "sprint_name": s.get("name", ""),
+                "end_date": s.get("end_date", ""),
+            }
+    for k, v in signals.get("board_sprint_map", {}).items():
+        if k not in boards_map:
+            boards_map[k] = {
+                "board_name": v.get("board", ""),
+                "sprint_name": v.get("name", ""),
+                "end_date": v.get("end_date", ""),
+            }
+
+    # When no explicit team list is configured, report on all sprint assignees.
+    # Avoid passing empty [] which causes the model to add notes about team config.
+    if team_members:
+        team_members_note = ", ".join(team_members)
+    else:
+        team_members_note = "all sprint assignees (no filter configured)"
+
+    common = dict(
         today=date.today().isoformat(),
-        signals_json=json.dumps(trimmed, indent=2),
-        lookback_hours=lookback,
+        team_members_note=team_members_note,
+        boards_json=json.dumps(boards_map, indent=2),
     )
+
+    skill_md = _load_skill_md("ygs-standup")
+    if skill_md:
+        print(f"[synthesize] loaded ygs-standup SKILL.md ({len(skill_md)} chars)", flush=True)
+        return _SYNTHESIZE_PROMPT.format(skill_instructions=skill_md, **common)
+
+    print("[synthesize] WARNING: ygs-standup/SKILL.md not found — using fallback instructions", flush=True)
+    return _SYNTHESIZE_PROMPT_FALLBACK.format(**common)
 
 
 # ---------------------------------------------------------------------------
@@ -168,22 +211,23 @@ def _truncate_brief(text: str) -> str:
 
 
 def _strip_markdown(text: str) -> str:
-    """Remove common markdown formatting that breaks Slack plain-text display.
+    """Normalise markdown to Slack mrkdwn.
 
-    Slack renders * as a literal asterisk, so **bold** shows as **bold**.
-    Strip bold/italic markers, inline code, heading prefixes, and arrow chars.
+    Keeps *single-star bold* (valid Slack mrkdwn for section headers).
+    Strips **double-star** markdown bold (not valid in Slack), __, backtick code.
+    Converts '- item' dash bullets to '• item'.
     """
-    # Remove bold/italic markers: **, __, *, _
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    # Strip markdown **double-star** bold (not Slack mrkdwn)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    # Strip __double-underscore__ bold
     text = re.sub(r'__(.+?)__', r'\1', text)
-    text = re.sub(r'\*(.+?)\*', r'\1', text)
-    text = re.sub(r'_(.+?)_', r'\1', text)
     # Remove inline code backticks
     text = re.sub(r'`(.+?)`', r'\1', text)
-    # Remove markdown heading prefixes (## Foo → FOO already handled by prompt, but clean up any)
+    # Remove markdown heading prefixes (#, ##, etc.)
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    # Replace markdown dashes at line start with •
-    text = re.sub(r'^\s*-\s+', '• ', text, flags=re.MULTILINE)
+    # Convert '- item' dash bullets to • (but not lines starting with * which may be *Bold*)
+    text = re.sub(r'^[ \t]-[ \t]+', '• ', text, flags=re.MULTILINE)
+    text = re.sub(r'^-[ \t]+', '• ', text, flags=re.MULTILINE)
     # Remove arrows that sneak in
     text = re.sub(r'\s*→\s*', ': ', text)
     return text
@@ -207,6 +251,8 @@ def main() -> None:
     tracker = signals.get("tracker", "unknown")
     print(f"[synthesize] tracker={tracker} issues={len(signals.get('issues', []))} prs={len(signals.get('open_prs', []))}", flush=True)
 
+    # Ensure YGS skills are cloned before _build_prompt() tries to load SKILL.md
+    _ensure_ygs_skills()
     prompt = _build_prompt(signals)
 
     try:
@@ -216,6 +262,8 @@ def main() -> None:
             model=config.get("AI_MODEL"),
             max_turns=int(config.get("MAX_TURNS_STANDUP", "30")),
             log_file=workspace_dir / "logs" / "synthesize.log",
+            allowed_tools="Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS",
+            system_prompt=SYSTEM_PROMPTS["standup"],
         )
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr)
@@ -237,9 +285,20 @@ def main() -> None:
     if risk_report:
         (workspace_dir / "risk_report.md").write_text(risk_report)
 
-    (workspace_dir / "synthesize_result.json").write_text(
-        json.dumps(result.status_json or {"status": result.status}, indent=2)
-    )
+    status_data = result.status_json or {"status": result.status}
+    (workspace_dir / "synthesize_result.json").write_text(json.dumps(status_data, indent=2))
+
+    # Write standardized reports/ directory
+    try:
+        from scripts.common.report_renderer import render_simple_html
+        reports_dir = workspace_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / "report.md").write_text(brief)
+        (reports_dir / "report.html").write_text(render_simple_html("Standup Brief", brief))
+        (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2))
+        print(f"[synthesize] wrote reports/report.md, reports/report.html, reports/result.json", flush=True)
+    except Exception as _re:
+        print(f"[synthesize] WARNING: could not write reports/: {_re}", flush=True)
 
     sj = result.status_json or {}
     if result.status == "DONE":
@@ -251,6 +310,15 @@ def main() -> None:
     else:
         print(f"[synthesize] unexpected status '{result.status}'", flush=True)
 
+    model = config.get("AI_MODEL", "")
+    print(f"::add-task-context SELECTED_MODEL::{model}")
+    print(f"::add-task-context SELECTED_TRACKER::{tracker}")
+    print(f"::add-task-context ISSUE_COUNT::{len(signals.get('issues', []))}")
+    print(f"::add-task-context PR_COUNT::{len(signals.get('open_prs', []))}")
+    if sj.get("risk_count") is not None:
+        print(f"::add-task-context RISK_COUNT::{sj.get('risk_count', 0)}")
+    if sj.get("silence_count") is not None:
+        print(f"::add-task-context SILENCE_COUNT::{sj.get('silence_count', 0)}")
     sys.exit(0)
 
 

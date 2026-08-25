@@ -180,63 +180,75 @@ def test_get_current_jira_user_failure(mock_get, jira_config):
 # get_active_sprints / get_active_sprint
 # ---------------------------------------------------------------------------
 
-@patch("scripts.standup.gather_jira._get_my_sprint_ids", return_value=set())
 @patch("scripts.standup.gather_jira._fetch_project_boards")
 @patch("scripts.standup.gather_jira.requests.get")
-def test_get_active_sprint_found(mock_get, mock_boards, mock_my_sprints, jira_config):
-    """Single scrum board with one active sprint → sprint found via fallback."""
+def test_get_active_sprint_found(mock_get, mock_boards, jira_config):
+    """Single scrum board with one active sprint — user has an issue on it."""
     mock_boards.return_value = [{"id": 1, "name": "Board 1", "type": "scrum"}]
-    mock_get.return_value = MagicMock(ok=True, json=lambda: {
+    me = {"accountId": "acc-1", "displayName": "Test User"}
+    # requests.get is called twice: once for sprint list, once for membership scan
+    sprint_resp = MagicMock(ok=True, json=lambda: {
         "values": [{"id": 10, "name": "Sprint 1", "state": "active", "endDate": "2026-07-25"}]
     })
-    sprint = get_active_sprint(jira_config)
+    member_resp = MagicMock(ok=True, json=lambda: {
+        "issues": [{"fields": {"assignee": {"accountId": "acc-1", "displayName": "Test User"}}}],
+        "total": 1,
+    })
+    mock_get.side_effect = [sprint_resp, member_resp]
+    sprint = get_active_sprint(jira_config, me=me)
     assert sprint is not None
     assert sprint["id"] == 10
     assert sprint["_board_name"] == "Board 1"
 
 
-@patch("scripts.standup.gather_jira._get_my_sprint_ids", return_value=set())
 @patch("scripts.standup.gather_jira._fetch_project_boards", return_value=[])
-def test_get_active_sprint_no_board(mock_boards, mock_my_sprints, jira_config):
+def test_get_active_sprint_no_board(mock_boards, jira_config):
     sprint = get_active_sprint(jira_config)
     assert sprint is None
 
 
-@patch("scripts.standup.gather_jira._get_my_sprint_ids", return_value={10, 20})
 @patch("scripts.standup.gather_jira._fetch_project_boards")
 @patch("scripts.standup.gather_jira.requests.get")
-def test_get_active_sprints_user_in_two_sprints(mock_get, mock_boards, mock_my_sprints, jira_config):
-    """User is in sprints 10 and 20 across two different boards."""
+def test_get_active_sprints_user_in_two_sprints(mock_get, mock_boards, jira_config):
+    """User has issues on two different boards — both sprints returned."""
+    me = {"accountId": "acc-1", "displayName": "Test User"}
     mock_boards.return_value = [
         {"id": 1, "name": "Board A", "type": "scrum"},
         {"id": 2, "name": "Board B", "type": "scrum"},
     ]
+    issue_with_user = {"fields": {"assignee": {"accountId": "acc-1", "displayName": "Test User"}}}
     mock_get.side_effect = [
+        # Board A: sprint list then membership scan
         MagicMock(ok=True, json=lambda: {"values": [{"id": 10, "name": "Sprint A", "state": "active", "endDate": "2026-08-01"}]}),
+        MagicMock(ok=True, json=lambda: {"issues": [issue_with_user], "total": 1}),
+        # Board B: sprint list then membership scan
         MagicMock(ok=True, json=lambda: {"values": [{"id": 20, "name": "Sprint B", "state": "active", "endDate": "2026-08-01"}]}),
+        MagicMock(ok=True, json=lambda: {"issues": [issue_with_user], "total": 1}),
     ]
-    sprints = get_active_sprints(jira_config)
+    sprints = get_active_sprints(jira_config, me=me)
     assert len(sprints) == 2
     ids = {s["id"] for s in sprints}
     assert ids == {10, 20}
 
 
-@patch("scripts.standup.gather_jira._get_my_sprint_ids", return_value=set())
 @patch("scripts.standup.gather_jira._fetch_project_boards")
 @patch("scripts.standup.gather_jira.requests.get")
-def test_get_active_sprints_shared_sprint_merged_board_names(mock_get, mock_boards, mock_my_sprints, jira_config):
+def test_get_active_sprints_shared_sprint_merged_board_names(mock_get, mock_boards, jira_config):
     """Two boards share the same sprint id — board names are merged."""
+    me = {"accountId": "acc-1", "displayName": "Test User"}
     mock_boards.return_value = [
         {"id": 17, "name": "Scope", "type": "scrum"},
         {"id": 19, "name": "AWS & Content", "type": "scrum"},
     ]
-    # Both boards return the same sprint id
-    shared_sprint = {"id": 42, "name": "Chupacabra 378", "state": "active", "endDate": "2026-08-01"}
+    shared_sprint_data = {"id": 42, "name": "Chupacabra 378", "state": "active", "endDate": "2026-08-01"}
+    issue_with_user = {"fields": {"assignee": {"accountId": "acc-1", "displayName": "Test User"}}}
     mock_get.side_effect = [
-        MagicMock(ok=True, json=lambda: {"values": [shared_sprint]}),
-        MagicMock(ok=True, json=lambda: {"values": [shared_sprint]}),
+        MagicMock(ok=True, json=lambda: {"values": [shared_sprint_data]}),
+        MagicMock(ok=True, json=lambda: {"issues": [issue_with_user], "total": 1}),
+        MagicMock(ok=True, json=lambda: {"values": [shared_sprint_data]}),
+        MagicMock(ok=True, json=lambda: {"issues": [issue_with_user], "total": 1}),
     ]
-    sprints = get_active_sprints(jira_config)
+    sprints = get_active_sprints(jira_config, me=me)
     # Only one sprint returned (deduplicated by id)
     assert len(sprints) == 1
     assert sprints[0]["id"] == 42
@@ -245,21 +257,24 @@ def test_get_active_sprints_shared_sprint_merged_board_names(mock_get, mock_boar
     assert "AWS & Content" in sprints[0]["_board_names"]
 
 
-@patch("scripts.standup.gather_jira._get_my_sprint_ids", return_value=set())
 @patch("scripts.standup.gather_jira._fetch_project_boards")
 @patch("scripts.standup.gather_jira.requests.get")
-def test_get_active_sprints_kanban_boards_skipped(mock_get, mock_boards, mock_my_sprints, jira_config):
+def test_get_active_sprints_kanban_boards_skipped(mock_get, mock_boards, jira_config):
     """Kanban boards are skipped; only scrum boards are queried for sprints."""
+    me = {"accountId": "acc-1", "displayName": "Test User"}
     mock_boards.return_value = [
         {"id": 1, "name": "Kanban Board", "type": "kanban"},
         {"id": 2, "name": "Scrum Board", "type": "scrum"},
     ]
-    mock_get.return_value = MagicMock(ok=True, json=lambda: {
-        "values": [{"id": 99, "name": "Sprint X", "state": "active", "endDate": "2026-08-01"}]
-    })
-    sprints = get_active_sprints(jira_config)
-    # Only one GET call — kanban board skipped
-    assert mock_get.call_count == 1
+    issue_with_user = {"fields": {"assignee": {"accountId": "acc-1", "displayName": "Test User"}}}
+    mock_get.side_effect = [
+        # Only scrum board gets a sprint list call + membership scan
+        MagicMock(ok=True, json=lambda: {"values": [{"id": 99, "name": "Sprint X", "state": "active", "endDate": "2026-08-01"}]}),
+        MagicMock(ok=True, json=lambda: {"issues": [issue_with_user], "total": 1}),
+    ]
+    sprints = get_active_sprints(jira_config, me=me)
+    # Only 2 GET calls (sprint list + membership) — kanban board skipped
+    assert mock_get.call_count == 2
     assert sprints[0]["_board_name"] == "Scrum Board"
 
 
@@ -432,9 +447,9 @@ def test_main_with_multiple_sprints(
     mock_user.return_value = {"displayName": "Test User"}
     mock_sprints.return_value = [
         {"id": 10, "name": "Sprint A", "state": "active", "endDate": "2026-08-01",
-         "_board_names": ["Board A"], "_board_name": "Board A"},
+         "_board_id": 1, "_board_names": ["Board A"], "_board_name": "Board A"},
         {"id": 20, "name": "Sprint B", "state": "active", "endDate": "2026-08-01",
-         "_board_names": ["Board B"], "_board_name": "Board B"},
+         "_board_id": 2, "_board_names": ["Board B"], "_board_name": "Board B"},
     ]
     mock_issues.side_effect = [
         [_make_raw_issue("PROJ-1", "Alice")],

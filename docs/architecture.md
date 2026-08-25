@@ -144,32 +144,34 @@ This means:
 
 The Slack agent router (`scripts/slack/router.py`) is a long-running Bolt Socket Mode app deployed as a K8s Deployment (1 replica, `Recreate` strategy). It requires no public ingress — Socket Mode uses an outbound WebSocket to Slack's servers.
 
-### Request routing
+For the full explanation see **[docs/slack-router.md](slack-router.md)**.
 
-When a user mentions the bot in a Slack channel:
+### Summary
 
-1. **Bot mention stripped** — `<@UXXXXX>` prefix removed.
-2. **Slash-command parse first** — cheap, deterministic. Recognised patterns: `review <url>`, `implement <id>`, `standup`, `pr <url>`, `risk`, `security`, `sre`.
-3. **Haiku LLM fallback** — if the text doesn't match any verb, a `claude --model haiku --max-turns 1` subprocess classifies the intent.
-4. **Registry lookup** — `workflows.yml` maps `(intent, target_kind)` → formicary `job_type`. `target_kind` is inferred from the entity ID (Jira key → `jira`, GitHub URL → `github`).
-5. **Missing vars check** — if required variables aren't satisfied by the entity ID, the bot asks for them.
-6. **Submit** — `POST /api/jobs/requests` to formicary with all params including `SlackThreadTs`.
-
-### Thread replies
-
-When a user replies in a thread where a paused job is waiting:
-
-1. `find_jobs(state=PAUSED, var_filter={SlackThreadTs: thread_ts})` to look up the paused job.
-2. `resume(job_id, variables={ReplyText: text})` via the 4-step GET→merge→PUT→trigger pattern.
-3. Falls through to new-request handling if no paused job is found on that thread.
-
-### Block Kit buttons
-
-The Slack message posted by `post_findings.py` includes "Approve" and "Request Changes" buttons. Button values are `{job_id}:approve` and `{job_id}:request-changes`. The router's `on_block_action` handler parses `job_id:decision` from the action value and calls `resume(job_id, variables={Decision: decision})`.
+1. User `@bot <command>` in Slack
+2. Router strips mention, normalises Slack links, resolves intent via verb parse or Haiku LLM
+3. Looks up `job_type` in `workflows.yml` registry
+4. Submits Formicary job with `SlackThreadTs` so the skill can reply in-thread
+5. Skill posts result back via `notify(config, text, blocks=blocks)` — Block Kit structured output with plain-text fallback
 
 ### Extension point
 
-`scripts/slack/workflows.yml` and `scripts/slack/skills.yml` are the sole extension points. Adding a new capability requires one YAML entry — no code changes.
+`scripts/slack/workflows.yml` and `scripts/slack/skills.yml` are the sole extension points. Adding a new skill requires one YAML entry — no code changes to the router.
+
+### Available commands
+
+| Command | Job type | Description |
+|---------|----------|-------------|
+| `standup` | `ai-standup-jira` / `ai-standup-gh` | Daily standup brief |
+| `risk` | `ai-adhoc` + `ygs-risk-scan` | Sprint risk scan |
+| `prs` / `pr queue` | `ai-adhoc` + `ygs-pr-queue` | Open PR queue |
+| `review <url>` | `ai-gh-review` / `ai-jira-review` | AI code review + pause for decision |
+| `implement <id>` | `ai-jira-implement` / `ai-gh-implement` | Full implement pipeline |
+| `qjira <term>` | `ai-jira-query` | Search open Jira issues by keyword |
+| `jira-analyze <keys>` | `ai-jira-query` (Mode=analyze) | Root-cause analysis for issues |
+| `pr comments <url>` | `ai-adhoc` | Inline comments + tasks for a PR |
+| `security review` / `sre review` | `ai-gh-review` | Specialist PR reviews |
+| `help` | — | List all commands |
 
 ---
 
@@ -215,3 +217,11 @@ Formicary:
 - `gh auth login` is called in entrypoint to authenticate the `gh` CLI
 - Claude runs with `--dangerously-skip-permissions` inside the container (no interactive prompts)
 - The container runs as non-root (`agent` user, uid 1000) in production K8s deployments
+
+---
+
+## Further Reading
+
+- [system-reference.md](system-reference.md) — complete operational guide: all job types, config system, Slack router, skills integration, all gotchas
+- [slack-router.md](slack-router.md) — Slack router deep-dive: request flow, thread replies, registry, Block Kit output
+- [configuration.md](configuration.md) — all env vars, org configs, K8s secret reference

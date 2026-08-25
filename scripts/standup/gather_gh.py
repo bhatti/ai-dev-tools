@@ -31,7 +31,10 @@ from scripts.standup.slack_client import get_standup_messages
 
 
 def _parse_team_filter(config: dict) -> list[str]:
-    return [m.strip() for m in config.get("STANDUP_TEAM_MEMBERS", "").split(",") if m.strip()]
+    raw = config.get("STANDUP_TEAM_MEMBERS", "").strip()
+    if raw in ("<no value>", "{{.StandupTeamMembers}}"):
+        return []
+    return [m.strip() for m in raw.split(",") if m.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -39,23 +42,29 @@ def _parse_team_filter(config: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def get_open_issues(config: dict) -> list[dict]:
-    """Return open issues for the repo. Fetches all then post-filters by team.
+    """Return open issues scoped to the team's sprint (milestone) or assignees.
 
-    We always fetch all open issues (up to 200) rather than filtering by
-    --assignee in the gh CLI, because --assignee accepts only a single login;
-    using it for the first team member would silently drop every other member's
-    issues before the post-filter could run.
+    Filtering strategy:
+    1. If GH_MILESTONE is set, fetch only issues in that milestone (sprint equivalent)
+    2. If STANDUP_TEAM_MEMBERS is set, filter to issues assigned to team members
+    3. Both can combine: milestone issues assigned to team members
     """
     org = config["GH_ORG"]
     repo = config["GH_REPO"]
+    milestone = config.get("GH_MILESTONE", "").strip()
+
+    cmd = [
+        "gh", "issue", "list",
+        "-R", f"{org}/{repo}",
+        "--state", "open",
+        "--limit", "200",
+        "--json", "number,title,body,url,labels,assignees,updatedAt,createdAt,comments,milestone",
+    ]
+    if milestone:
+        cmd += ["--milestone", milestone]
+
     try:
-        result = _run([
-            "gh", "issue", "list",
-            "-R", f"{org}/{repo}",
-            "--state", "open",
-            "--limit", "200",
-            "--json", "number,title,body,url,labels,assignees,updatedAt,createdAt,comments",
-        ])
+        result = _run(cmd)
     except subprocess.CalledProcessError as e:
         print(f"[gather_gh] gh issue list failed (exit {e.returncode}): {e.stderr}", file=sys.stderr, flush=True)
         raise
@@ -73,11 +82,21 @@ def get_open_issues(config: dict) -> list[dict]:
             i for i in issues
             if any(a["login"] in team_filter for a in i.get("assignees", []))
         ]
+
+    if milestone:
+        print(f"[gather_gh] milestone={milestone}: {len(issues)} issues", flush=True)
+
     return issues
 
 
 def get_open_prs(config: dict) -> list[dict]:
-    """Return open PRs (up to 100) with age and reviewers. Uses gh CLI."""
+    """Return open PRs relevant to the team — authored by or requesting review from team members.
+
+    When STANDUP_TEAM_MEMBERS is set, only returns PRs where:
+    - The author is a team member, OR
+    - A team member is requested as reviewer
+    This scopes PRs to the sprint board participants.
+    """
     org = config["GH_ORG"]
     repo = config["GH_REPO"]
     try:
@@ -98,8 +117,20 @@ def get_open_prs(config: dict) -> list[dict]:
     except json.JSONDecodeError:
         return []
 
+    team_filter = _parse_team_filter(config)
+
     prs = []
     for pr in raw_prs:
+        author = pr.get("author", {}).get("login", "unknown")
+        reviewers = [r["login"] for r in pr.get("reviewRequests", [])]
+
+        # Filter to team-relevant PRs: authored by team or review requested from team
+        if team_filter:
+            is_team_author = author in team_filter
+            is_team_reviewer = any(r in team_filter for r in reviewers)
+            if not is_team_author and not is_team_reviewer:
+                continue
+
         created = pr.get("createdAt", "")
         try:
             age_hours = (
@@ -109,14 +140,13 @@ def get_open_prs(config: dict) -> list[dict]:
         except (ValueError, AttributeError):
             age_hours = 0
 
-        reviewers = [r["login"] for r in pr.get("reviewRequests", [])]
         review_states = [r.get("state", "") for r in pr.get("reviews", [])]
         has_approval = "APPROVED" in review_states
 
         prs.append({
             "id": pr["number"],
             "title": pr.get("title", ""),
-            "author": pr.get("author", {}).get("login", "unknown"),
+            "author": author,
             "created": created,
             "age_hours": round(age_hours, 1),
             "reviewers": reviewers,
@@ -205,16 +235,37 @@ def main() -> None:
     print(f"[gather_gh] {len(raw_issues)} open issues fetched", flush=True)
     issues = [_normalise_issue(r, stale_cutoff, lookback_cutoff) for r in raw_issues]
 
+    # Derive team members from actual issue assignees so PR filtering is board-scoped
+    team_members = sorted({i["assignee"] for i in issues if i["assignee"] != "unassigned"})
+    print(f"[gather_gh] team members from issues: {team_members}", flush=True)
+
     open_prs = get_open_prs(config)
-    print(f"[gather_gh] {len(open_prs)} open PRs", flush=True)
+    # Filter PRs to team members derived from board issues (not all open PRs in the org)
+    effective_team = team_filter or team_members
+    if effective_team:
+        filtered_prs = [
+            pr for pr in open_prs
+            if pr.get("author", "") in effective_team
+            or any(r in effective_team for r in pr.get("reviewers", []))
+        ]
+        print(
+            f"[gather_gh] {len(open_prs)} open PRs → {len(filtered_prs)} after team filter",
+            flush=True,
+        )
+        open_prs = filtered_prs
+    else:
+        print(f"[gather_gh] {len(open_prs)} open PRs (no team filter)", flush=True)
 
     slack_messages = get_standup_messages(config, lookback_hours)
 
     signals = {
         "gathered_at": datetime.now(timezone.utc).isoformat(),
         "tracker": "github",
-        "current_user": None,
+        # current_user omitted — it is the API auth identity only and must not
+        # anchor per-person analysis in synthesize.
+        "team_members": team_members,
         "sprint": {},
+        "all_sprints": [],
         "issues": issues,
         "open_prs": open_prs,
         "slack_messages": slack_messages,
@@ -223,7 +274,7 @@ def main() -> None:
             "gh_repo": config["GH_REPO"],
             "lookback_hours": lookback_hours,
             "stale_days": stale_days,
-            "slack_channel": config.get("SLACK_CHANNEL", "standup"),
+            "slack_channel": config.get("SLACK_CHANNEL", ""),
             "team_filter": team_filter,
         },
     }
@@ -243,6 +294,11 @@ def main() -> None:
         f"{len(slack_messages)} Slack msgs",
         flush=True,
     )
+    print(f"::add-task-context SELECTED_TRACKER::github")
+    print(f"::add-task-context ISSUE_COUNT::{len(issues)}")
+    print(f"::add-task-context PR_COUNT::{len(open_prs)}")
+    print(f"::add-task-context SLACK_MESSAGE_COUNT::{len(slack_messages)}")
+    print(f"::add-task-context TEAM_MEMBER_COUNT::{len(team_members)}")
     sys.exit(0)
 
 

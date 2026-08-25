@@ -17,9 +17,50 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+# ---------------------------------------------------------------------------
+# Model ID constants — single source of truth for all scripts and YAML defaults.
+# Update these to roll to a new model version; no other files need changing.
+# Callers may still override at runtime via ANTHROPIC_DEFAULT_*_MODEL env vars.
+# ---------------------------------------------------------------------------
+MODEL_BEDROCK_SONNET = "us.anthropic.claude-sonnet-4-6"
+MODEL_BEDROCK_OPUS   = "us.anthropic.claude-opus-4-6-v1"
+MODEL_BEDROCK_HAIKU  = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+MODEL_SONNET         = "claude-sonnet-4-6"              # direct Anthropic API (non-Bedrock)
+MODEL_HAIKU          = "claude-haiku-4-5-20251001-v1:0" # direct Anthropic API (non-Bedrock)
+
+# Short name → full model ID, used by "using <name> model" message syntax.
+# Covers Bedrock versions and common Aperture proxy aliases.
+# Unknown names are passed through as-is, so full model IDs always work.
+# Complexity-tiered model selection — used by the implement pipeline.
+# The plan task writes plan_complexity.txt (low/medium/high); the implement task
+# reads it and selects the corresponding model.  Override via org configs
+# (AnthropicComplexityLowModel / AnthropicComplexityHighModel) or models.env.
+COMPLEXITY_MODEL_MAP: dict[str, str] = {
+    "low":    MODEL_BEDROCK_HAIKU,   # simple tasks — fast and cheap
+    "medium": MODEL_BEDROCK_SONNET,  # default
+    "high":   MODEL_BEDROCK_OPUS,    # complex architecture changes
+}
+
+MODEL_SHORTNAMES: dict[str, str] = {
+    # Current defaults (resolved from env vars at runtime in run_skill.py)
+    "haiku":     MODEL_BEDROCK_HAIKU,
+    "sonnet":    MODEL_BEDROCK_SONNET,
+    "opus":      MODEL_BEDROCK_OPUS,
+    # Newer Bedrock versions available through Aperture proxy
+    "sonnet-5":  "us.anthropic.claude-sonnet-5",
+    "opus-5":    "us.anthropic.claude-opus-5",
+    "opus-4-8":  "us.anthropic.claude-opus-4-8",
+    "fable":     "anthropic.claude-fable-5",
+    "fable-5":   "anthropic.claude-fable-5",
+    "haiku-4-5": MODEL_BEDROCK_HAIKU,
+    # Mantle variants (no us. prefix)
+    "sonnet-5-mantle": "anthropic.claude-sonnet-5",
+    "opus-5-mantle":   "anthropic.claude-opus-5",
+}
+
 DEFAULTS: dict[str, str] = {
     "WORKSPACE_DIR": "/workspace",
-    "AI_MODEL": "claude-sonnet-4-6",
+    "AI_MODEL": MODEL_SONNET,
     "MAX_TURNS_PLAN": "50",
     "MAX_TURNS_IMPLEMENT": "100",
     "PICKUP_LABEL": "ai-ready",
@@ -33,9 +74,9 @@ DEFAULTS: dict[str, str] = {
     "ANTHROPIC_BEDROCK_BASE_URL": "http://ai/bedrock",
     "CLAUDE_CODE_USE_BEDROCK": "1",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "us.anthropic.claude-opus-4-6-v1",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "us.anthropic.claude-sonnet-4-6",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL":   MODEL_BEDROCK_OPUS,
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": MODEL_BEDROCK_SONNET,
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL":  MODEL_BEDROCK_HAIKU,
 }
 
 # Short alias → canonical name.
@@ -60,12 +101,38 @@ def _apply_aliases(env: dict[str, str]) -> None:
             env[canonical] = env[alias]
 
 
+def _load_dotenv(env: dict[str, str]) -> None:
+    """Load KEY=VALUE pairs from a .env file in the current directory.
+
+    Only sets keys that are NOT already in the environment — env vars always win.
+    Lines starting with '#' and blank lines are ignored.
+    """
+    dotenv_path = Path(".env")
+    if not dotenv_path.exists():
+        return
+    for line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            env.setdefault(key, value)
+
+
 def load_config(required: list[str] | None = None) -> dict[str, str]:
-    """Load config from env vars, applying defaults and prefix aliases.
+    """Load config from env vars (.env file then OS env), applying defaults and aliases.
+
+    Load order (later wins for env vars):
+    1. DEFAULTS
+    2. .env in current directory (only for keys absent from OS env)
+    3. OS environment variables
 
     Exits with code 1 and a clear message if any required var is missing.
     """
     config = dict(DEFAULTS)
+    _load_dotenv(config)   # .env values fill gaps before OS env overrides
     config.update(os.environ)
     _apply_aliases(config)
 

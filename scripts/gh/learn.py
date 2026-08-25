@@ -17,7 +17,7 @@ import sys
 import click
 
 from scripts.common.artifacts import read_json, read_text, write_json, write_text
-from scripts.common.claude_runner import run_claude
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS
 from scripts.common.config import get_issue_dir, load_config, validate_claude_config
 from scripts.common.shell import run_cmd as _run
 
@@ -100,6 +100,7 @@ def main(issue_id: str) -> None:
         model=config.get("AI_MODEL"),
         max_turns=int(config.get("MAX_TURNS_LEARN", "30")),
         log_file=issue_dir / "logs" / "learn.log",
+        system_prompt=SYSTEM_PROMPTS["learn"],
     )
 
     # Extract any markdown content from output (before the final JSON)

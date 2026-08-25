@@ -10,19 +10,30 @@ _VER_PATCH    := $(word 3,$(_VER_PARTS))
 _NEXT_PATCH   := $(shell expr $(_VER_PATCH) + 1)
 NEXT_VERSION  := $(_VER_MAJOR).$(_VER_MINOR).$(_NEXT_PATCH)
 
-.PHONY: build push test test-docker lint clean \
+.PHONY: build docker-build docker-push test test-docker lint clean \
         gh-pick gh-plan gh-implement gh-pr gh-poll gh-learn gh-all \
         jira-pick jira-plan jira-implement jira-pr jira-poll jira-learn jira-all \
-        k8s-apply k8s-rbac k8s-delete \
+        k8s-apply k8s-rbac k8s-delete k8s-crons k8s-gh-pipeline k8s-jira-pipeline \
         tag release help
 
 ## ── Build & Push ───────────────────────────────────────────────────────────
 
-build:           ## Build Docker image
-	docker build -t $(IMAGE):$(TAG) .
+# docker-build: build + push multi-arch image (amd64 + arm64).
+# If push times out, run 'make docker-push' to retry without rebuilding.
+docker-build:    ## Build multi-arch image (linux/amd64,linux/arm64) and push
+	docker buildx rm multiarch 2>/dev/null || true
+	docker buildx create --name multiarch --use --bootstrap \
+	    --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=52428800
+	docker buildx build --platform linux/amd64,linux/arm64 \
+	    -t $(IMAGE):$(VERSION) \
+	    -t $(IMAGE):latest \
+	    --push --provenance=false .
 
-push: build      ## Push image to registry
-	docker push $(IMAGE):$(TAG)
+docker-push:     ## Re-push already-built image tags (no rebuild)
+	docker push $(IMAGE):$(VERSION)
+	docker push $(IMAGE):latest
+
+build: docker-build  ## Alias for docker-build
 
 ## ── Versioning ──────────────────────────────────────────────────────────────
 
@@ -54,6 +65,17 @@ test-docker:     ## Run tests inside Docker
 
 lint:            ## Check code style
 	python -m py_compile scripts/**/*.py scripts/common/*.py
+
+install-skills:  ## Clone you-got-skills into ~/.skills for local claude CLI use
+	@mkdir -p ~/.skills
+	@if [ -d ~/.skills/you-got-skills ]; then \
+		echo "  ↺ updating ~/.skills/you-got-skills"; \
+		git -C ~/.skills/you-got-skills pull --ff-only; \
+	else \
+		echo "  ✓ cloning you-got-skills into ~/.skills/you-got-skills"; \
+		git clone --depth 1 https://github.com/bhatti/you-got-skills.git ~/.skills/you-got-skills; \
+	fi
+	@echo "  ✓ skills available at ~/.skills/you-got-skills/skills/"
 
 clean:           ## Remove test workspace, __pycache__, .pytest cache
 	rm -rf test-workspace/ .pytest_cache/ __pycache__ scripts/**/__pycache__ scripts/__pycache__
