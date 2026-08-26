@@ -20,11 +20,14 @@ NEXT_VERSION  := $(_VER_MAJOR).$(_VER_MINOR).$(_NEXT_PATCH)
 
 # docker-build: build + push multi-arch image (amd64 + arm64).
 # If push times out, run 'make docker-push' to retry without rebuilding.
-docker-build:    ## Build multi-arch image (linux/amd64,linux/arm64) and push
+NO_CACHE ?=
+
+docker-build:    ## Build multi-arch image (linux/amd64,linux/arm64) and push. Use NO_CACHE=1 to bypass layer cache.
 	docker buildx rm multiarch 2>/dev/null || true
 	docker buildx create --name multiarch --use --bootstrap \
 	    --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=52428800
 	docker buildx build --platform linux/amd64,linux/arm64 \
+	    $(if $(NO_CACHE),--no-cache,) \
 	    -t $(IMAGE):$(VERSION) \
 	    -t $(IMAGE):latest \
 	    --push --provenance=false .

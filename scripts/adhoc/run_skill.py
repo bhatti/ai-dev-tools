@@ -180,6 +180,24 @@ _SKILL_FALLBACK_DESCRIPTIONS: dict[str, str] = {
         "If the question is general (not project-specific), respond immediately from knowledge. "
         "Keep the answer concise and Slack-formatted."
     ),
+    "ygs-pr-comments": (
+        "Fetch and display all existing review comments on the PR whose URL is in $SKILL_PROMPT. "
+        "Do NOT run an AI code review — only show existing human comments.\n\n"
+        "1. Parse the URL to detect platform and extract org/repo/pr-number.\n"
+        "2. For github.com URLs, use the gh CLI:\n"
+        "   PR_URL=\"$SKILL_PROMPT\"\n"
+        "   gh pr view \"$PR_URL\" --json title,state,author,body\n"
+        "   gh pr view \"$PR_URL\" --json reviews --jq '.reviews[] | "
+        "{author:.author.login, state:.state, body:.body}'\n"
+        "   gh pr view \"$PR_URL\" --json reviewThreads --jq "
+        "'.reviewThreads[] | .comments[] | {author:.author.login, path:.path, line:.line, body:.body}'\n"
+        "3. For bitbucket.org URLs, extract workspace/repo/pr-id from the URL and call:\n"
+        "   curl -s -u \"$BITBUCKET_USERNAME:$BITBUCKET_TOKEN\" \\\n"
+        "     \"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{id}/comments\"\n"
+        "4. Format for Slack: PR title + state at top, then each comment with "
+        "author, file:line (for inline), and body. Skip bot/automated comments. "
+        "If there are no comments say so clearly."
+    ),
 }
 
 
