@@ -525,7 +525,7 @@ def main(skill: str, prompt_text: str) -> None:
     # For tracker skills, check if Claude wrote a report file (risk_report.md, etc.)
     # and use it as the output if result.output is only the JSON status line.
     output_text = result.output.strip()
-    report_candidates = ["risk_report.md", "adhoc_report.md", "pr_queue_report.md"]
+    report_candidates = ["standup_brief.md", "risk_report.md", "adhoc_report.md", "pr_queue_report.md"]
     for candidate in report_candidates:
         report_path = workspace / candidate
         if report_path.exists():

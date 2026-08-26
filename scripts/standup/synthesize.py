@@ -173,27 +173,6 @@ def _build_prompt(signals: dict) -> str:
 # Output parsing
 # ---------------------------------------------------------------------------
 
-def _extract_section(text: str, heading: str) -> str:
-    """Extract content after '#### HEADING' up to the next '####' or end."""
-    marker = f"#### {heading}"
-    start = text.find(marker)
-    if start == -1:
-        return ""
-    start += len(marker)
-    next_section = text.find("####", start)
-    return text[start:next_section].strip() if next_section != -1 else text[start:].strip()
-
-
-def _clean_code_fence(text: str) -> str:
-    """Strip leading/trailing markdown code fences."""
-    lines = text.strip().splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
 def _truncate_brief(text: str) -> str:
     """Remove any risk report content that leaked into the brief."""
     stop_patterns = [
@@ -201,6 +180,7 @@ def _truncate_brief(text: str) -> str:
         r"^RISK REPORT",           # plain heading
         r"^---\s*$",               # horizontal rule separator
         r"^```json",               # status JSON fence
+        r"^\s*\{\"status\"",       # bare JSON status line {"status":"DONE",...}
     ]
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -272,18 +252,23 @@ def main() -> None:
         )
         sys.exit(1)
 
-    output = result.output
+    brief_path = workspace_dir / "standup_brief.md"
+    risk_path = workspace_dir / "risk_report.md"
 
-    brief = _strip_markdown(_truncate_brief(_clean_code_fence(_extract_section(output, "STANDUP_BRIEF"))))
-    risk_report = _clean_code_fence(_extract_section(output, "RISK_REPORT"))
+    # The skill instructs Claude to write standup_brief.md and risk_report.md directly.
+    # Read those files as the source of truth; never parse Claude's conversational output.
+    if brief_path.exists():
+        brief = _strip_markdown(_truncate_brief(brief_path.read_text().strip()))
+    else:
+        print("WARNING: standup_brief.md not written by Claude — standup may be incomplete", flush=True)
+        brief = ""
 
-    # Fallback: if sections not found, use the full output as the brief (truncated)
-    if not brief:
-        brief = _truncate_brief(output.strip())
+    risk_report = risk_path.read_text().strip() if risk_path.exists() else ""
 
-    (workspace_dir / "standup_brief.md").write_text(brief)
+    # Normalise and write back
+    brief_path.write_text(brief)
     if risk_report:
-        (workspace_dir / "risk_report.md").write_text(risk_report)
+        risk_path.write_text(risk_report)
 
     status_data = result.status_json or {"status": result.status}
     (workspace_dir / "synthesize_result.json").write_text(json.dumps(status_data, indent=2))

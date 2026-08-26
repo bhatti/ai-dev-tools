@@ -47,12 +47,22 @@ def main() -> None:
     workspace_dir = get_workspace_dir(config)
 
     brief_path = workspace_dir / "standup_brief.md"
+    fallback_paths = [
+        workspace_dir / "reports" / "report.md",
+        workspace_dir / "standup_report.md",
+    ]
     if not brief_path.exists():
-        print("ERROR: standup_brief.md not found — run synthesize step first", file=sys.stderr)
-        (workspace_dir / "post_result.json").write_text(
-            json.dumps({"status": "ERROR", "reason": "standup_brief.md not found"})
-        )
-        sys.exit(1)
+        for fb in fallback_paths:
+            if fb.exists():
+                brief_path = fb
+                print(f"[post] standup_brief.md not found — using fallback {fb.name}", flush=True)
+                break
+        else:
+            print("ERROR: standup_brief.md not found — run synthesize step first", file=sys.stderr)
+            (workspace_dir / "post_result.json").write_text(
+                json.dumps({"status": "ERROR", "reason": "standup_brief.md not found"})
+            )
+            sys.exit(1)
 
     brief = brief_path.read_text().strip()
     risk_report_path = workspace_dir / "risk_report.md"
