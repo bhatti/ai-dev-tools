@@ -11,6 +11,7 @@ Bot scopes needed: channels:history, channels:read, groups:history, groups:read,
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -23,22 +24,37 @@ _BLOCKER_KEYWORDS = (
 
 
 def _slack_get(token: str, method: str, **params) -> dict:
-    """Call a Slack GET endpoint. Returns {} on HTTP error or ok=false."""
-    resp = requests.get(
-        f"https://slack.com/api/{method}",
-        headers={"Authorization": f"Bearer {token}"},
-        params=params,
-        timeout=20,
-    )
-    if not resp.ok:
-        print(f"[slack] {method} HTTP {resp.status_code}", file=sys.stderr, flush=True)
-        return {}
-    data = resp.json()
-    if not data.get("ok"):
-        # Return {} so callers never see a cursor from an error body
-        print(f"[slack] {method} error: {data.get('error', 'unknown')}", file=sys.stderr, flush=True)
-        return {}
-    return data
+    """Call a Slack GET endpoint. Returns {} on HTTP error or ok=false.
+
+    Retries up to 3 times with exponential backoff (1s, 2s, 4s) on HTTP 429.
+    """
+    delays = [1, 2, 4]
+    for attempt, delay in enumerate(delays + [0]):
+        resp = requests.get(
+            f"https://slack.com/api/{method}",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            if attempt < len(delays):
+                retry_after = int(resp.headers.get("Retry-After", delay))
+                wait = max(delay, retry_after)
+                print(f"[slack] {method} HTTP 429 — retrying in {wait}s (attempt {attempt + 1}/3)", file=sys.stderr, flush=True)
+                time.sleep(wait)
+                continue
+            print(f"[slack] {method} HTTP 429 — max retries exceeded", file=sys.stderr, flush=True)
+            return {}
+        if not resp.ok:
+            print(f"[slack] {method} HTTP {resp.status_code}", file=sys.stderr, flush=True)
+            return {}
+        data = resp.json()
+        if not data.get("ok"):
+            # Return {} so callers never see a cursor from an error body
+            print(f"[slack] {method} error: {data.get('error', 'unknown')}", file=sys.stderr, flush=True)
+            return {}
+        return data
+    return {}
 
 
 def resolve_channel_id(token: str, channel_name: str) -> str | None:

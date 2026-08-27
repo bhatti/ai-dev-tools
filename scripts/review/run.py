@@ -201,6 +201,8 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
     _ensure_ygs_skills()
 
     skill_md = _load_skill_md(skill)
+    print(f"::add-task-context SKILL::{skill}")
+    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}")
     if skill_md:
         print(f"[review] loaded {skill} SKILL.md ({len(skill_md)} chars)", flush=True)
         prompt = REVIEW_PROMPT_TEMPLATE.format(
@@ -263,9 +265,6 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
         findings = json.loads(findings_path.read_text(encoding="utf-8"))
         md_text = render_report_md(findings)
         html_text = render_report_html(findings, md_text)
-        (workspace / "review_report.md").write_text(md_text, encoding="utf-8")
-        (workspace / "review_report.html").write_text(html_text, encoding="utf-8")
-        print(f"[review] wrote review_report.md + review_report.html", flush=True)
         reports_dir = workspace / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         (reports_dir / "report.md").write_text(md_text, encoding="utf-8")
@@ -312,6 +311,8 @@ def _run_self_review(config: dict, issue_id: str | None, skill: str, base_branch
     _ensure_ygs_skills()
 
     skill_md = _load_skill_md(review_skill)
+    print(f"::add-task-context SKILL::{review_skill}")
+    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}")
     if skill_md:
         print(f"[self-review] loaded {review_skill} SKILL.md ({len(skill_md)} chars)", flush=True)
         prompt = SELF_REVIEW_PROMPT_TEMPLATE.format(

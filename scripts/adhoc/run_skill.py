@@ -451,6 +451,7 @@ def main(skill: str, prompt_text: str) -> None:
     _model_val = config.get("AI_MODEL") or ""
     print(f"::add-task-context SELECTED_TRACKER::{_tracker_val}")
     print(f"::add-task-context SKILL::{skill}")
+    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}")
     print(f"::add-task-context SELECTED_MODEL::{_model_val}")
 
     # For ygs-pr-queue: load pre-fetched pr_queue.json and build Block Kit directly —

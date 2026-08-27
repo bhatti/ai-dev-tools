@@ -26,6 +26,7 @@ Note: FORMICARY_URL uses https with a self-signed cert on nip.io deployments —
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -41,6 +42,11 @@ from scripts.common.git_utils import clone_repo
 
 # Cached across multiple run_claude() calls in the same pod — YGS only cloned once.
 _YGS_INSTALLED: bool = False
+# Markdown list of installed skills injected into every run_claude() system prompt.
+_SKILLS_INVENTORY: str = ""
+# Set of known skill names for SKILLS_INVOKED detection; populated by _ensure_ygs_skills()
+# and extended by _ensure_extra_skills().
+_KNOWN_SKILLS: set[str] = set()
 
 
 def _ensure_ygs_skills() -> None:
@@ -86,10 +92,11 @@ def _ensure_ygs_skills() -> None:
             return
         print(f"[ygs] clone completed in {elapsed:.0f}s", flush=True)
 
-    # Symlink each skill
+    # Symlink each skill and build inventory for system-prompt injection
     ygs_skills_dir = install_dir / "skills"
     count = 0
     skill_names: list[str] = []
+    inventory_lines: list[str] = []
     for skill_dir in sorted(ygs_skills_dir.glob("ygs-*")):
         if skill_dir.is_dir():
             link = skills_base / skill_dir.name
@@ -97,10 +104,32 @@ def _ensure_ygs_skills() -> None:
             link.symlink_to(skill_dir.resolve())
             count += 1
             skill_names.append(skill_dir.name)
+            try:
+                first_line = (skill_dir / "SKILL.md").read_text(errors="replace").split("\n")[0].lstrip("# ").strip()
+            except OSError:
+                first_line = ""
+            inventory_lines.append(f"- `/{skill_dir.name}` — {first_line}")
     print(f"[ygs] {count} skills installed → {skills_base}/", flush=True)
     print(f"::add-task-context YGS_SKILLS_COUNT::{count}")
     if skill_names:
         print(f"::add-task-context YGS_SKILLS_INSTALLED::{','.join(skill_names)}")
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(install_dir), "rev-parse", "--short", "HEAD"],
+            text=True, timeout=5,
+        ).strip()
+    except Exception:
+        commit = "unknown"
+    print(f"::add-task-context YGS_SKILLS_REPO_URL::https://github.com/bhatti/you-got-skills.git")
+    print(f"::add-task-context YGS_SKILLS_REPO_COMMIT::{commit}")
+    global _SKILLS_INVENTORY, _KNOWN_SKILLS
+    _KNOWN_SKILLS.update(skill_names)
+    if inventory_lines:
+        _SKILLS_INVENTORY = (
+            "## Available Skills\n"
+            "Use the most applicable skill below. If none fits, proceed without one.\n\n"
+            + "\n".join(inventory_lines)
+        )
 
     # Apply project-level skill overrides if CODEBASE_DIR is set
     codebase_dir = os.environ.get("CODEBASE_DIR", "")
@@ -394,6 +423,25 @@ def _ensure_extra_skills(skills_base: Path) -> None:
             safe_slug = slug.upper().replace("-", "_").replace(".", "_")
             print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_COUNT::{count}")
             print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_INSTALLED::{','.join(extra_names)}")
+            # Extend global inventory and known-skills set so run_claude() includes extras
+            global _SKILLS_INVENTORY, _KNOWN_SKILLS
+            _KNOWN_SKILLS.update(extra_names)
+            extra_lines = []
+            for name in extra_names:
+                skill_path = skills_base / name / "SKILL.md"
+                try:
+                    first_line = skill_path.read_text(errors="replace").split("\n")[0].lstrip("# ").strip()
+                except OSError:
+                    first_line = ""
+                extra_lines.append(f"- `/{name}` — {first_line}")
+            if extra_lines and _SKILLS_INVENTORY:
+                _SKILLS_INVENTORY = _SKILLS_INVENTORY + "\n" + "\n".join(extra_lines)
+            elif extra_lines:
+                _SKILLS_INVENTORY = (
+                    "## Available Skills\n"
+                    "Use the most applicable skill below. If none fits, proceed without one.\n\n"
+                    + "\n".join(extra_lines)
+                )
 
 
 @dataclass
@@ -526,6 +574,8 @@ def run_claude(
     _ensure_ygs_skills()
 
     sp = system_prompt or _DEFAULT_SYSTEM_PROMPT
+    if _SKILLS_INVENTORY:
+        sp = sp + "\n\n" + _SKILLS_INVENTORY
     cmd = [
         "claude", "--print", "--dangerously-skip-permissions",
         "--system-prompt", sp,
@@ -718,6 +768,10 @@ def run_claude(
                 log_file.with_suffix(".stderr.log").write_text(full_stderr)
         except OSError as e:
             print(f"[claude] WARNING: could not write log file {log_file}: {e}", file=sys.stderr, flush=True)
+
+    if _KNOWN_SKILLS:
+        _hits = [s for s in re.findall(r'/([a-z][a-z0-9-]+)', full_output) if s in _KNOWN_SKILLS]
+        print(f"::add-task-context SKILLS_INVOKED::{','.join(dict.fromkeys(_hits)) or 'none'}")
 
     if exit_code != 0:
         # "Reached max turns" is a normal operating condition, not a hard error.

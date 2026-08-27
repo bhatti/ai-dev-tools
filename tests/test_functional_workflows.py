@@ -170,6 +170,7 @@ class TestCase:
     expected_files: list[str]       # files that must exist inside the ZIP
     timeout: int = 600
     requires: list[str] = field(default_factory=list)  # env vars that must be set; skip if missing
+    required_context_keys: list[str] = field(default_factory=list)  # task context keys that must be present after completion
     cron: bool = False              # if True, trigger existing PENDING cron job instead of submitting
 
     def id(self) -> str:
@@ -219,6 +220,8 @@ ALL_TESTS: list[TestCase] = [
         expected_files=["findings.json", "reports/report.md", "reports/report.html", "reports/findings.json"],
         timeout=1200,
         requires=["PR_URL"],
+        required_context_keys=["SKILL", "SKILL_LOADED", "YGS_SKILLS_COUNT",
+                                "YGS_SKILLS_INSTALLED", "YGS_SKILLS_REPO_COMMIT", "SKILLS_INVOKED"],
     ),
     TestCase(
         name="risks",
@@ -243,6 +246,8 @@ ALL_TESTS: list[TestCase] = [
         task_type="run",
         expected_files=["adhoc_result.json"],
         timeout=900,
+        required_context_keys=["SKILL", "SKILL_LOADED", "YGS_SKILLS_COUNT",
+                                "YGS_SKILLS_INSTALLED", "YGS_SKILLS_REPO_COMMIT", "SKILLS_INVOKED"],
     ),
     TestCase(
         name="pr-comments",
@@ -305,6 +310,9 @@ ALL_TESTS: list[TestCase] = [
         task_type="run",
         expected_files=["adhoc_result.json", "reports/report.md"],
         timeout=300,
+        required_context_keys=["YGS_SKILLS_COUNT", "YGS_SKILLS_INSTALLED",
+                                "YGS_SKILLS_REPO_COMMIT", "EXTRA_SKILLS_YOU_GOT_SKILLS_COUNT",
+                                "SKILLS_INVOKED"],
     ),
     TestCase(
         name="standup",
@@ -459,6 +467,43 @@ def get_console_log(job_id: str, task_type: str) -> str:
     return ""
 
 
+def get_task_contexts(job: dict, task_type: str) -> dict[str, str]:
+    """Return task context variables for a given task type from a completed job.
+
+    Fetches the job execution record and flattens contexts from the matching task
+    into a plain {name: value} dict.  Returns {} if execution data is unavailable.
+    """
+    exec_id = job.get("job_execution_id", "")
+    if not exec_id:
+        return {}
+    try:
+        resp = requests.get(
+            f"{FORMICARY_URL}/api/v1/jobs/executions/{exec_id}",
+            headers=_headers(),
+            verify=TLS_VERIFY,
+            timeout=15,
+        )
+        if not resp.ok:
+            return {}
+        je = resp.json().get("job_execution") or resp.json()
+        for task in je.get("tasks") or []:
+            if task.get("task_type") == task_type:
+                return {c["name"]: c.get("value", "") for c in task.get("contexts") or []}
+    except Exception:
+        pass
+    return {}
+
+
+def validate_task_context(job: dict, task_type: str, required_keys: list[str]) -> str | None:
+    """Return an error string if any required context key is missing/empty, else None."""
+    ctx = get_task_contexts(job, task_type)
+    missing = [k for k in required_keys if not ctx.get(k)]
+    if missing:
+        present = {k: ctx[k] for k in ctx if k in required_keys}
+        return f"task context missing keys {missing}; present={present}"
+    return None
+
+
 # ── Test runner ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -534,6 +579,11 @@ def run_test(tc: TestCase) -> TestResult:
                     break
                 except KeyError:
                     pass
+
+        if tc.required_context_keys:
+            ctx_err = validate_task_context(job, tc.task_type, tc.required_context_keys)
+            if ctx_err:
+                r.errors.append(ctx_err)
 
         r.passed = len(r.errors) == 0
 
@@ -631,6 +681,8 @@ def main() -> None:
                         help="Per-test timeout override in seconds (0=use test default)")
     parser.add_argument("--list", action="store_true",
                         help="List available test names and exit")
+    parser.add_argument("--skip-health", action="store_true",
+                        help="Skip Docker/k8s infra health check (use when Docker Desktop is slow)")
     args = parser.parse_args()
 
     if args.list:
@@ -691,7 +743,8 @@ def main() -> None:
     # Pre-flight: verify Docker + ant k8s cluster are healthy before submitting jobs.
     # Jobs run on Kubernetes pods on the ant worker cluster; if it's unavailable
     # they'll queue forever and waste the test timeout budget.
-    _check_infra_health()
+    if not args.skip_health:
+        _check_infra_health()
 
     # POLICY: default parallelism is 1 — run tests sequentially to avoid
     # overloading the single ant worker and to produce deterministic results.

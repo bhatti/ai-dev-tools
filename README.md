@@ -419,6 +419,27 @@ GitHub URLs use `GH_TOKEN`.  Override with explicit `token_env` / `username_env`
 **Sparse checkout** (default `true`): Downloads only the skills subdirectory — essential for
 large monorepos.  Set `"sparse": false` for dedicated skills repos.
 
+#### Task Context Variables
+
+Every job emits the following `::add-task-context` keys, visible on the job request dashboard:
+
+| Key | Description |
+|-----|-------------|
+| `SKILL` | Skill name passed to the task (e.g. `ygs-review-pr`) |
+| `SKILL_LOADED` | `yes` if the skill's `SKILL.md` was found and loaded; `no` if fallback used |
+| `YGS_SKILLS_COUNT` | Number of you-got-skills skills installed in the pod |
+| `YGS_SKILLS_INSTALLED` | Comma-separated list of installed you-got-skills skill names |
+| `YGS_SKILLS_REPO_URL` | Git URL of the you-got-skills base repo |
+| `YGS_SKILLS_REPO_COMMIT` | Short commit hash of the cloned you-got-skills repo |
+| `EXTRA_SKILLS_<SLUG>_COUNT` | Count of skills from each extra repo (one entry per repo) |
+| `EXTRA_SKILLS_<SLUG>_INSTALLED` | Comma-separated skill names from each extra repo |
+| `SKILLS_INVOKED` | Comma-separated list of skills Claude actually called during the session; `none` if none detected |
+| `SELECTED_MODEL` | Resolved model ID used for the Claude invocation |
+
+The `SKILLS_INVOKED` key is detected by scanning Claude's output for `/skill-name` patterns that
+match installed skills. It tells you whether Claude actually used a skill during the session vs.
+just having them available.
+
 **`type: "skills-cli"`**: Delegates to the
 [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI (`npx skills add`),
 which is compatible with [you-got-skills](https://github.com/bhatti/you-got-skills) SKILL.md
