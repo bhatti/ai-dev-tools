@@ -89,13 +89,18 @@ def _ensure_ygs_skills() -> None:
     # Symlink each skill
     ygs_skills_dir = install_dir / "skills"
     count = 0
+    skill_names: list[str] = []
     for skill_dir in sorted(ygs_skills_dir.glob("ygs-*")):
         if skill_dir.is_dir():
             link = skills_base / skill_dir.name
             link.unlink(missing_ok=True)
             link.symlink_to(skill_dir.resolve())
             count += 1
+            skill_names.append(skill_dir.name)
     print(f"[ygs] {count} skills installed → {skills_base}/", flush=True)
+    print(f"::add-task-context YGS_SKILLS_COUNT::{count}")
+    if skill_names:
+        print(f"::add-task-context YGS_SKILLS_INSTALLED::{','.join(skill_names)}")
 
     # Apply project-level skill overrides if CODEBASE_DIR is set
     codebase_dir = os.environ.get("CODEBASE_DIR", "")
@@ -376,14 +381,19 @@ def _ensure_extra_skills(skills_base: Path) -> None:
             print(f"[ygs] WARNING: skills_dir '{skills_dir}' not found in {dest}", file=sys.stderr, flush=True)
             continue
         count = 0
+        extra_names: list[str] = []
         for skill_dir in sorted(src_skills.iterdir()):
             if skill_dir.is_dir():
                 link = skills_base / skill_dir.name
                 link.unlink(missing_ok=True)
                 link.symlink_to(skill_dir.resolve())
                 count += 1
+                extra_names.append(skill_dir.name)
         if count:
             print(f"[ygs] {count} extra skills from {slug} installed → {skills_base}/", flush=True)
+            safe_slug = slug.upper().replace("-", "_").replace(".", "_")
+            print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_COUNT::{count}")
+            print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_INSTALLED::{','.join(extra_names)}")
 
 
 @dataclass

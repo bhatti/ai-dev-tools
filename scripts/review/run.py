@@ -139,16 +139,23 @@ REVIEW_PROMPT_FALLBACK = """\
 
 ## Instructions
 
-Review the pull request at the URL above. Fetch the diff and description, then perform
-a code review covering: correctness, security, API surface, and SRE concerns.
+Review the pull request at the URL above. Fetch the diff and description using the
+Bash tool with curl (do NOT use WebFetch — it does not support authentication for
+private repositories and will return 404 or 403).
 
-For Bitbucket PRs, use:
-  curl -sf "https://api.bitbucket.org/2.0/repositories/{{workspace}}/{{repo}}/pullrequests/{{id}}" \\
-    -u "$BITBUCKET_USERNAME:$BITBUCKET_TOKEN"
-  curl -sf ".../pullrequests/{{id}}/diff" -u "$BITBUCKET_USERNAME:$BITBUCKET_TOKEN"
+For Bitbucket PRs, run these Bash commands:
+  PR_META=$(curl -sf "https://api.bitbucket.org/2.0/repositories/$BITBUCKET_WORKSPACE/$BITBUCKET_REPO/pullrequests/{bb_pr_id}" -u "$BITBUCKET_USERNAME:$BITBUCKET_TOKEN")
+  PR_DIFF=$(curl -sf "https://api.bitbucket.org/2.0/repositories/$BITBUCKET_WORKSPACE/$BITBUCKET_REPO/pullrequests/{bb_pr_id}/diff" -u "$BITBUCKET_USERNAME:$BITBUCKET_TOKEN")
 
-For GitHub PRs, use: gh pr view <number> --repo <owner/repo> --json title,body,changedFiles
-and: gh pr diff <number> --repo <owner/repo>
+For GitHub PRs, run:
+  gh pr view <number> --repo <owner/repo> --json title,body,changedFiles
+  gh pr diff <number> --repo <owner/repo>
+
+The PR URL is: {pr_url}
+For Bitbucket: workspace=$BITBUCKET_WORKSPACE repo=$BITBUCKET_REPO
+
+After fetching, perform a code review covering: correctness, security, API surface,
+and SRE concerns.
 
 Write findings to `findings.json` with this structure:
 {{
@@ -202,7 +209,10 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
         )
     else:
         print(f"[review] WARNING: {skill}/SKILL.md not found — using fallback instructions", flush=True)
-        prompt = REVIEW_PROMPT_FALLBACK.format(pr_url=pr_url)
+        import re as _re
+        _bb_match = _re.search(r"/pull-requests?/(\d+)", pr_url)
+        _bb_pr_id = _bb_match.group(1) if _bb_match else "<PR_ID>"
+        prompt = REVIEW_PROMPT_FALLBACK.format(pr_url=pr_url, bb_pr_id=_bb_pr_id)
 
     prompt_path = logs_dir / "review.prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -267,9 +277,12 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
         print(f"[review] WARNING: could not render report: {e}", file=sys.stderr, flush=True)
 
     status_val = status_data.get("status", "")
+    error_reason = status_data.get("reason", "")
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}")
     print(f"::add-task-context FINDINGS_COUNT::{findings_count}")
     print(f"::add-task-context REVIEW_VERDICT::{verdict}")
+    if error_reason:
+        print(f"::add-task-context ERROR_REASON::{error_reason[:300]}")
     if status_val in ("DONE", "DONE_WITH_CONCERNS", "MAX_TURNS_REACHED"):
         sys.exit(0)
 

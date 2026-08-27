@@ -446,6 +446,13 @@ def main(skill: str, prompt_text: str) -> None:
     else:
         print(f"[adhoc] no SKILL.md found for {skill} — using fallback prompt", flush=True)
 
+    # Emit task context early — before any sys.exit() so all paths are covered.
+    _tracker_val = config.get("DEFAULT_TRACKER") or config.get("SELECTED_TRACKER") or ""
+    _model_val = config.get("AI_MODEL") or ""
+    print(f"::add-task-context SELECTED_TRACKER::{_tracker_val}")
+    print(f"::add-task-context SKILL::{skill}")
+    print(f"::add-task-context SELECTED_MODEL::{_model_val}")
+
     # For ygs-pr-queue: load pre-fetched pr_queue.json and build Block Kit directly —
     # no Claude invocation needed; the data is already structured.
     pr_queue_data: dict | None = None
@@ -582,8 +589,8 @@ def main(skill: str, prompt_text: str) -> None:
         slack_notify(config, f"✅ `/{skill}` complete. {summary}")
 
     print(f"[adhoc] status={status_data.get('status')}", flush=True)
+    # Re-emit with final resolved model (may differ from config if AI_MODEL_OVERRIDE was used).
     print(f"::add-task-context SELECTED_MODEL::{model or ''}")
-    print(f"::add-task-context SKILL::{skill}")
 
     # If we reach here, Claude itself exited 0 (non-zero Claude exit raises RuntimeError
     # and calls sys.exit(1) above). Exit 0 so Formicary collects artifacts.
