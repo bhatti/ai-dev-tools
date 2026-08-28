@@ -4,10 +4,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import scripts.standup.slack_client as _sc
 from scripts.standup.slack_client import (
     build_issue_blocks, build_mrkdwn_blocks, build_pr_blocks,
     get_standup_messages, notify, post_message, resolve_channel_id, upload_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_channel_cache():
+    """Clear the module-level channel ID cache between tests to prevent cross-test pollution."""
+    _sc._channel_id_cache.clear()
+    yield
+    _sc._channel_id_cache.clear()
 
 
 @pytest.fixture

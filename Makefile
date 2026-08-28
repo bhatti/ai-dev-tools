@@ -10,7 +10,8 @@ _VER_PATCH    := $(word 3,$(_VER_PARTS))
 _NEXT_PATCH   := $(shell expr $(_VER_PATCH) + 1)
 NEXT_VERSION  := $(_VER_MAJOR).$(_VER_MINOR).$(_NEXT_PATCH)
 
-.PHONY: build docker-build docker-push test test-docker lint clean \
+.PHONY: build docker-build docker-push test functional-test functional-tests-min deploy-workflows \
+        test-docker lint clean \
         gh-pick gh-plan gh-implement gh-pr gh-poll gh-learn gh-all \
         jira-pick jira-plan jira-implement jira-pr jira-poll jira-learn jira-all \
         k8s-apply k8s-rbac k8s-delete k8s-crons k8s-gh-pipeline k8s-jira-pipeline \
@@ -61,6 +62,31 @@ test:            ## Run unit tests (local Python)
 
 test-cov:        ## Run tests with coverage report
 	PYTHONPATH=. pytest tests/ -v --cov=scripts --cov-report=term-missing
+
+FORMICARY_URL      ?= https://10.8.97.24.nip.io
+FORMICARY_EXAMPLES ?= $(CURDIR)/../formicary/docs/examples
+K8S_NODE_SSH       ?= k3s-node
+PR_URL             ?=
+ARGS               ?=
+
+functional-test: ## Run functional tests against live Formicary (raw — no rebuild/deploy). Set ARGS and PR_URL.
+	PYTHONPATH=$(CURDIR) \
+	FORMICARY_URL=$(FORMICARY_URL) \
+	FORMICARY_TOKEN=$(FORMICARY_TOKEN) \
+	PR_URL=$(PR_URL) \
+	python3 tests/test_functional_workflows.py $(ARGS)
+
+deploy-workflows: ## Upload all AI workflow YAMLs and set org configs (requires FORMICARY_TOKEN + SLACK_BOT_TOKEN).
+	cd $(FORMICARY_EXAMPLES) && FORMICARY_URL=$(FORMICARY_URL) bash deploy-ai-standup-jira.sh --set-configs
+	cd $(FORMICARY_EXAMPLES) && FORMICARY_URL=$(FORMICARY_URL) bash deploy-ai-standup-gh.sh --set-configs
+	cd $(FORMICARY_EXAMPLES) && FORMICARY_URL=$(FORMICARY_URL) bash deploy-ai-jira-workflows.sh --set-configs
+
+functional-tests-min: docker-build ## Build, clear k8s cache, deploy workflows, run standup+review+prs tests.
+	ssh $(K8S_NODE_SSH) "sudo crictl rmi --prune" 2>/dev/null || echo "[warn] crictl prune skipped"
+	$(MAKE) deploy-workflows
+	$(MAKE) functional-test \
+	  ARGS="--tests standup,standup-post,review,review-post,prs --timeout 1200 --skip-health" \
+	  PR_URL=$(PR_URL)
 
 test-docker:     ## Run tests inside Docker
 	docker run --rm -v $(PWD):/app -w /app $(IMAGE):$(TAG) \

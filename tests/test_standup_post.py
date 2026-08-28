@@ -45,12 +45,12 @@ def test_main_writes_report_and_posts(mock_post, tmp_workspace, monkeypatch):
         main()
     assert exc_info.value.code == 0
 
-    report = (tmp_workspace / "standup_report.md").read_text()
+    report = (tmp_workspace / "reports" / "report.md").read_text()
     assert "Standup Report" in report
     assert "Alice" in report
     assert "Full Risk Report" in report
 
-    result = json.loads((tmp_workspace / "post_result.json").read_text())
+    result = json.loads((tmp_workspace / "reports" / "post_result.json").read_text())
     assert result["status"] == "DONE"
     assert result["slack_posted"] is True
     assert result["risk_count"] == 1
@@ -71,7 +71,7 @@ def test_main_still_succeeds_when_slack_fails(mock_post, tmp_workspace, monkeypa
         main()
     assert exc_info.value.code == 0
 
-    result = json.loads((tmp_workspace / "post_result.json").read_text())
+    result = json.loads((tmp_workspace / "reports" / "post_result.json").read_text())
     assert result["status"] == "DONE"
     assert result["slack_posted"] is False
 
@@ -98,7 +98,7 @@ def test_main_no_risk_report(mock_post, tmp_workspace, monkeypatch):
         main()
     assert exc_info.value.code == 0
 
-    report = (tmp_workspace / "standup_report.md").read_text()
+    report = (tmp_workspace / "reports" / "report.md").read_text()
     assert "Full Risk Report" not in report
 
 

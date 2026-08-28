@@ -126,7 +126,7 @@ Output ONLY this JSON on the last line:
 """
 
 
-def _build_prompt(signals: dict) -> str:
+def _build_prompt(signals: dict, skill_md: str | None = None) -> str:
     team_members = signals.get("team_members", [])
 
     # Build boards summary: board_id → {board_name, sprint_name, end_date}
@@ -160,7 +160,8 @@ def _build_prompt(signals: dict) -> str:
         boards_json=json.dumps(boards_map, indent=2),
     )
 
-    skill_md = _load_skill_md("ygs-standup")
+    if skill_md is None:
+        skill_md = _load_skill_md("ygs-standup")
     if skill_md:
         print(f"[synthesize] loaded ygs-standup SKILL.md ({len(skill_md)} chars)", flush=True)
         return _SYNTHESIZE_PROMPT.format(skill_instructions=skill_md, **common)
@@ -174,11 +175,14 @@ def _build_prompt(signals: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _truncate_brief(text: str) -> str:
-    """Remove any risk report content that leaked into the brief."""
+    """Remove status JSON or risk content that leaked into the brief.
+
+    Does NOT stop at '---' separators — those are valid section dividers inside
+    the brief (e.g. between BOARD STATUS and per-person STATUS).
+    """
     stop_patterns = [
         r"^#{1,4}\s+RISK",        # ## RISK REPORT heading
         r"^RISK REPORT",           # plain heading
-        r"^---\s*$",               # horizontal rule separator
         r"^```json",               # status JSON fence
         r"^\s*\{\"status\"",       # bare JSON status line {"status":"DONE",...}
     ]
@@ -190,27 +194,6 @@ def _truncate_brief(text: str) -> str:
     return text
 
 
-def _strip_markdown(text: str) -> str:
-    """Normalise markdown to Slack mrkdwn.
-
-    Keeps *single-star bold* (valid Slack mrkdwn for section headers).
-    Strips **double-star** markdown bold (not valid in Slack), __, backtick code.
-    Converts '- item' dash bullets to '• item'.
-    """
-    # Strip markdown **double-star** bold (not Slack mrkdwn)
-    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-    # Strip __double-underscore__ bold
-    text = re.sub(r'__(.+?)__', r'\1', text)
-    # Remove inline code backticks
-    text = re.sub(r'`(.+?)`', r'\1', text)
-    # Remove markdown heading prefixes (#, ##, etc.)
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    # Convert '- item' dash bullets to • (but not lines starting with * which may be *Bold*)
-    text = re.sub(r'^[ \t]-[ \t]+', '• ', text, flags=re.MULTILINE)
-    text = re.sub(r'^-[ \t]+', '• ', text, flags=re.MULTILINE)
-    # Remove arrows that sneak in
-    text = re.sub(r'\s*→\s*', ': ', text)
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +216,10 @@ def main() -> None:
 
     # Ensure YGS skills are cloned before _build_prompt() tries to load SKILL.md
     _ensure_ygs_skills()
-    prompt = _build_prompt(signals)
+    _skill_md = _load_skill_md("ygs-standup")
+    print("::add-task-context SKILL::ygs-standup", flush=True)
+    print(f"::add-task-context SKILL_LOADED::{'yes' if _skill_md else 'no'}", flush=True)
+    prompt = _build_prompt(signals, skill_md=_skill_md)
 
     try:
         result = run_claude(
@@ -258,14 +244,14 @@ def main() -> None:
     # The skill instructs Claude to write standup_brief.md and risk_report.md directly.
     # Read those files as the source of truth; never parse Claude's conversational output.
     if brief_path.exists():
-        brief = _strip_markdown(_truncate_brief(brief_path.read_text().strip()))
+        brief = _truncate_brief(brief_path.read_text().strip())
     else:
         print("WARNING: standup_brief.md not written by Claude — standup may be incomplete", flush=True)
         brief = ""
 
     risk_report = risk_path.read_text().strip() if risk_path.exists() else ""
 
-    # Normalise and write back
+    # Write back with markdown intact (Slack stripping happens in post.py)
     brief_path.write_text(brief)
     if risk_report:
         risk_path.write_text(risk_report)
@@ -296,14 +282,14 @@ def main() -> None:
         print(f"[synthesize] unexpected status '{result.status}'", flush=True)
 
     model = config.get("AI_MODEL", "")
-    print(f"::add-task-context SELECTED_MODEL::{model}")
-    print(f"::add-task-context SELECTED_TRACKER::{tracker}")
-    print(f"::add-task-context ISSUE_COUNT::{len(signals.get('issues', []))}")
-    print(f"::add-task-context PR_COUNT::{len(signals.get('open_prs', []))}")
+    print(f"::add-task-context SELECTED_MODEL::{model}", flush=True)
+    print(f"::add-task-context SELECTED_TRACKER::{tracker}", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(signals.get('issues', []))}", flush=True)
+    print(f"::add-task-context PR_COUNT::{len(signals.get('open_prs', []))}", flush=True)
     if sj.get("risk_count") is not None:
-        print(f"::add-task-context RISK_COUNT::{sj.get('risk_count', 0)}")
+        print(f"::add-task-context RISK_COUNT::{sj.get('risk_count', 0)}", flush=True)
     if sj.get("silence_count") is not None:
-        print(f"::add-task-context SILENCE_COUNT::{sj.get('silence_count', 0)}")
+        print(f"::add-task-context SILENCE_COUNT::{sj.get('silence_count', 0)}", flush=True)
     sys.exit(0)
 
 

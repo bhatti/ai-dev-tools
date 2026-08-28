@@ -610,13 +610,13 @@ def main() -> None:
         f"{len(slack_messages)} Slack msgs, {len(team_members)} team members",
         flush=True,
     )
-    print(f"::add-task-context SELECTED_TRACKER::jira")
-    print(f"::add-task-context ISSUE_COUNT::{len(issues)}")
-    print(f"::add-task-context PR_COUNT::{len(open_prs)}")
-    print(f"::add-task-context SLACK_MESSAGE_COUNT::{len(slack_messages)}")
-    print(f"::add-task-context TEAM_MEMBER_COUNT::{len(team_members)}")
+    print(f"::add-task-context SELECTED_TRACKER::jira", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(issues)}", flush=True)
+    print(f"::add-task-context PR_COUNT::{len(open_prs)}", flush=True)
+    print(f"::add-task-context SLACK_MESSAGE_COUNT::{len(slack_messages)}", flush=True)
+    print(f"::add-task-context TEAM_MEMBER_COUNT::{len(team_members)}", flush=True)
     if sprint_info:
-        print(f"::add-task-context SPRINT_NAME::{sprint_info.get('name', '')}")
+        print(f"::add-task-context SPRINT_NAME::{sprint_info.get('name', '')}", flush=True)
     sys.exit(0)
 
 

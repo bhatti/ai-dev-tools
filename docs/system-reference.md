@@ -808,50 +808,100 @@ A missing mapping means a script gets an empty string and silently skips work
 
 ## 12. Deploy Workflow — The Correct Order
 
+Run these steps **in order** after any code or YAML change.  Skip steps that do not apply.
+
+### Step 1 — Build and push the Docker image (code changes only)
+
 ```bash
-# 1. Port-forward Formicary (if running in kind/K8s)
-kubectl port-forward svc/formicary 7777:7777 19000:19000
-
-# 2. Build and push the Docker image after code changes
 cd ~/workplace/ai-dev-tools
-make build push
 
-# 3. Deploy/update workflow YAML definitions to Formicary
-cd ~/workplace/formicary/docs/examples
-bash deploy-ai-jira-workflows.sh          # Jira side
-bash deploy-ai-workflows.sh               # GitHub side (if needed)
+# Always use NO_CACHE=1 to guarantee fresh layers (buildx reuses amd64 cache otherwise)
+NO_CACHE=1 make build
 
-# 4. (Optional) Push Slack route table — only needed when routes change
-FORMICARY_TOKEN=... SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... \
-  bash setup-slack-admin.sh --set-routes
-
-# No router pod to restart — Slack routing is built into the Formicary queen.
-# The queen reloads routes from the DB at startup automatically.
+# Push after a successful build
+make push
 ```
 
-**GOTCHA**: `image_pull_policy: Always` is set on all job containers.
-Formicary pulls the ai-dev-tools image fresh on every job run — you do NOT
-need to restart job pods or load images into kind.
+If the build fails with a transient network error (e.g. curl downloading jira-cli),
+retry once — it's almost always a temporary GitHub release download hiccup.
 
-**GOTCHA**: The formicary image (for the queen itself) is different from
-the ai-dev-tools image (for job containers).  If the formicary queen pod
-crashes due to SeaweedFS LOCK file on restart, `removeStaleLocks()` in
-`internal/artifacts/server_local.go` handles this automatically.
+### Step 2 — Clear the k8s image cache and pull the new image
+
+`image_pull_policy: Always` is set, but containerd caches image digests.  If the
+node already has 80+ `plexobject/ai-dev-tools` references, it reuses the cached
+digest even after a new push.  Force a fresh pull by clearing the cache:
+
+```bash
+# Run a privileged pod on the k3s node to clear containerd's image cache
+kubectl run clear-img-cache --image=ubuntu --restart=Never --privileged \
+  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"k3s-node"}}}' \
+  -- /bin/sh -c "crictl rmi --prune 2>/dev/null; \
+     ctr images rm \$(ctr images ls -q | grep ai-dev-tools) 2>/dev/null; true"
+
+# Wait for the pod to finish, then clean it up
+kubectl wait --for=condition=completed pod/clear-img-cache --timeout=30s 2>/dev/null || true
+kubectl delete pod clear-img-cache --ignore-not-found=true
+```
+
+After this, the next job run will pull the new image from the registry.
+
+You can verify the pull succeeded by checking the first job's pod events:
+```bash
+kubectl describe pod <job-pod-name> | grep -A5 "Events:"
+# Look for: "Successfully pulled image" with the new digest
+```
+
+### Step 3 — Redeploy workflow YAML definitions to Formicary (YAML changes only)
+
+YAML changes do **not** require an image rebuild — just redeploy:
+
+```bash
+cd ~/workplace/formicary/docs/examples
+
+# Jira-based workflows (standup + review + implement + adhoc)
+bash deploy-ai-standup-jira.sh          # standup cron + on-demand
+# Or deploy all at once:
+bash deploy-ai-jira-workflows.sh
+
+# GitHub-based workflows (if changed)
+bash deploy-ai-workflows.sh
+
+# (Optional) Update Slack route table — only when routes change
+FORMICARY_TOKEN=... SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... \
+  bash setup-slack-admin.sh --set-routes
+```
+
+The Formicary queen reloads job definitions from the DB immediately after the PUT.
+No queen pod restart is needed.
+
+### Step 4 — (Optional) Port-forward if running locally in kind/K8s
+
+```bash
+kubectl port-forward svc/formicary 7777:7777 19000:19000
+```
+
+Not needed when connecting to the EC2-hosted cluster directly via `EC2_IP`.
+
+**GOTCHA**: The formicary queen image is separate from the ai-dev-tools job image.
+If the queen pod CrashLoops after a restart (SeaweedFS LOCK file), `removeStaleLocks()`
+in `internal/artifacts/server_local.go` handles it automatically.
 
 ---
 
 ## 13. Testing
 
+### 13a. Unit tests (fast — run before every commit)
+
 ```bash
 cd ~/workplace/ai-dev-tools
 
-# Full test suite (must pass before any commit)
+# Full unit test suite — must pass before any commit
 python3 -m pytest tests/ -q
 
-# Current count: 276 tests
+# Current count: ~276 tests
 ```
 
-Key test files:
+Key unit test files:
 ```
 tests/test_standup_slack_client.py   ← slack_client helpers, Block Kit builders, thread_ts
 tests/test_jira_query_issues.py      ← JQL builder, _format_issue, main with mock
@@ -866,6 +916,122 @@ tests/test_standup_registry.py       ← WorkflowEntry, extra_params, resolve()
 @patch("scripts.jira.query_issues._resolve_team_field_id", return_value=None)
 ```
 NOT `scripts.jira.analyze_issues._resolve_team_field_id`.
+
+### 13b. Functional / end-to-end tests (slow — run after any rebuild/redeploy)
+
+Functional tests submit real jobs to the live Formicary cluster, wait for completion,
+download the task artifact ZIP, and verify expected files exist inside it.
+They also check task context variables (SKILL, SKILL_LOADED, SKILLS_INVOKED, etc.).
+
+#### Prerequisites
+
+```bash
+# Required environment variables (add to ~/.zshrc):
+export EC2_IP=10.8.97.24.nip.io           # or your Formicary host
+export FORMICARY_TOKEN=<your-api-token>
+export PR_URL=https://bitbucket.org/cribl/cribl/pull-requests/45974  # for review tests
+export JIRA_BOARDS=<board-id>             # optional — speeds up standup/prs tests
+
+# Derived automatically:
+# FORMICARY_URL=https://${EC2_IP}
+```
+
+#### Full rebuild → redeploy → functional test sequence
+
+```bash
+# 1. Build + push new image
+cd ~/workplace/ai-dev-tools
+NO_CACHE=1 make build && make push
+
+# 2. Clear k8s image cache so the node pulls the new image
+kubectl run clear-img-cache --image=ubuntu --restart=Never --privileged \
+  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"k3s-node"}}}' \
+  -- /bin/sh -c "crictl rmi --prune 2>/dev/null; \
+     ctr images rm \$(ctr images ls -q | grep ai-dev-tools) 2>/dev/null; true"
+kubectl wait --for=condition=completed pod/clear-img-cache --timeout=30s 2>/dev/null || true
+kubectl delete pod clear-img-cache --ignore-not-found=true
+
+# 3. Redeploy workflow YAMLs
+cd ~/workplace/formicary/docs/examples
+bash deploy-ai-standup-jira.sh
+bash deploy-ai-jira-workflows.sh
+
+# 4. Run functional tests
+cd ~/workplace/ai-dev-tools
+FORMICARY_URL=https://10.8.97.24.nip.io \
+  python3 tests/test_functional_workflows.py \
+    --tests standup,standup-post,review,review-post \
+    --timeout 1200
+```
+
+#### Available test names
+
+| Name | Job type | Task | Validates |
+|------|----------|------|-----------|
+| `standup` | `ai-standup-jira` | synthesize | brief written, reports/, context keys |
+| `standup-post` | `ai-standup-jira` | post | reports/report.md/html, slack_message.txt |
+| `review` | `ai-jira-review` | review | findings.json, context keys (SKILL, SKILLS_INVOKED) |
+| `review-post` | `ai-jira-review` | post | reports/findings.json, slack_message.txt |
+| `prs` | `ai-adhoc` | run | open PR queue, context keys |
+| `risks` | `ai-adhoc` | run | risk scan report |
+| `pr-comments` | `ai-adhoc` | run | PR comments report |
+| `ask` | `ai-adhoc` | run | general Q&A via ygs-ask |
+| `extra-skills` | `ai-adhoc` | run | EXTRA_SKILLS_REPOS install + SKILLS_INVOKED |
+| `jira-query` | `ai-jira-query` | query | reports/report.md, result.json |
+| `gh-analyze` | `ai-jira-query` | query | reports/report.md, result.json |
+
+Run a subset:
+```bash
+# Core pipeline (standup + review end-to-end):
+python3 tests/test_functional_workflows.py --tests standup,standup-post,review,review-post
+
+# Optional extras:
+python3 tests/test_functional_workflows.py --tests prs,risks
+
+# All tests (requires PR_URL in env):
+python3 tests/test_functional_workflows.py --tests all --timeout 1200
+```
+
+#### What each test verifies
+
+**standup** (synthesize task):
+- `standup_brief.md` exists in artifact ZIP
+- `reports/report.md` and `reports/report.html` exist
+- Task context has `SELECTED_MODEL`, `SELECTED_TRACKER`, `ISSUE_COUNT`
+
+**standup-post** (post task):
+- `reports/report.md` — final combined brief + risk report
+- `reports/report.html` — rich board-status HTML from render_html.py
+- `reports/post_result.json` — Slack post status
+- `reports/slack_message.txt` — exact text sent to Slack (verifiable without Slack access)
+
+**review** (review task):
+- `findings.json` + `reports/findings.json` exist
+- `reports/report.md` and `reports/report.html` exist
+- Task context has `SKILL`, `SKILL_LOADED`, `YGS_SKILLS_COUNT`, `YGS_SKILLS_INSTALLED`,
+  `YGS_SKILLS_REPO_COMMIT`, `SKILLS_INVOKED`
+
+**review-post** (post task):
+- `reports/findings.json` — findings used by the post task
+- `reports/report.md` and `reports/report.html` — rendered review report
+- `reports/post_result.json` — Slack post status
+- `reports/slack_message.txt` — exact text sent to Slack
+
+#### Artifact convention — all outputs go to `reports/`
+
+Every task writes its outputs to `reports/` so YAML artifact paths never need
+changing:
+
+| File | Written by | Contains |
+|------|-----------|----------|
+| `reports/report.md` | synthesize / post / run | Final markdown report |
+| `reports/report.html` | render_html / post_findings | Rich HTML report |
+| `reports/result.json` | synthesize / adhoc | Status JSON from Claude |
+| `reports/findings.json` | run.py (review) | Raw findings from Claude |
+| `reports/post_result.json` | post / post_findings | Slack post outcome |
+| `reports/slack_message.txt` | post / post_findings | Full Slack message text |
+
+All YAML `artifacts.paths` should be `- ./reports` — never list individual files.
 
 ---
 
@@ -893,6 +1059,10 @@ NOT `scripts.jira.analyze_issues._resolve_team_field_id`.
 | 18 | 250+ org PRs included in standup | Empty `STANDUP_TEAM_MEMBERS` → no PR filter applied | PRs filtered post-fetch against `team_members` derived from board assignees |
 | 19 | you-got-skills symlinks broken in container | Clone to `/tmp` + `setup install` + `rm -rf /tmp/ygs` → dangling symlinks | Clone directly to `~/.claude/skills/you-got-skills`; symlink each `skills/ygs-*` explicitly |
 | 20 | `_strip_markdown` was removing Slack bold `*headers*` | Single-star bullets/headers stripped → blank standup sections | Only convert `**double-star**` to `*single-star*`; never strip existing single-star |
+| 21 | containerd caches image digest even with `imagePullPolicy: Always` | Old code runs after `make push`; node shows 80+ `plexobject/ai-dev-tools` refs | Run `crictl rmi --prune` + `ctr images rm` on the k3s node to force fresh pull |
+| 22 | `---` stop pattern in `_truncate_brief` | Standup Slack shows only 2 lines (cut at first `---` section separator) | Removed `^---\s*$` from stop_patterns; Claude uses `---` as valid section dividers |
+| 23 | `post_findings.py` uses `/workspace/findings.json` but artifact zip only has `reports/` | Review post shows "Review artifacts not found" | Use `reports/findings.json`; all artifact paths must be under `reports/` |
+| 24 | Slack `conversations.list` rate-limit (429) with 2200+ channels | Standup gather takes 5+ minutes hitting 30s Retry-After per page | Cap retry wait at 5s; increase page size to 1000; cache channel IDs per token |
 
 ---
 

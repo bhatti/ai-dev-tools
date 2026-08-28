@@ -184,9 +184,9 @@ def main(query: str, issue_type: str | None, max_results: int) -> None:
     blocks = build_issue_blocks(title, issues, base_url)
     _write_query_output(config, query, issues, base_url)
     notify(config, text, blocks=blocks)
-    print(f"::add-task-context SELECTED_TRACKER::jira")
-    print(f"::add-task-context ISSUE_COUNT::{len(issues)}")
-    print(f"::add-task-context QUERY::{query}")
+    print(f"::add-task-context SELECTED_TRACKER::jira", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(issues)}", flush=True)
+    print(f"::add-task-context QUERY::{query}", flush=True)
     sys.exit(0)
 
 

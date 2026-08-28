@@ -144,9 +144,9 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     print(full_text, flush=True)
     write_analysis_output(config, keys_list, analysis)
     notify(config, full_text, blocks=build_mrkdwn_blocks(full_text))
-    print(f"::add-task-context SELECTED_TRACKER::jira")
-    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}")
-    print(f"::add-task-context ISSUE_COUNT::{len(raw_issues)}")
+    print(f"::add-task-context SELECTED_TRACKER::jira", flush=True)
+    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(raw_issues)}", flush=True)
     sys.exit(0)
 
 

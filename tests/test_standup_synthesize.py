@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.standup.synthesize import _build_prompt, _clean_code_fence, _extract_section, _strip_markdown
+from scripts.standup.synthesize import _build_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -51,45 +51,6 @@ def _make_signals(tracker="jira", issue_count=2, pr_count=1):
             "stale_days": 2,
         },
     }
-
-
-# ---------------------------------------------------------------------------
-# _extract_section
-# ---------------------------------------------------------------------------
-
-def test_extract_section_found():
-    text = """
-#### STANDUP_BRIEF
-This is the brief content.
-
-#### RISK_REPORT
-This is the risk report.
-"""
-    assert "brief content" in _extract_section(text, "STANDUP_BRIEF")
-    assert "risk report" in _extract_section(text, "RISK_REPORT")
-
-
-def test_extract_section_not_found():
-    assert _extract_section("no headings here", "STANDUP_BRIEF") == ""
-
-
-def test_extract_section_last():
-    text = "#### RISK_REPORT\nRisk content only"
-    assert "Risk content only" in _extract_section(text, "RISK_REPORT")
-
-
-# ---------------------------------------------------------------------------
-# _clean_code_fence
-# ---------------------------------------------------------------------------
-
-def test_clean_code_fence_strips_markers():
-    text = "```\n📋 Brief content\n```"
-    assert _clean_code_fence(text) == "📋 Brief content"
-
-
-def test_clean_code_fence_no_fences():
-    text = "Plain text"
-    assert _clean_code_fence(text) == "Plain text"
 
 
 # ---------------------------------------------------------------------------
@@ -154,49 +115,6 @@ No HIGH risks.
 """
 
 
-# ---------------------------------------------------------------------------
-# _strip_markdown
-# ---------------------------------------------------------------------------
-
-def test_strip_markdown_preserves_bullet_bullets():
-    """Lines already starting with • must not be touched."""
-    text = "• Alice: working on PROJ-1\n• Bob: reviewing PRs"
-    assert _strip_markdown(text) == "• Alice: working on PROJ-1\n• Bob: reviewing PRs"
-
-
-def test_strip_markdown_converts_dash_bullets():
-    """'- item' lines at line-start are converted to '• item'."""
-    text = "- PROJ-1: in progress\n- PROJ-2: blocked"
-    result = _strip_markdown(text)
-    assert result == "• PROJ-1: in progress\n• PROJ-2: blocked"
-
-
-def test_strip_markdown_preserves_star_bold():
-    """'*Bold Header*' lines are preserved — single-star is valid Slack mrkdwn bold."""
-    text = "*Status*\n*Risks*"
-    result = _strip_markdown(text)
-    assert result == "*Status*\n*Risks*"
-
-
-def test_strip_markdown_does_not_touch_bullet_with_dash_in_text():
-    """A dash inside a bullet body must not trigger conversion."""
-    text = "• PROJ-1: in-progress update"
-    result = _strip_markdown(text)
-    assert result == "• PROJ-1: in-progress update"
-
-
-def test_strip_markdown_strips_bold_markers():
-    """**text** → *text* (converts markdown double-star to Slack single-star bold)."""
-    assert _strip_markdown("**STANDUP**") == "*STANDUP*"
-
-
-def test_strip_markdown_strips_heading_prefix():
-    """### heading lines have the # prefix removed."""
-    text = "### STATUS\nsome content"
-    result = _strip_markdown(text)
-    assert result.startswith("STATUS")
-
-
 @patch("scripts.standup.synthesize.validate_claude_config")
 @patch("scripts.standup.synthesize.run_claude")
 def test_main_writes_artifacts(mock_claude, mock_validate, tmp_workspace, monkeypatch):
@@ -205,12 +123,22 @@ def test_main_writes_artifacts(mock_claude, mock_validate, tmp_workspace, monkey
     signals = _make_signals()
     (tmp_workspace / "signals.json").write_text(json.dumps(signals))
 
-    mock_claude.return_value = MagicMock(
-        exit_code=0,
-        output=SAMPLE_OUTPUT,
-        status_json={"status": "DONE", "risk_count": 0, "discussion_questions": 1, "silence_count": 0},
-        status="DONE",
-    )
+    # Simulate Claude writing the output files (as the skill instructs it to)
+    def _fake_run_claude(*args, **kwargs):
+        (tmp_workspace / "standup_brief.md").write_text(
+            "📋 *Standup Brief*\n• **Alice:** Working on PROJ-1.\n"
+        )
+        (tmp_workspace / "risk_report.md").write_text(
+            "Sprint 3: 4/10 done, 8 days left.\nNo HIGH risks.\n"
+        )
+        return MagicMock(
+            exit_code=0,
+            output=SAMPLE_OUTPUT,
+            status_json={"status": "DONE", "risk_count": 0, "discussion_questions": 1, "silence_count": 0},
+            status="DONE",
+        )
+
+    mock_claude.side_effect = _fake_run_claude
 
     from scripts.standup.synthesize import main
     with pytest.raises(SystemExit) as exc_info:

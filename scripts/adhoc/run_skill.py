@@ -449,10 +449,10 @@ def main(skill: str, prompt_text: str) -> None:
     # Emit task context early — before any sys.exit() so all paths are covered.
     _tracker_val = config.get("DEFAULT_TRACKER") or config.get("SELECTED_TRACKER") or ""
     _model_val = config.get("AI_MODEL") or ""
-    print(f"::add-task-context SELECTED_TRACKER::{_tracker_val}")
-    print(f"::add-task-context SKILL::{skill}")
-    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}")
-    print(f"::add-task-context SELECTED_MODEL::{_model_val}")
+    print(f"::add-task-context SELECTED_TRACKER::{_tracker_val}", flush=True)
+    print(f"::add-task-context SKILL::{skill}", flush=True)
+    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
+    print(f"::add-task-context SELECTED_MODEL::{_model_val}", flush=True)
 
     # For ygs-pr-queue: load pre-fetched pr_queue.json and build Block Kit directly —
     # no Claude invocation needed; the data is already structured.
@@ -476,7 +476,10 @@ def main(skill: str, prompt_text: str) -> None:
         blocks = build_pr_blocks(title, pr_queue_data)
         pr_count = pr_queue_data.get("pr_count", 0)
         fallback_text = f"PR Queue — {pr_count} open PR(s) in {sprint}" if sprint else f"PR Queue — {pr_count} open PR(s)"
-        slack_notify(config, fallback_text, blocks=blocks)
+        try:
+            slack_notify(config, fallback_text, blocks=blocks)
+        except Exception as _se:
+            print(f"[adhoc] WARNING: Slack post failed (non-fatal): {_se}", flush=True)
 
         status_data = {
             "status": "DONE",
@@ -524,7 +527,10 @@ def main(skill: str, prompt_text: str) -> None:
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)
         _write_result(workspace, {"status": "ERROR", "reason": str(e)})
-        slack_notify(config, f"⚠️ Skill `/{skill}` failed: {str(e)[:500]}")
+        try:
+            slack_notify(config, f"⚠️ Skill `/{skill}` failed: {str(e)[:500]}")
+        except Exception as _se:
+            print(f"[adhoc] WARNING: Slack error notification failed (non-fatal): {_se}", flush=True)
         sys.exit(1)
 
     status_data = result.status_json or {"status": result.status}
@@ -583,15 +589,18 @@ def main(skill: str, prompt_text: str) -> None:
 
     blocks = build_mrkdwn_blocks(output_to_post) if output_to_post else None
 
-    if output_to_post or blocks:
-        slack_notify(config, output_to_post or f"✅ `/{skill}` complete.", blocks=blocks)
-    else:
-        summary = status_data.get("summary", "")
-        slack_notify(config, f"✅ `/{skill}` complete. {summary}")
+    try:
+        if output_to_post or blocks:
+            slack_notify(config, output_to_post or f"✅ `/{skill}` complete.", blocks=blocks)
+        else:
+            summary = status_data.get("summary", "")
+            slack_notify(config, f"✅ `/{skill}` complete. {summary}")
+    except Exception as _se:
+        print(f"[adhoc] WARNING: Slack post failed (non-fatal): {_se}", flush=True)
 
     print(f"[adhoc] status={status_data.get('status')}", flush=True)
     # Re-emit with final resolved model (may differ from config if AI_MODEL_OVERRIDE was used).
-    print(f"::add-task-context SELECTED_MODEL::{model or ''}")
+    print(f"::add-task-context SELECTED_MODEL::{model or ''}", flush=True)
 
     # If we reach here, Claude itself exited 0 (non-zero Claude exit raises RuntimeError
     # and calls sys.exit(1) above). Exit 0 so Formicary collects artifacts.

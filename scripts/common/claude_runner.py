@@ -110,9 +110,9 @@ def _ensure_ygs_skills() -> None:
                 first_line = ""
             inventory_lines.append(f"- `/{skill_dir.name}` — {first_line}")
     print(f"[ygs] {count} skills installed → {skills_base}/", flush=True)
-    print(f"::add-task-context YGS_SKILLS_COUNT::{count}")
+    print(f"::add-task-context YGS_SKILLS_COUNT::{count}", flush=True)
     if skill_names:
-        print(f"::add-task-context YGS_SKILLS_INSTALLED::{','.join(skill_names)}")
+        print(f"::add-task-context YGS_SKILLS_INSTALLED::{','.join(skill_names)}", flush=True)
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(install_dir), "rev-parse", "--short", "HEAD"],
@@ -120,8 +120,8 @@ def _ensure_ygs_skills() -> None:
         ).strip()
     except Exception:
         commit = "unknown"
-    print(f"::add-task-context YGS_SKILLS_REPO_URL::https://github.com/bhatti/you-got-skills.git")
-    print(f"::add-task-context YGS_SKILLS_REPO_COMMIT::{commit}")
+    print(f"::add-task-context YGS_SKILLS_REPO_URL::https://github.com/bhatti/you-got-skills.git", flush=True)
+    print(f"::add-task-context YGS_SKILLS_REPO_COMMIT::{commit}", flush=True)
     global _SKILLS_INVENTORY, _KNOWN_SKILLS
     _KNOWN_SKILLS.update(skill_names)
     if inventory_lines:
@@ -421,8 +421,8 @@ def _ensure_extra_skills(skills_base: Path) -> None:
         if count:
             print(f"[ygs] {count} extra skills from {slug} installed → {skills_base}/", flush=True)
             safe_slug = slug.upper().replace("-", "_").replace(".", "_")
-            print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_COUNT::{count}")
-            print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_INSTALLED::{','.join(extra_names)}")
+            print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_COUNT::{count}", flush=True)
+            print(f"::add-task-context EXTRA_SKILLS_{safe_slug}_INSTALLED::{','.join(extra_names)}", flush=True)
             # Extend global inventory and known-skills set so run_claude() includes extras
             global _SKILLS_INVENTORY, _KNOWN_SKILLS
             _KNOWN_SKILLS.update(extra_names)
@@ -771,7 +771,7 @@ def run_claude(
 
     if _KNOWN_SKILLS:
         _hits = [s for s in re.findall(r'/([a-z][a-z0-9-]+)', full_output) if s in _KNOWN_SKILLS]
-        print(f"::add-task-context SKILLS_INVOKED::{','.join(dict.fromkeys(_hits)) or 'none'}")
+        print(f"::add-task-context SKILLS_INVOKED::{','.join(dict.fromkeys(_hits)) or 'none'}", flush=True)
 
     if exit_code != 0:
         # "Reached max turns" is a normal operating condition, not a hard error.

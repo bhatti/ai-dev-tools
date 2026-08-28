@@ -294,11 +294,11 @@ def main() -> None:
         f"{len(slack_messages)} Slack msgs",
         flush=True,
     )
-    print(f"::add-task-context SELECTED_TRACKER::github")
-    print(f"::add-task-context ISSUE_COUNT::{len(issues)}")
-    print(f"::add-task-context PR_COUNT::{len(open_prs)}")
-    print(f"::add-task-context SLACK_MESSAGE_COUNT::{len(slack_messages)}")
-    print(f"::add-task-context TEAM_MEMBER_COUNT::{len(team_members)}")
+    print(f"::add-task-context SELECTED_TRACKER::github", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(issues)}", flush=True)
+    print(f"::add-task-context PR_COUNT::{len(open_prs)}", flush=True)
+    print(f"::add-task-context SLACK_MESSAGE_COUNT::{len(slack_messages)}", flush=True)
+    print(f"::add-task-context TEAM_MEMBER_COUNT::{len(team_members)}", flush=True)
     sys.exit(0)
 
 

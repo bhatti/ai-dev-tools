@@ -136,9 +136,9 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
     print(full_text, flush=True)
     write_analysis_output(config, ids, analysis)
     notify(config, full_text, blocks=build_mrkdwn_blocks(full_text))
-    print(f"::add-task-context SELECTED_TRACKER::github")
-    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}")
-    print(f"::add-task-context ISSUE_COUNT::{len(raw_issues)}")
+    print(f"::add-task-context SELECTED_TRACKER::github", flush=True)
+    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(raw_issues)}", flush=True)
     sys.exit(0)
 
 

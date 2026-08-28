@@ -5,7 +5,7 @@ Usage:
 
 Reads:  /workspace/signals.json
         /workspace/risk_report.md     (optional, Markdown)
-Writes: /workspace/standup_report.html
+Writes: /workspace/reports/report.html
 
 Exit codes: 0=done, 1=error
 """
@@ -343,7 +343,9 @@ def main() -> None:
         risk_html=risk_html,
     )
 
-    out_path = workspace_dir / "standup_report.html"
+    reports_dir = workspace_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    out_path = reports_dir / "report.html"
     out_path.write_text(html)
     print(f"[render_html] written: {out_path}", flush=True)
     sys.exit(0)

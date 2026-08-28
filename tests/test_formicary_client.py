@@ -1,11 +1,27 @@
 """Tests for scripts/slack/formicary_client.py"""
 
+import contextlib
 import json
+import os as _os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from scripts.slack.formicary_client import FormicaryClient
+
+
+@contextlib.contextmanager
+def _fake_token(token=""):
+    """Suppress ~/.zshrc read so from_env() falls through to the env var."""
+    _real_exists = _os.path.exists
+    def _no_zshrc(p):
+        if str(p).endswith(".zshrc"):
+            return False
+        return _real_exists(p)
+    env = {"FORMICARY_TOKEN": token} if token else {}
+    with patch("os.path.exists", side_effect=_no_zshrc), \
+         patch.dict("os.environ", env, clear=False):
+        yield
 
 
 @pytest.fixture
@@ -20,15 +36,16 @@ def client():
 def test_from_env_defaults(monkeypatch):
     monkeypatch.delenv("FORMICARY_URL", raising=False)
     monkeypatch.delenv("FORMICARY_TOKEN", raising=False)
-    c = FormicaryClient.from_env()
+    with _fake_token():
+        c = FormicaryClient.from_env()
     assert c.base_url == "http://localhost:7777"
     assert c.token == ""
 
 
 def test_from_env_reads_env_vars(monkeypatch):
     monkeypatch.setenv("FORMICARY_URL", "http://custom:9999")
-    monkeypatch.setenv("FORMICARY_TOKEN", "my-token")
-    c = FormicaryClient.from_env()
+    with _fake_token("my-token"):
+        c = FormicaryClient.from_env()
     assert c.base_url == "http://custom:9999"
     assert c.token == "my-token"
 

@@ -322,6 +322,26 @@ ALL_TESTS: list[TestCase] = [
         expected_files=["standup_brief.md", "synthesize_result.json", "reports/report.md", "reports/report.html"],
         timeout=900,
         cron=True,
+        required_context_keys=["SELECTED_MODEL", "SELECTED_TRACKER", "ISSUE_COUNT",
+                                "SKILL", "SKILL_LOADED", "YGS_SKILLS_COUNT", "SKILLS_INVOKED"],
+    ),
+    TestCase(
+        name="standup-post",
+        job_type="ai-standup-jira",
+        params={**HAIKU_OVERRIDES},
+        task_type="post",
+        expected_files=["reports/report.md", "reports/report.html", "reports/post_result.json", "reports/slack_message.txt"],
+        timeout=900,
+        cron=True,
+    ),
+    TestCase(
+        name="review-post",
+        job_type="ai-jira-review",
+        params={"PRUrl": PR_URL, "MaxTurnsReview": "8", **HAIKU_OVERRIDES},
+        task_type="post",
+        expected_files=["reports/report.md", "reports/report.html", "reports/findings.json", "reports/post_result.json", "reports/slack_message.txt"],
+        timeout=1200,
+        requires=["PR_URL"],
     ),
 ]
 
@@ -727,7 +747,7 @@ def main() -> None:
     for tc in selected:
         if not pr_url_live:
             break
-        if tc.id() == "review":
+        if tc.id() in ("review", "review-post"):
             tc.params = {**tc.params, "PRUrl": pr_url_live}
         elif tc.id() == "pr-comments":
             tc.params = {**tc.params, "Prompt": f"pr comments {pr_url_live}"}

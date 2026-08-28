@@ -27,6 +27,7 @@ import click
 from scripts.common.artifacts import read_text
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, get_issue_dir, load_config, validate_claude_config
+from scripts.common.skills import apply_project_skills
 from scripts.review.post_findings import render_report_md, render_report_html
 
 
@@ -190,6 +191,63 @@ def main(pr_url: str | None, skill: str, issue_id: str | None, mode: str, base_b
         _run_pr_review(config, pr_url, skill)
 
 
+def _clone_repo_skills(pr_url: str, workspace: Path) -> None:
+    """Sparse-clone only .claude/skills/ from the PR repo into workspace/repo."""
+    import re as _re
+    import subprocess
+    bb = _re.match(r'https://bitbucket\.org/([^/]+)/([^/]+)/pull-requests?/\d+', pr_url)
+    gh = _re.match(r'https://github\.com/([^/]+)/([^/]+)/pull/\d+', pr_url)
+    if bb:
+        token = os.environ.get("BITBUCKET_TOKEN", os.environ.get("BITBUCKET_APP_PASSWORD", ""))
+        if token:
+            # ATATT* = Bitbucket access token → x-token-auth; otherwise app password → user:pass
+            if token.startswith("ATATT"):
+                auth = f"x-token-auth:{token}@"
+            else:
+                user = os.environ.get("BITBUCKET_USERNAME", "")
+                auth = f"{user}:{token}@" if user else f"x-token-auth:{token}@"
+        else:
+            auth = ""
+        clone_url = f"https://{auth}bitbucket.org/{bb.group(1)}/{bb.group(2)}.git"
+    elif gh:
+        token = os.environ.get("GH_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
+        auth = f"x-token-auth:{token}@" if token else ""
+        clone_url = f"https://{auth}github.com/{gh.group(1)}/{gh.group(2)}.git"
+    else:
+        print("[review] unrecognized PR URL format — skipping repo skills clone", flush=True)
+        return
+    dest = workspace / "repo"
+    if (dest / ".git").exists():
+        print("[review] repo already cloned — skipping sparse-checkout", flush=True)
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "clone", "--no-checkout", "--depth", "1", "--filter=blob:none",
+             clone_url, str(dest)],
+            capture_output=True, timeout=60, check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(dest), "sparse-checkout", "set", ".claude/skills"],
+            capture_output=True, timeout=10, check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(dest), "checkout"],
+            capture_output=True, timeout=30, check=True,
+        )
+        skills = dest / ".claude" / "skills"
+        if skills.exists():
+            skill_names = [p.name for p in skills.iterdir() if p.is_dir()]
+            print(f"[review] repo skills cloned: {skill_names}", flush=True)
+        else:
+            print("[review] no .claude/skills in this repo", flush=True)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="replace")[:200] if e.stderr else ""
+        print(f"[review] repo skills clone failed (non-fatal): {stderr}", flush=True)
+    except Exception as e:
+        print(f"[review] repo skills clone error (non-fatal): {e}", flush=True)
+
+
 def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -198,19 +256,35 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
 
     print(f"[review] pr_url={pr_url} skill={skill}", flush=True)
 
+    _clone_repo_skills(pr_url, workspace)
     _ensure_ygs_skills()
 
-    skill_md = _load_skill_md(skill)
-    print(f"::add-task-context SKILL::{skill}")
-    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}")
+    # Symlink repo skills into ~/.claude/skills/ so Claude can invoke them with /skill-name
+    repo_dir = workspace / "repo"
+    applied = apply_project_skills(repo_dir)
+    if applied:
+        print(f"::add-task-context REPO_SKILLS_COUNT::{applied}", flush=True)
+
+    # Prefer repo-specific review skill over the default ygs skill
+    _review_skill_candidates = ["review-pr", "goatbot-pr-review", skill]
+    skill_md = None
+    actual_skill = skill
+    for candidate in _review_skill_candidates:
+        skill_md = _load_skill_md(candidate)
+        if skill_md:
+            actual_skill = candidate
+            break
+
+    print(f"::add-task-context SKILL::{actual_skill}", flush=True)
+    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
     if skill_md:
-        print(f"[review] loaded {skill} SKILL.md ({len(skill_md)} chars)", flush=True)
+        print(f"[review] loaded {actual_skill} SKILL.md ({len(skill_md)} chars)", flush=True)
         prompt = REVIEW_PROMPT_TEMPLATE.format(
             pr_url=pr_url,
             skill_instructions=skill_md,
         )
     else:
-        print(f"[review] WARNING: {skill}/SKILL.md not found — using fallback instructions", flush=True)
+        print(f"[review] WARNING: {actual_skill}/SKILL.md not found — using fallback instructions", flush=True)
         import re as _re
         _bb_match = _re.search(r"/pull-requests?/(\d+)", pr_url)
         _bb_pr_id = _bb_match.group(1) if _bb_match else "<PR_ID>"
@@ -231,7 +305,7 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
             model=model,
             max_turns=max_turns,
             log_file=log_path,
-            allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
+            allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS,Skill",
             system_prompt=SYSTEM_PROMPTS["review"],
         )
     except RuntimeError as e:
@@ -277,11 +351,11 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
 
     status_val = status_data.get("status", "")
     error_reason = status_data.get("reason", "")
-    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}")
-    print(f"::add-task-context FINDINGS_COUNT::{findings_count}")
-    print(f"::add-task-context REVIEW_VERDICT::{verdict}")
+    print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)
+    print(f"::add-task-context FINDINGS_COUNT::{findings_count}", flush=True)
+    print(f"::add-task-context REVIEW_VERDICT::{verdict}", flush=True)
     if error_reason:
-        print(f"::add-task-context ERROR_REASON::{error_reason[:300]}")
+        print(f"::add-task-context ERROR_REASON::{error_reason[:300]}", flush=True)
     if status_val in ("DONE", "DONE_WITH_CONCERNS", "MAX_TURNS_REACHED"):
         sys.exit(0)
 
@@ -311,8 +385,8 @@ def _run_self_review(config: dict, issue_id: str | None, skill: str, base_branch
     _ensure_ygs_skills()
 
     skill_md = _load_skill_md(review_skill)
-    print(f"::add-task-context SKILL::{review_skill}")
-    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}")
+    print(f"::add-task-context SKILL::{review_skill}", flush=True)
+    print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
     if skill_md:
         print(f"[self-review] loaded {review_skill} SKILL.md ({len(skill_md)} chars)", flush=True)
         prompt = SELF_REVIEW_PROMPT_TEMPLATE.format(
@@ -345,7 +419,7 @@ def _run_self_review(config: dict, issue_id: str | None, skill: str, base_branch
             model=model,
             max_turns=max_turns,
             log_file=log_path,
-            allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
+            allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS,Skill",
             system_prompt=SYSTEM_PROMPTS["review"],
         )
     except RuntimeError as e:

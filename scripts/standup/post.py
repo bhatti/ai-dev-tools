@@ -10,10 +10,10 @@ Optional env:
 Reads:  /workspace/standup_brief.md
         /workspace/risk_report.md    (optional)
         /workspace/synthesize_result.json
-Writes: /workspace/standup_report.md   combined report artifact (job artifact)
-        /workspace/post_result.json
+Writes: /workspace/reports/report.md   combined report artifact (job artifact)
+        /workspace/reports/post_result.json
 
-Note: standup_report.html is written by render_html.py (also a job artifact).
+Note: reports/report.html is written by render_html.py (also a job artifact).
       HTML/MD are available in the Formicary job artifacts; Slack gets plain text only.
 
 Exit codes: 0=done, 1=error
@@ -31,14 +31,26 @@ from scripts.common.config import load_config, get_workspace_dir
 from scripts.standup.slack_client import post_message
 
 
-def _format_for_slack(text: str) -> str:
-    """Convert single-backtick inline code containing JSON/braces to proper triple-backtick blocks.
+_SLACK_TEXT_LIMIT = 39_000  # Slack chat.postMessage text field cap is 40,000
 
-    Slack renders ```code``` as a code block but `code` as inline-code which
-    doesn't handle multi-line content or JSON objects well.
-    """
-    # Convert `{...}` or `\n{...}\n` patterns (JSON blobs) to triple-backtick blocks
-    text = re.sub(r"`\s*(\{[^`]*\})\s*`", r"```\n\1\n```", text, flags=re.DOTALL)
+
+def _format_for_slack(text: str) -> str:
+    """Convert markdown to Slack mrkdwn and truncate to Slack's text limit."""
+    # **bold** → *bold*
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    # __bold__ → remove
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    # inline code backticks
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # markdown headings → plain (Slack uses *bold* for emphasis, not headings)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # dash bullets → •
+    text = re.sub(r'^[ \t]-[ \t]+', '• ', text, flags=re.MULTILINE)
+    text = re.sub(r'^-[ \t]+', '• ', text, flags=re.MULTILINE)
+    # arrows
+    text = re.sub(r'\s*→\s*', ': ', text)
+    if len(text) > _SLACK_TEXT_LIMIT:
+        text = text[:_SLACK_TEXT_LIMIT] + "\n…(truncated)"
     return text
 
 
@@ -46,9 +58,12 @@ def main() -> None:
     config = load_config(required=[])
     workspace_dir = get_workspace_dir(config)
 
+    reports_dir = workspace_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
     brief_path = workspace_dir / "standup_brief.md"
     fallback_paths = [
-        workspace_dir / "reports" / "report.md",
+        reports_dir / "report.md",
         workspace_dir / "standup_report.md",
     ]
     if not brief_path.exists():
@@ -59,7 +74,7 @@ def main() -> None:
                 break
         else:
             print("ERROR: standup_brief.md not found — run synthesize step first", file=sys.stderr)
-            (workspace_dir / "post_result.json").write_text(
+            (reports_dir / "post_result.json").write_text(
                 json.dumps({"status": "ERROR", "reason": "standup_brief.md not found"})
             )
             sys.exit(1)
@@ -102,12 +117,17 @@ def main() -> None:
     print(report_text, flush=True)
     print("=" * 60 + "\n", flush=True)
 
-    (workspace_dir / "standup_report.md").write_text(report_text)
-    print("[post] standup_report.md written", flush=True)
+    (reports_dir / "report.md").write_text(report_text)
+    print("[post] reports/report.md written", flush=True)
 
-    # Post brief to Slack — convert single-backtick JSON spans to proper code blocks first
+    # Build the full Slack message: brief + risk report, then convert to mrkdwn
+    full_message = brief
+    if risk_report:
+        full_message = brief + "\n\n---\n\n" + risk_report
+    slack_text = _format_for_slack(full_message)
+    (reports_dir / "slack_message.txt").write_text(slack_text)
     thread_ts = config.get("SLACK_THREAD_TS") or None
-    slack_ok = post_message(config, _format_for_slack(brief), thread_ts=thread_ts)
+    slack_ok = post_message(config, slack_text, thread_ts=thread_ts)
 
     post_result = {
         "status": "DONE",
@@ -121,7 +141,7 @@ def main() -> None:
         "sprint": gather_result.get("sprint", ""),
         "date": today,
     }
-    (workspace_dir / "post_result.json").write_text(json.dumps(post_result, indent=2))
+    (reports_dir / "post_result.json").write_text(json.dumps(post_result, indent=2))
 
     print(
         f"[post] done — slack_posted={slack_ok} "
@@ -136,4 +156,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     from scripts.common.entrypoint import run_main
-    run_main(main, "post_result.json")
+    run_main(main, "reports/post_result.json")

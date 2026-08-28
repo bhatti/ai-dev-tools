@@ -37,7 +37,7 @@ def _run(tmp_workspace, monkeypatch, signals, risk_md=""):
     with pytest.raises(SystemExit) as exc:
         mod.main()
     assert exc.value.code == 0
-    return (tmp_workspace / "standup_report.html").read_text()
+    return (tmp_workspace / "reports" / "report.html").read_text()
 
 
 def test_render_creates_html(tmp_workspace, monkeypatch):

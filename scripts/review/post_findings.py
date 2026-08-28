@@ -191,14 +191,16 @@ def _build_slack_text(findings: dict) -> str:
 
 
 @click.command()
-@click.option("--findings", "findings_path", default="/workspace/findings.json", show_default=True,
+@click.option("--findings", "findings_path", default="reports/findings.json", show_default=True,
               help="Path to findings.json written by run.py")
 def main(findings_path: str) -> None:
     config = load_config()
 
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
-    result_path = workspace / "post_result.json"
+    reports_dir = workspace / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    result_path = reports_dir / "post_result.json"
 
     # --- Load findings (always required for report rendering) ---
     fpath = Path(findings_path)
@@ -214,12 +216,16 @@ def main(findings_path: str) -> None:
     # --- Always render Markdown + HTML reports regardless of Slack ---
     md_text = render_report_md(findings)
     html_text = render_report_html(findings, md_text)
-    md_path = workspace / "review_report.md"
-    html_path = workspace / "review_report.html"
+    md_path = reports_dir / "report.md"
+    html_path = reports_dir / "report.html"
     md_path.write_text(md_text, encoding="utf-8")
     html_path.write_text(html_text, encoding="utf-8")
     print(f"[post_findings] wrote {md_path} ({len(md_text)} chars)", flush=True)
     print(f"[post_findings] wrote {html_path} ({len(html_text)} chars)", flush=True)
+
+    # Always write slack message to artifact (regardless of whether Slack is configured)
+    text = _build_slack_text(findings)
+    (reports_dir / "slack_message.txt").write_text(text)
 
     # --- Slack post (non-fatal) ---
     token = config.get("SLACK_BOT_TOKEN", "")
@@ -231,9 +237,7 @@ def main(findings_path: str) -> None:
         print(f"[post_findings] {msg}", flush=True)
         result_path.write_text(json.dumps({"status": "SKIPPED", "reason": msg}, indent=2), encoding="utf-8")
         sys.exit(0)
-
     print(f"[post_findings] posting to channel={channel} thread_ts={thread_ts}", flush=True)
-    text = _build_slack_text(findings)
     response = _post_text(token, channel, thread_ts, text)
 
     if response.get("ok"):

@@ -115,9 +115,9 @@ def main(query: str, label: str | None, max_results: int) -> None:
     title = f"GitHub issues matching \"{query}\" ({len(issues)} found)"
     blocks = build_gh_issue_blocks(title, issues)
     notify(config, text, blocks=blocks)
-    print(f"::add-task-context SELECTED_TRACKER::github")
-    print(f"::add-task-context ISSUE_COUNT::{len(issues)}")
-    print(f"::add-task-context QUERY::{query}")
+    print(f"::add-task-context SELECTED_TRACKER::github", flush=True)
+    print(f"::add-task-context ISSUE_COUNT::{len(issues)}", flush=True)
+    print(f"::add-task-context QUERY::{query}", flush=True)
     sys.exit(0)
 
 

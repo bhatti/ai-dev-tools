@@ -22,6 +22,8 @@ _BLOCKER_KEYWORDS = (
     "can't proceed", "cannot proceed", "need input", "escalat",
 )
 
+_channel_id_cache: dict[tuple, str] = {}
+
 
 def _slack_get(token: str, method: str, **params) -> dict:
     """Call a Slack GET endpoint. Returns {} on HTTP error or ok=false.
@@ -38,8 +40,7 @@ def _slack_get(token: str, method: str, **params) -> dict:
         )
         if resp.status_code == 429:
             if attempt < len(delays):
-                retry_after = int(resp.headers.get("Retry-After", delay))
-                wait = max(delay, retry_after)
+                wait = min(delay, 5)  # cap at 5s regardless of Retry-After
                 print(f"[slack] {method} HTTP 429 — retrying in {wait}s (attempt {attempt + 1}/3)", file=sys.stderr, flush=True)
                 time.sleep(wait)
                 continue
@@ -59,9 +60,12 @@ def _slack_get(token: str, method: str, **params) -> dict:
 
 def resolve_channel_id(token: str, channel_name: str) -> str | None:
     name = channel_name.lstrip("#")
+    cache_key = (token[-8:], name)
+    if cache_key in _channel_id_cache:
+        return _channel_id_cache[cache_key]
     cursor = None
     while True:
-        params: dict = {"types": "public_channel,private_channel", "limit": 200}
+        params: dict = {"types": "public_channel,private_channel", "limit": 1000}
         if cursor:
             params["cursor"] = cursor
         data = _slack_get(token, "conversations.list", **params)
@@ -69,6 +73,7 @@ def resolve_channel_id(token: str, channel_name: str) -> str | None:
             break   # error — stop paginating
         for ch in data.get("channels", []):
             if ch.get("name") == name:
+                _channel_id_cache[cache_key] = ch["id"]
                 return ch["id"]
         cursor = data.get("response_metadata", {}).get("next_cursor") or ""
         if not cursor:

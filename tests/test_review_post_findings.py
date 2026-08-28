@@ -87,8 +87,8 @@ def test_main_writes_report_files(tmp_workspace, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(main, ["--findings", str(findings_path)])
     assert result.exit_code == 0
-    assert (tmp_workspace / "review_report.md").exists()
-    assert (tmp_workspace / "review_report.html").exists()
+    assert (tmp_workspace / "reports" / "report.md").exists()
+    assert (tmp_workspace / "reports" / "report.html").exists()
 
 
 @patch("scripts.review.post_findings.requests.post")
@@ -116,7 +116,7 @@ def test_main_exits_0_on_success(mock_post, tmp_workspace, monkeypatch):
     assert payload["channel"] == "my-channel"
     assert payload["thread_ts"] == "1234567890.123"
 
-    result_file = tmp_workspace / "post_result.json"
+    result_file = tmp_workspace / "reports" / "post_result.json"
     assert result_file.exists()
     data = json.loads(result_file.read_text())
     assert data["status"] == "POSTED"
@@ -141,7 +141,7 @@ def test_main_exits_0_on_slack_error(mock_post, tmp_workspace, monkeypatch):
     result = runner.invoke(main, ["--findings", str(findings_path)])
     assert result.exit_code == 0
 
-    result_file = tmp_workspace / "post_result.json"
+    result_file = tmp_workspace / "reports" / "post_result.json"
     data = json.loads(result_file.read_text())
     assert data["status"] == "FAILED"
 
@@ -159,7 +159,7 @@ def test_main_exits_0_when_no_slack_token(tmp_workspace, monkeypatch):
     result = runner.invoke(main, ["--findings", str(findings_path)])
     assert result.exit_code == 0
 
-    result_file = tmp_workspace / "post_result.json"
+    result_file = tmp_workspace / "reports" / "post_result.json"
     data = json.loads(result_file.read_text())
     assert data["status"] == "SKIPPED"
 
