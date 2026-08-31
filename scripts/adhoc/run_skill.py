@@ -29,7 +29,7 @@ from scripts.common.config import get_workspace_dir, load_config, validate_claud
 from scripts.standup.slack_client import build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify
 
 # Maximum chars of Claude output to post back to Slack
-_MAX_SLACK_CHARS = 3000
+_MAX_SLACK_CHARS = 12000
 
 
 def _skill_search_paths() -> list[Path]:
