@@ -225,6 +225,10 @@ def main(findings_path: str) -> None:
 
     # Always write slack message to artifact (regardless of whether Slack is configured)
     text = _build_slack_text(findings)
+    public_url = (config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
+    job_id = config.get("JOB_ID", "") or ""
+    if public_url and job_id:
+        text += f"\n<{public_url}/dashboard/jobs/requests/{job_id}|View full report in Formicary>"
     (reports_dir / "slack_message.txt").write_text(text)
 
     # --- Slack post (non-fatal) ---

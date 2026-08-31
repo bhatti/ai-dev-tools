@@ -632,7 +632,7 @@ def main(skill: str, prompt_text: str) -> None:
 
     output_to_post = _strip_for_slack(output_text)
     if len(output_to_post) > _MAX_SLACK_CHARS:
-        output_to_post = "…\n" + output_to_post[-_MAX_SLACK_CHARS:]
+        output_to_post = output_to_post[:_MAX_SLACK_CHARS] + "\n…\n_(Full report in Formicary job artifacts)_"
 
     blocks = build_mrkdwn_blocks(output_to_post) if output_to_post else None
 

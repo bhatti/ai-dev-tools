@@ -467,4 +467,8 @@ if __name__ == "__main__":
     _ts = _config.get("SLACK_THREAD_TS") or None
     _skill = _config.get("SKILL_NAME") or _config.get("JOB_TYPE", "job")
     _text = _config.get("MESSAGE") or (sys.argv[1] if len(sys.argv) > 1 else f":x: {_skill} failed. Check Formicary logs.")
+    _public_url = (_config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
+    _job_id = _config.get("JOB_ID", "") or ""
+    if _public_url and _job_id:
+        _text += f"\n<{_public_url}/dashboard/jobs/requests/{_job_id}|View job in Formicary>"
     post_message(_config, _text, thread_ts=_ts)
