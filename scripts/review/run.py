@@ -307,6 +307,7 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
             log_file=log_path,
             allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS,Skill",
             system_prompt=SYSTEM_PROMPTS["review"],
+            primary_skill=actual_skill,
         )
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)
@@ -421,6 +422,7 @@ def _run_self_review(config: dict, issue_id: str | None, skill: str, base_branch
             log_file=log_path,
             allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS,Skill",
             system_prompt=SYSTEM_PROMPTS["review"],
+            primary_skill=review_skill,
         )
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)

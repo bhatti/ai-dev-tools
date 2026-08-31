@@ -5,8 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
+import pytest
 from scripts.common.claude_runner import SYSTEM_PROMPTS
-from scripts.adhoc.run_skill import _system_prompt_for_skill, _SKILL_SYSTEM_PROMPT_MAP
+from scripts.adhoc.run_skill import _system_prompt_for_skill, _SKILL_SYSTEM_PROMPT_MAP, _detect_intent
 from scripts.common.config import (
     MODEL_BEDROCK_HAIKU, MODEL_BEDROCK_SONNET, MODEL_BEDROCK_OPUS,
 )
@@ -115,3 +116,89 @@ def test_model_shortnames_include_newer_models():
     assert "fable" in MODEL_SHORTNAMES
     assert MODEL_SHORTNAMES["sonnet-5"].startswith("us.anthropic.claude-sonnet-5")
     assert MODEL_SHORTNAMES["opus-5"].startswith("us.anthropic.claude-opus-5")
+
+
+# ---------------------------------------------------------------------------
+# _detect_intent — review URL routing
+# Tests populate _KNOWN_SKILLS to exercise the installed-skills-aware routing.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def with_review_skills():
+    """Populate _KNOWN_SKILLS with review skills for intent detection tests."""
+    from scripts.common import claude_runner
+    saved = set(claude_runner._KNOWN_SKILLS)
+    claude_runner._KNOWN_SKILLS.update({
+        "ygs-review-deep", "ygs-review-pr", "ygs-security-review", "ygs-ask",
+    })
+    yield
+    claude_runner._KNOWN_SKILLS.clear()
+    claude_runner._KNOWN_SKILLS.update(saved)
+
+
+def test_detect_intent_non_ask_skill_unchanged(with_review_skills):
+    """Non-ygs-ask skills are never overridden regardless of URL content."""
+    assert _detect_intent("review https://bitbucket.org/org/repo/pull-requests/1", "ygs-standup") == "ygs-standup"
+    assert _detect_intent("deep review https://github.com/org/repo/pull/42", "ygs-implement") == "ygs-implement"
+
+
+def test_detect_intent_github_pr_url_routes_to_review_pr(with_review_skills):
+    prompt = "please review https://github.com/org/repo/pull/42"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-review-pr"
+
+
+def test_detect_intent_bitbucket_pr_url_routes_to_review_pr(with_review_skills):
+    prompt = "check https://bitbucket.org/org/repo/pull-requests/123/overview"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-review-pr"
+
+
+def test_detect_intent_deep_review_github_routes_to_review_deep(with_review_skills):
+    prompt = "deep review https://github.com/org/repo/pull/99"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-review-deep"
+
+
+def test_detect_intent_deep_review_bitbucket_routes_to_review_deep(with_review_skills):
+    prompt = "deep review https://bitbucket.org/org/repo/pull-requests/46257/overview"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-review-deep"
+
+
+def test_detect_intent_no_url_stays_ask(with_review_skills):
+    prompt = "what is the status of the project?"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-ask"
+
+
+def test_detect_intent_url_but_no_pr_path_stays_ask(with_review_skills):
+    prompt = "look at https://github.com/org/repo for context"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-ask"
+
+
+def test_detect_intent_deep_keyword_without_url_stays_ask(with_review_skills):
+    prompt = "do a deep analysis of the codebase"
+    assert _detect_intent(prompt, "ygs-ask") == "ygs-ask"
+
+
+def test_detect_intent_falls_back_when_no_skills_installed():
+    """When no review skills are installed, intent detection falls back to original skill."""
+    from scripts.common import claude_runner
+    saved = set(claude_runner._KNOWN_SKILLS)
+    claude_runner._KNOWN_SKILLS.clear()
+    try:
+        prompt = "deep review https://github.com/org/repo/pull/1"
+        assert _detect_intent(prompt, "ygs-ask") == "ygs-ask"
+    finally:
+        claude_runner._KNOWN_SKILLS.update(saved)
+
+
+def test_detect_intent_falls_back_when_only_partial_review_skills_installed():
+    """With only ygs-review-pr installed (no ygs-review-deep), deep review uses ygs-review-pr."""
+    from scripts.common import claude_runner
+    saved = set(claude_runner._KNOWN_SKILLS)
+    claude_runner._KNOWN_SKILLS.clear()
+    claude_runner._KNOWN_SKILLS.add("ygs-review-pr")
+    try:
+        prompt = "deep review https://github.com/org/repo/pull/1"
+        result = _detect_intent(prompt, "ygs-ask")
+        assert result == "ygs-review-pr"
+    finally:
+        claude_runner._KNOWN_SKILLS.clear()
+        claude_runner._KNOWN_SKILLS.update(saved)

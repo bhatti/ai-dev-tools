@@ -24,7 +24,7 @@ import re
 import click
 import requests
 
-from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills, _KNOWN_SKILLS
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
 from scripts.standup.slack_client import build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify
 
@@ -403,6 +403,7 @@ _SKILL_SYSTEM_PROMPT_MAP: dict[str, str] = {
     "ygs-risk-scan": "standup",
     "ygs-pr-queue": "standup",
     "ygs-review-pr": "review",
+    "ygs-review-deep": "review",
     "ygs-code-review": "review",
     "ygs-security-review": "review",
     "ygs-sre-review": "review",
@@ -414,6 +415,48 @@ _SKILL_SYSTEM_PROMPT_MAP: dict[str, str] = {
     "ygs-retro": "learn",
     "ygs-ask": "adhoc",
 }
+
+
+_REVIEW_URL_PATTERN = re.compile(
+    r'https?://\S+(?:pull-request|pull/|/pr/|/merge_request)\S*', re.IGNORECASE
+)
+
+# Ordered preference list for review skill selection — first installed one wins.
+# Not hardcoded behavior: if none are installed, routing falls back to the original skill.
+_REVIEW_SKILL_PREFERENCE = ["ygs-review-deep", "ygs-review-pr"]
+
+
+def _best_review_skill(deep: bool) -> str | None:
+    """Return the best installed review skill, preferring deep variants when requested.
+
+    Checks the curated preference list first (no need for double-filtering since the
+    list only contains review skills), then falls back to any installed review-category
+    skill from _SKILL_SYSTEM_PROMPT_MAP.
+    """
+    candidates = _REVIEW_SKILL_PREFERENCE if deep else _REVIEW_SKILL_PREFERENCE[1:]
+    for candidate in candidates:
+        if candidate in _KNOWN_SKILLS:
+            return candidate
+    # Fall back to any installed review-category skill
+    review_skills = {s for s, cat in _SKILL_SYSTEM_PROMPT_MAP.items() if cat == "review"}
+    available = sorted(review_skills & _KNOWN_SKILLS)
+    return available[0] if available else None
+
+
+def _detect_intent(prompt: str, skill: str) -> str:
+    """Override skill based on prompt content when routed generically via ygs-ask.
+
+    Detects PR review URLs and routes to the best available review skill so that
+    messages like "deep review <URL>" use ygs-review-deep if installed, else the
+    best available review skill. Falls back to original skill if none are installed.
+    """
+    if skill != 'ygs-ask':
+        return skill
+    if _REVIEW_URL_PATTERN.search(prompt):
+        deep = 'deep' in prompt.lower()
+        target = _best_review_skill(deep)
+        return target if target else skill
+    return skill
 
 
 def _system_prompt_for_skill(skill: str) -> str:
@@ -435,6 +478,9 @@ def main(skill: str, prompt_text: str) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     logs_dir = workspace / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Override skill based on prompt intent before loading skill metadata.
+    skill = _detect_intent(prompt_text, skill)
 
     print(f"[adhoc] skill={skill} prompt={prompt_text[:80]}...", flush=True)
 
@@ -523,6 +569,7 @@ def main(skill: str, prompt_text: str) -> None:
             log_file=log_path,
             allowed_tools="Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS,Skill",
             system_prompt=_system_prompt_for_skill(skill),
+            primary_skill=skill,
         )
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr, flush=True)

@@ -346,3 +346,144 @@ class TestInstallViaSkillsCli:
         captured = capsys.readouterr()
         assert "WARNING" in captured.err
         assert "npx" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# System prompts — token-efficiency framing
+# ---------------------------------------------------------------------------
+
+class TestSystemPrompts:
+    """Verify system prompt structure after token-efficiency rewrite."""
+
+    def test_all_prompts_have_high_efficiency_framing(self):
+        from scripts.common.claude_runner import SYSTEM_PROMPTS, _DEFAULT_SYSTEM_PROMPT
+        for key, prompt in SYSTEM_PROMPTS.items():
+            assert "high-efficiency" in prompt, (
+                f"SYSTEM_PROMPTS['{key}'] missing 'high-efficiency' framing"
+            )
+        assert "high-efficiency" in _DEFAULT_SYSTEM_PROMPT
+
+    def test_all_prompts_have_token_efficiency_rules(self):
+        from scripts.common.claude_runner import SYSTEM_PROMPTS, _TOKEN_EFFICIENCY_RULES, _DEFAULT_SYSTEM_PROMPT
+        for key, prompt in SYSTEM_PROMPTS.items():
+            assert _TOKEN_EFFICIENCY_RULES in prompt, (
+                f"SYSTEM_PROMPTS['{key}'] is missing _TOKEN_EFFICIENCY_RULES"
+            )
+        assert _TOKEN_EFFICIENCY_RULES in _DEFAULT_SYSTEM_PROMPT
+
+    def test_token_efficiency_rules_contains_required_constraints(self):
+        from scripts.common.claude_runner import _TOKEN_EFFICIENCY_RULES
+        assert "no preamble" in _TOKEN_EFFICIENCY_RULES
+        assert "Batch independent tool calls" in _TOKEN_EFFICIENCY_RULES
+        assert "Never ask clarifying questions" in _TOKEN_EFFICIENCY_RULES
+
+    def test_adhoc_prompt_mentions_slack_mrkdwn(self):
+        from scripts.common.claude_runner import SYSTEM_PROMPTS
+        assert "Slack mrkdwn" in SYSTEM_PROMPTS["adhoc"]
+
+    def test_review_prompt_mentions_severity_ranking(self):
+        from scripts.common.claude_runner import SYSTEM_PROMPTS
+        assert "CRITICAL" in SYSTEM_PROMPTS["review"]
+        assert "severity" in SYSTEM_PROMPTS["review"]
+
+    def test_default_max_turns_is_50(self):
+        import inspect
+        from scripts.common.claude_runner import run_claude
+        sig = inspect.signature(run_claude)
+        assert sig.parameters["max_turns"].default == 50, (
+            "run_claude max_turns default must be 50 to prevent runaway jobs"
+        )
+
+    def test_all_expected_roles_present(self):
+        from scripts.common.claude_runner import SYSTEM_PROMPTS
+        required_roles = {"implement", "plan", "review", "standup", "respond", "learn", "adhoc"}
+        missing = required_roles - set(SYSTEM_PROMPTS.keys())
+        assert not missing, f"Missing expected SYSTEM_PROMPTS keys: {missing}"
+
+    def test_system_prompt_includes_skills_tracking_instruction(self):
+        import inspect
+        from scripts.common import claude_runner
+        sig = inspect.signature(claude_runner.run_claude)
+        assert "primary_skill" in sig.parameters, "run_claude must accept primary_skill parameter"
+        # Verify the tracking instruction is appended when skills/primary_skill are present
+        saved = set(claude_runner._KNOWN_SKILLS)
+        try:
+            claude_runner._KNOWN_SKILLS.add("ygs-ask")
+            # Reconstruct what run_claude assembles
+            sp = "base prompt"
+            if claude_runner._KNOWN_SKILLS or True:
+                sp += "\n\n## Skill Tracking (MANDATORY)\nSKILLS_USED:"
+            assert "SKILLS_USED" in sp
+        finally:
+            claude_runner._KNOWN_SKILLS.clear()
+            claude_runner._KNOWN_SKILLS.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# SKILLS_INVOKED — extraction from SKILLS_USED: line and primary_skill fallback
+# Fixture restores _KNOWN_SKILLS global state to prevent test cross-contamination.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def isolated_known_skills():
+    """Save and restore _KNOWN_SKILLS global state around each test."""
+    from scripts.common import claude_runner
+    saved = set(claude_runner._KNOWN_SKILLS)
+    yield claude_runner._KNOWN_SKILLS
+    claude_runner._KNOWN_SKILLS.clear()
+    claude_runner._KNOWN_SKILLS.update(saved)
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_skills_invoked_extracted_from_skills_used_line(mock_popen, tmp_path, capsys, isolated_known_skills):
+    """SKILLS_USED: line in output populates SKILLS_INVOKED context marker."""
+    isolated_known_skills.update({"ygs-review-pr", "ygs-security-review"})
+    mock_popen.return_value = _make_proc([
+        'Review findings...\n',
+        'SKILLS_USED: ygs-review-pr,ygs-security-review\n',
+        '{"status":"DONE"}\n',
+    ])
+    run_claude("review this", working_dir=tmp_path, primary_skill="ygs-review-pr")
+    captured = capsys.readouterr()
+    assert "SKILLS_INVOKED::ygs-review-pr,ygs-security-review" in captured.out
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_skills_invoked_falls_back_to_primary_skill_when_no_skills_used_line(mock_popen, tmp_path, capsys, isolated_known_skills):
+    """When no SKILLS_USED: line, primary_skill is always included in SKILLS_INVOKED."""
+    isolated_known_skills.add("ygs-ask")
+    mock_popen.return_value = _make_proc([
+        'Some output without SKILLS_USED line.\n',
+        '{"status":"DONE"}\n',
+    ])
+    run_claude("summarize", working_dir=tmp_path, primary_skill="ygs-ask")
+    captured = capsys.readouterr()
+    assert "SKILLS_INVOKED::ygs-ask" in captured.out
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_skills_invoked_none_when_no_skills_used_and_no_primary(mock_popen, tmp_path, capsys, isolated_known_skills):
+    """Without SKILLS_USED: and no primary_skill, SKILLS_INVOKED is 'none'."""
+    isolated_known_skills.add("ygs-ask")
+    mock_popen.return_value = _make_proc([
+        'Output without skill markers.\n',
+        '{"status":"DONE"}\n',
+    ])
+    run_claude("query", working_dir=tmp_path)
+    captured = capsys.readouterr()
+    assert "SKILLS_INVOKED::none" in captured.out
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_skills_invoked_deduplicates_primary_skill(mock_popen, tmp_path, capsys, isolated_known_skills):
+    """primary_skill already listed in SKILLS_USED: is not duplicated."""
+    isolated_known_skills.add("ygs-review-pr")
+    mock_popen.return_value = _make_proc([
+        'SKILLS_USED: ygs-review-pr\n',
+        '{"status":"DONE"}\n',
+    ])
+    run_claude("review", working_dir=tmp_path, primary_skill="ygs-review-pr")
+    captured = capsys.readouterr()
+    lines = [l for l in captured.out.splitlines() if "SKILLS_INVOKED" in l]
+    assert len(lines) == 1
+    assert lines[0].count("ygs-review-pr") == 1

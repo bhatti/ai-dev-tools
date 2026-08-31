@@ -565,6 +565,7 @@ def run_claude(
     allowed_tools: str | None = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS",
     system_prompt: str | None = None,
     process_timeout: int | None = None,
+    primary_skill: str | None = None,
 ) -> ClaudeResult:
     """Run claude CLI, return structured result.
 
@@ -578,6 +579,14 @@ def run_claude(
     sp = system_prompt or _DEFAULT_SYSTEM_PROMPT
     if _SKILLS_INVENTORY:
         sp = sp + "\n\n" + _SKILLS_INVENTORY
+    if _KNOWN_SKILLS or primary_skill:
+        sp = sp + (
+            "\n\n## Skill Tracking (MANDATORY)\n"
+            "After completing your task, output exactly one line at the very end of your response:\n"
+            "SKILLS_USED: skill1,skill2\n"
+            "List every skill you invoked via the Skill tool. If you invoked none, write: SKILLS_USED: none\n"
+            "Also prefix each skill result section with a ✅ line summarizing what it found."
+        )
     cmd = [
         "claude", "--print", "--dangerously-skip-permissions",
         "--system-prompt", sp,
@@ -771,8 +780,15 @@ def run_claude(
         except OSError as e:
             print(f"[claude] WARNING: could not write log file {log_file}: {e}", file=sys.stderr, flush=True)
 
-    if _KNOWN_SKILLS:
-        _hits = [s for s in re.findall(r'/([a-z][a-z0-9-]+)', full_output) if s in _KNOWN_SKILLS]
+    if _KNOWN_SKILLS or primary_skill:
+        used_line = re.search(r'^SKILLS_USED:\s*(.+)$', full_output, re.MULTILINE)
+        if used_line:
+            raw = used_line.group(1).strip()
+            _hits = [s.strip() for s in raw.split(',') if s.strip() and s.strip() != 'none']
+        else:
+            _hits = [s for s in re.findall(r'/([a-z][a-z0-9-]+)', full_output) if s in _KNOWN_SKILLS]
+        if primary_skill and primary_skill not in _hits:
+            _hits = [primary_skill] + _hits
         print(f"::add-task-context SKILLS_INVOKED::{','.join(dict.fromkeys(_hits)) or 'none'}", flush=True)
 
     if exit_code != 0:

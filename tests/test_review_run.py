@@ -269,3 +269,77 @@ def test_self_review_writes_prompt_log(mock_claude, tmp_workspace, monkeypatch):
     prompt_file = tmp_workspace / "logs" / "self_review.prompt.txt"
     assert prompt_file.exists()
     assert "develop" in prompt_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Functional: primary_skill is passed to run_claude (SKILLS_INVOKED baseline)
+# ---------------------------------------------------------------------------
+
+@patch("scripts.review.run.run_claude")
+def test_review_passes_primary_skill_to_run_claude(mock_claude, tmp_workspace, monkeypatch):
+    """run_claude must receive primary_skill so SKILLS_INVOKED is never 'none'."""
+    for k, v in _env(tmp_workspace).items():
+        monkeypatch.setenv(k, v)
+
+    mock_claude.return_value = MagicMock(
+        exit_code=0,
+        output='{"status":"DONE","findings_count":0,"verdict":"APPROVE","summary":"ok"}',
+        status_json={"status": "DONE", "findings_count": 0, "verdict": "APPROVE", "summary": "ok"},
+        status="DONE",
+    )
+
+    runner = CliRunner()
+    runner.invoke(main, ["--pr-url", "https://github.com/org/repo/pull/1"])
+
+    call_kwargs = mock_claude.call_args.kwargs
+    assert "primary_skill" in call_kwargs, "run_claude must be called with primary_skill="
+    assert call_kwargs["primary_skill"] is not None
+    assert call_kwargs["primary_skill"] != ""
+
+
+@patch("scripts.review.run.run_claude")
+def test_review_deep_skill_sets_primary_skill(mock_claude, tmp_workspace, monkeypatch):
+    """Explicit ygs-review-deep skill is passed as primary_skill to run_claude."""
+    for k, v in _env(tmp_workspace).items():
+        monkeypatch.setenv(k, v)
+
+    mock_claude.return_value = MagicMock(
+        exit_code=0,
+        output='{"status":"DONE","findings_count":0,"verdict":"APPROVE","summary":"ok"}',
+        status_json={"status": "DONE", "findings_count": 0, "verdict": "APPROVE", "summary": "ok"},
+        status="DONE",
+    )
+
+    runner = CliRunner()
+    runner.invoke(main, [
+        "--pr-url", "https://github.com/org/repo/pull/1",
+        "--skill", "ygs-review-deep",
+    ])
+
+    call_kwargs = mock_claude.call_args.kwargs
+    assert call_kwargs.get("primary_skill") == "ygs-review-deep"
+
+
+@patch("scripts.review.run.run_claude")
+def test_self_review_passes_primary_skill(mock_claude, tmp_workspace, monkeypatch):
+    """self-review run_claude call receives primary_skill=ygs-code-review."""
+    for k, v in _env(tmp_workspace).items():
+        monkeypatch.setenv(k, v)
+    _setup_repo_dir(tmp_workspace)
+
+    mock_claude.return_value = MagicMock(
+        exit_code=0,
+        output='{"status":"DONE","self_review_status":"APPROVED","findings_count":0,"notes":""}',
+        status_json={"status": "DONE", "self_review_status": "APPROVED", "findings_count": 0, "notes": ""},
+        status="DONE",
+    )
+
+    runner = CliRunner()
+    runner.invoke(main, [
+        "--mode", "self-review",
+        "--issue-id", "42",
+        "--base-branch", "main",
+    ])
+
+    call_kwargs = mock_claude.call_args.kwargs
+    assert call_kwargs.get("primary_skill") == "ygs-code-review"
