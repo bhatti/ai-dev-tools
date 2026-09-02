@@ -29,6 +29,23 @@ Be concise. Use bullet points. Focus on actionable guidance.
 """
 
 
+def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path) -> str:
+    """Invoke a skill's SKILL.md instructions for analysis via Claude. DRY shared version."""
+    workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
+    skill_md = pathlib.Path(skill_path).read_text(encoding="utf-8")
+    prompt = f"{skill_md}\n\n## Issue Context to Analyze\n\n{issues_text}"
+    result = run_claude(
+        prompt,
+        working_dir=workspace,
+        model=config.get("AI_MODEL"),
+        max_turns=20,
+        log_file=workspace / "logs" / "analyze.log",
+        allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
+        system_prompt=SYSTEM_PROMPTS["plan"],
+    )
+    return result.output.strip()
+
+
 def run_analysis(config: dict, issues_text: str, git_context: str | None = None) -> str:
     """Run Claude on pre-formatted issues text; return the analysis string."""
     workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))

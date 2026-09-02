@@ -318,6 +318,8 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
                 reviewer_info += f"pending: {', '.join('@' + n.split()[0] for n in pending[:4])}"
             if not reviewer_info:
                 reviewer_info = "no reviewers"
+            if priority:
+                reviewer_info += f"  •  P: {priority}"
             if labels:
                 reviewer_info += f"  •  {' '.join(f'`{l}`' for l in labels)}"
 
@@ -380,13 +382,15 @@ def build_gh_issue_blocks(title: str, issues: list) -> list:
         url = issue.get("url", "")
         assignees = issue.get("assignees") or []
         assignee = assignees[0].get("login", "Unassigned") if assignees else "Unassigned"
-        labels = [lbl["name"] for lbl in (issue.get("labels") or [])]
-        label_str = ", ".join(labels[:3]) or "—"
+        raw_labels = issue.get("labels") or []
+        labels = [lbl if isinstance(lbl, str) else lbl.get("name", "") for lbl in raw_labels]
+        label_str = ", ".join(l for l in labels[:3] if l) or "—"
+        priority = (issue.get("priority") or "—")
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"<{url}|#{number}> *{issue_title}*"},
             "fields": [
-                {"type": "mrkdwn", "text": f"*Assignee:* {assignee}"},
+                {"type": "mrkdwn", "text": f"*Assignee:* {assignee}   *Priority:* {priority}"},
                 {"type": "mrkdwn", "text": f"*Labels:* {label_str}"},
             ],
         })

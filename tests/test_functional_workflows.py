@@ -192,11 +192,23 @@ ALL_TESTS: list[TestCase] = [
     TestCase(
         name="analyze",
         job_type="ai-jira-query",
-        params={"Issues": ISSUE_ID, "Mode": "analyze", **HAIKU_OVERRIDES} if ISSUE_ID
+        params={"Query": f"give tldr for {ISSUE_ID}", "Mode": "analyze", **HAIKU_OVERRIDES} if ISSUE_ID
               else {"Query": "flaky tests", "Mode": "analyze", **HAIKU_OVERRIDES},
         task_type="query",
         expected_files=["reports/result.json", "reports/report.md", "reports/report.html"],
         timeout=600,
+        required_context_keys=["SELECTED_MODEL", "SELECTED_TRACKER", "ISSUE_COUNT",
+                                "GIT_ARCHAEOLOGY", "ANALYSIS_TYPE"],
+    ),
+    TestCase(
+        name="jira-analyze",
+        job_type="ai-jira-query",
+        params={"Query": f"give tldr for {ISSUE_ID}", "Mode": "analyze", **HAIKU_OVERRIDES},
+        task_type="query",
+        expected_files=["reports/result.json", "reports/report.md", "reports/report.html"],
+        timeout=600,
+        requires=["ISSUE_ID"],
+        required_context_keys=["SELECTED_MODEL", "SELECTED_TRACKER", "ISSUE_COUNT", "ANALYSIS_TYPE"],
     ),
     TestCase(
         name="gh-query",
@@ -213,6 +225,8 @@ ALL_TESTS: list[TestCase] = [
         task_type="query",
         expected_files=["reports/result.json", "reports/report.md", "reports/report.html"],
         timeout=600,
+        required_context_keys=["SELECTED_MODEL", "SELECTED_TRACKER", "ISSUE_COUNT",
+                                "GIT_ARCHAEOLOGY", "ANALYSIS_TYPE"],
     ),
     TestCase(
         name="review",

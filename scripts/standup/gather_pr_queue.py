@@ -386,7 +386,7 @@ def _gather_github(config: dict) -> dict:
             "jira_summary": "",
             "jira_status": "",
             "priority": "",
-            "labels": [],
+            "labels": pr.get("labels") or [],
             "reviewers": pending_reviewers,
             "approved_by": approved_by,
             "changes_requested_by": changes_requested_by,

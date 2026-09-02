@@ -24,11 +24,15 @@ import sys
 import click
 
 from scripts.common.config import load_config
-from scripts.common.git_archaeology import build_context as _git_build_context, extract_stats as _extract_stats
+from scripts.common.git_archaeology import (
+    build_context as _git_build_context,
+    extract_stats as _extract_stats,
+    get_repo_info as _get_repo_info,
+)
 from scripts.common.git_utils import clone_repo, detect_bitbucket_url
-from scripts.common.issue_analysis import run_analysis, write_analysis_output
+from scripts.common.issue_analysis import run_analysis, run_skill_analysis, write_analysis_output
 from scripts.common.jira_api import extract_jira_keys, resolve_jira_issues
-from scripts.common.skill_resolver import find_skill_for_query
+from scripts.common.skill_resolver import find_skill, find_skill_for_query
 from scripts.jira.query_issues import _build_jql
 from scripts.standup.slack_client import build_mrkdwn_blocks, notify
 
@@ -67,15 +71,15 @@ def _extract_text_from_doc(doc: dict | None, depth: int = 0) -> str:
     return " ".join(p for p in parts if p)
 
 
-def _try_git_archaeology(config: dict, keys: list[str]) -> str | None:
-    """Clone the Bitbucket repo and run git archaeology. Returns Markdown context or None.
+def _try_git_archaeology(config: dict, keys: list[str]) -> tuple[str | None, pathlib.Path | None]:
+    """Clone the Bitbucket repo and run git archaeology.
 
-    Follows the same HTTPS-first / SSH-fallback pattern as scripts/jira/clone_repo.py.
+    Returns (context_markdown, repo_path) or (None, None) on failure/missing config.
     """
     workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
     repo = config.get("BITBUCKET_REPO", "").strip()
     if not workspace or not repo:
-        return None
+        return None, None
     http_token = config.get("BITBUCKET_TOKEN", "").strip()
     ssh_key = config.get("SSH_PRIVATE_KEY", "").strip()
     dest = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp")) / "repo_cache"
@@ -89,28 +93,26 @@ def _try_git_archaeology(config: dict, keys: list[str]) -> str | None:
             clone_url = detect_bitbucket_url(workspace, repo, use_ssh=True)
             repo_path = clone_repo(clone_url, dest, depth=50, ssh_key=ssh_key)
         print(f"[analyze] running git archaeology on {repo_path}", flush=True)
-        return _git_build_context(repo_path, keys) or None
+        context = _git_build_context(repo_path, keys) or None
+        return context, repo_path
     except Exception as e:
         print(f"[analyze] WARNING: git archaeology failed: {e} — continuing without git context", flush=True)
-        return None
+        return None, None
 
 
-def _run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path: pathlib.Path) -> str:
-    """Invoke a skill's SKILL.md instructions for analysis via Claude."""
-    from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS
-    skill_md = skill_path.read_text(encoding="utf-8")
-    prompt = f"{skill_md}\n\n## Issue Context to Analyze\n\n{issues_text}"
-    workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
-    result = run_claude(
-        prompt,
-        working_dir=workspace,
-        model=config.get("AI_MODEL"),
-        max_turns=20,
-        log_file=workspace / "logs" / "analyze.log",
-        allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
-        system_prompt=SYSTEM_PROMPTS["plan"],
-    )
-    return result.output.strip()
+def _resolve_skill_for_analyze(
+    prompt: str | None, query: str | None, issues_text: str, config: dict
+) -> tuple[str, pathlib.Path] | None:
+    """Find the best skill for the analyze workflow.
+
+    Tries direct ygs-analyze lookup first (since this IS the analyze script),
+    then falls back to keyword-based matching with the user's prompt.
+    """
+    direct = find_skill("ygs-analyze", config)
+    if direct:
+        print(f"[analyze] found ygs-analyze skill directly at {direct}", flush=True)
+        return ("ygs-analyze", direct)
+    return find_skill_for_query(prompt or query or issues_text[:200], config)
 
 
 @click.command()
@@ -121,7 +123,10 @@ def _run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_p
 @click.option("--max", "max_results", default=10, type=int, show_default=True,
               help="Max issues to fetch when using --query")
 @click.option("--issue-type", default=None, help="issuetype filter when using --query")
-def main(issues: str | None, query: str | None, max_results: int, issue_type: str | None) -> None:
+@click.option("--prompt", "user_prompt", default=None,
+              help="Original user query for skill resolution (e.g. the full Slack message)")
+def main(issues: str | None, query: str | None, max_results: int, issue_type: str | None,
+         user_prompt: str | None) -> None:
     config = load_config(required=["JIRA_PROJECT", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_BASE_URL"])
     base_url = config["JIRA_BASE_URL"].rstrip("/")
 
@@ -151,17 +156,19 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     print(f"[analyze] analyzing {len(raw_issues)} issue(s) ...", flush=True)
     issues_text = _format_for_analysis(raw_issues, base_url)
 
-    skill_result = find_skill_for_query(query or issues_text[:200], config)
+    skill_result = _resolve_skill_for_analyze(user_prompt, query, issues_text, config)
     git_context: str | None = None
+    git_repo_path: pathlib.Path | None = None
 
     try:
         if skill_result:
             skill_name, skill_path = skill_result
             print(f"[analyze] using skill '{skill_name}' for analysis", flush=True)
-            analysis = _run_skill_analysis(config, issues_text, skill_name, pathlib.Path(skill_path))
-            print(f"::add-task-context SKILL_USED::{skill_name}", flush=True)
+            analysis = run_skill_analysis(config, issues_text, skill_name, skill_path)
         else:
-            git_context = _try_git_archaeology(config, [i.get("key") for i in raw_issues if i.get("key")])
+            git_context, git_repo_path = _try_git_archaeology(
+                config, [i.get("key") for i in raw_issues if i.get("key")]
+            )
             analysis = run_analysis(config, issues_text, git_context=git_context)
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr)
@@ -181,6 +188,16 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
         print(f"::add-task-context GIT_REPO::{repo_label}", flush=True)
         print(f"::add-task-context GIT_COMMITS_FOUND::{stats['commits_found']}", flush=True)
         print(f"::add-task-context GIT_HOT_FILES::{stats['hot_files']}", flush=True)
+        if git_repo_path:
+            repo_info = _get_repo_info(git_repo_path)
+            if repo_info.get("branch"):
+                print(f"::add-task-context GIT_BRANCH::{repo_info['branch']}", flush=True)
+            if repo_info.get("head_commit"):
+                print(f"::add-task-context GIT_HEAD_COMMIT::{repo_info['head_commit']}", flush=True)
+            if repo_info.get("head_author"):
+                print(f"::add-task-context GIT_HEAD_AUTHOR::{repo_info['head_author']}", flush=True)
+            if repo_info.get("head_date"):
+                print(f"::add-task-context GIT_HEAD_DATE::{repo_info['head_date']}", flush=True)
         parts = [f"cloned `{repo_label}`"] if repo_label else []
         if stats["commits_found"]:
             parts.append(f"{stats['commits_found']} related commits")
@@ -195,9 +212,18 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     print(full_text, flush=True)
     write_analysis_output(config, keys_list, analysis)
     notify(config, full_text, blocks=build_mrkdwn_blocks(full_text))
+    # Emit context markers LAST so they can't be overwritten by analysis text
+    # that may contain ::add-task-context lines from Claude Code's output.
     print(f"::add-task-context SELECTED_TRACKER::jira", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)
     print(f"::add-task-context ISSUE_COUNT::{len(raw_issues)}", flush=True)
+    if skill_result:
+        print(f"::add-task-context SKILL_USED::{skill_result[0]}", flush=True)
+        print(f"::add-task-context ANALYSIS_TYPE::skill", flush=True)
+    elif git_context:
+        print(f"::add-task-context ANALYSIS_TYPE::git-archaeology", flush=True)
+    else:
+        print(f"::add-task-context ANALYSIS_TYPE::basic", flush=True)
     sys.exit(0)
 
 

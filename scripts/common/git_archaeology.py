@@ -97,6 +97,17 @@ def extract_stats(context: str) -> dict:
     return {"commits_found": commits, "hot_files": len(hot_matches), "top_hot_file": top}
 
 
+def get_repo_info(repo_path: Path) -> dict:
+    """Return branch, HEAD commit, author, and date for a cloned repo."""
+    repo_path = Path(repo_path)
+    return {
+        "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_path),
+        "head_commit": _run_git(["log", "-1", "--format=%h"], repo_path),
+        "head_author": _run_git(["log", "-1", "--format=%an"], repo_path),
+        "head_date": _run_git(["log", "-1", "--format=%ad", "--date=short"], repo_path),
+    }
+
+
 def build_context(repo_path: Path, issue_keys: list[str], n: int = 10) -> str:
     """Return a Markdown block with git history context for the given issue keys.
 
