@@ -265,3 +265,91 @@ def test_gather_jira_deduplicates_prs_across_issues(mock_sprint, mock_prs, tmp_p
 
     assert result["pr_count"] == 1
     assert result["prs"][0]["id"] == "9999"
+
+
+# ---------------------------------------------------------------------------
+# priority + labels propagation
+# ---------------------------------------------------------------------------
+
+@patch("scripts.standup.gather_pr_queue._get_prs_for_issue")
+@patch("scripts.standup.gather_pr_queue._get_sprint_issues_with_ids")
+def test_priority_and_labels_propagated_via_jira_api(mock_sprint, mock_prs, tmp_path):
+    """priority and labels from Jira issue are included in the PR entry."""
+    mock_sprint.return_value = (
+        [
+            {
+                "key": "PROJ-100",
+                "id": "100001",
+                "summary": "do stuff",
+                "status": "In Review",
+                "priority": "High",
+                "labels": ["2609-release", "backend"],
+            }
+        ],
+        "Sprint 1",
+    )
+    mock_prs.return_value = [
+        {
+            "id": "111",
+            "name": "PROJ-100: Fix thing",
+            "status": "OPEN",
+            "url": "https://bitbucket.org/org/repo/pull-requests/111",
+            "author": {"name": "Alice"},
+            "reviewers": [],
+        }
+    ]
+    config = {
+        "JIRA_BASE_URL": "https://jira.example.com",
+        "JIRA_PROJECT": "PROJ",
+        "JIRA_EMAIL": "u",
+        "JIRA_API_TOKEN": "t",
+    }
+    result = _gather_jira(config, workspace_dir=tmp_path)
+
+    assert result["pr_count"] == 1
+    pr = result["prs"][0]
+    assert pr["priority"] == "High"
+    assert "2609-release" in pr["labels"]
+    assert "backend" in pr["labels"]
+
+
+@patch("scripts.standup.gather_pr_queue._get_prs_for_issue")
+def test_priority_and_labels_from_signals_json(mock_prs, tmp_path):
+    """priority and labels from signals.json fast-path are included in the PR entry."""
+    signals = {
+        "sprint": {"name": "Sprint 7"},
+        "issues": [
+            {
+                "key": "PROJ-200",
+                "id": "200001",
+                "summary": "Important fix",
+                "status": "In Review",
+                "priority": "Critical",
+                "labels": ["2609-release"],
+            }
+        ],
+    }
+    (tmp_path / "signals.json").write_text(json.dumps(signals))
+
+    mock_prs.return_value = [
+        {
+            "id": "222",
+            "name": "PROJ-200: critical fix",
+            "status": "OPEN",
+            "url": "https://bitbucket.org/org/repo/pull-requests/222",
+            "author": {"name": "Bob"},
+            "reviewers": [],
+        }
+    ]
+    config = {
+        "JIRA_BASE_URL": "https://jira.example.com",
+        "JIRA_PROJECT": "PROJ",
+        "JIRA_EMAIL": "u",
+        "JIRA_API_TOKEN": "t",
+    }
+    result = _gather_jira(config, workspace_dir=tmp_path)
+
+    assert result["pr_count"] == 1
+    pr = result["prs"][0]
+    assert pr["priority"] == "Critical"
+    assert "2609-release" in pr["labels"]

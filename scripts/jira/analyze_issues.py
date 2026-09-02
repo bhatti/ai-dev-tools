@@ -17,45 +17,20 @@ Optional env:
 Exit codes: 0=success, 2=no issues found, 1=error
 """
 
+import pathlib
 import re
 import sys
 
 import click
 
 from scripts.common.config import load_config
+from scripts.common.git_archaeology import build_context as _git_build_context, extract_stats as _extract_stats
+from scripts.common.git_utils import clone_repo, detect_bitbucket_url
 from scripts.common.issue_analysis import run_analysis, write_analysis_output
-from scripts.common.jira_api import get_issue, search_issues
+from scripts.common.jira_api import extract_jira_keys, resolve_jira_issues
+from scripts.common.skill_resolver import find_skill_for_query
 from scripts.jira.query_issues import _build_jql
 from scripts.standup.slack_client import build_mrkdwn_blocks, notify
-
-_JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
-_JIRA_URL_RE = re.compile(r"https?://[^/]+/browse/([A-Z][A-Z0-9_]+-\d+)")
-
-
-def _extract_keys(issues_arg: str) -> list[str]:
-    """Extract Jira issue keys from a comma-separated list of keys or URLs."""
-    keys = []
-    for part in issues_arg.split(","):
-        part = part.strip()
-        m = _JIRA_URL_RE.search(part)
-        if m:
-            keys.append(m.group(1))
-        else:
-            m2 = _JIRA_KEY_RE.match(part)
-            if m2:
-                keys.append(m2.group(1))
-    return keys
-
-
-def _fetch_issues_by_keys(config: dict, keys: list[str]) -> list[dict]:
-    issues = []
-    for key in keys:
-        raw = get_issue(config, key)
-        if raw:
-            issues.append(raw)
-        else:
-            print(f"[analyze] warning: issue {key} not found or no access", flush=True)
-    return issues
 
 
 def _format_for_analysis(issues: list[dict], base_url: str) -> str:
@@ -92,6 +67,52 @@ def _extract_text_from_doc(doc: dict | None, depth: int = 0) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _try_git_archaeology(config: dict, keys: list[str]) -> str | None:
+    """Clone the Bitbucket repo and run git archaeology. Returns Markdown context or None.
+
+    Follows the same HTTPS-first / SSH-fallback pattern as scripts/jira/clone_repo.py.
+    """
+    workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
+    repo = config.get("BITBUCKET_REPO", "").strip()
+    if not workspace or not repo:
+        return None
+    http_token = config.get("BITBUCKET_TOKEN", "").strip()
+    ssh_key = config.get("SSH_PRIVATE_KEY", "").strip()
+    dest = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp")) / "repo_cache"
+    try:
+        print(f"[analyze] cloning {workspace}/{repo} for git archaeology ...", flush=True)
+        if http_token:
+            http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+            clone_url = detect_bitbucket_url(workspace, repo, use_ssh=False)
+            repo_path = clone_repo(clone_url, dest, depth=50, http_token=http_token, http_username=http_username)
+        else:
+            clone_url = detect_bitbucket_url(workspace, repo, use_ssh=True)
+            repo_path = clone_repo(clone_url, dest, depth=50, ssh_key=ssh_key)
+        print(f"[analyze] running git archaeology on {repo_path}", flush=True)
+        return _git_build_context(repo_path, keys) or None
+    except Exception as e:
+        print(f"[analyze] WARNING: git archaeology failed: {e} — continuing without git context", flush=True)
+        return None
+
+
+def _run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path: pathlib.Path) -> str:
+    """Invoke a skill's SKILL.md instructions for analysis via Claude."""
+    from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS
+    skill_md = skill_path.read_text(encoding="utf-8")
+    prompt = f"{skill_md}\n\n## Issue Context to Analyze\n\n{issues_text}"
+    workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
+    result = run_claude(
+        prompt,
+        working_dir=workspace,
+        model=config.get("AI_MODEL"),
+        max_turns=20,
+        log_file=workspace / "logs" / "analyze.log",
+        allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
+        system_prompt=SYSTEM_PROMPTS["plan"],
+    )
+    return result.output.strip()
+
+
 @click.command()
 @click.option("--issues", default=None,
               help="Comma-separated Jira issue keys or URLs to analyze")
@@ -108,17 +129,17 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
         print("ERROR: provide --issues or --query", file=sys.stderr)
         sys.exit(1)
 
-    raw_issues: list[dict] = []
-    if issues:
-        keys = _extract_keys(issues)
-        if not keys:
-            print(f"ERROR: no valid Jira keys found in: {issues}", file=sys.stderr)
-            sys.exit(1)
-        raw_issues = _fetch_issues_by_keys(config, keys)
-    else:
-        jql = _build_jql(config, query or "", issue_type)
-        print(f"[analyze] JQL: {jql}", flush=True)
-        raw_issues = search_issues(config, jql, max_results=max_results)
+    if issues and not extract_jira_keys(issues):
+        print(f"ERROR: no valid Jira keys found in: {issues}", file=sys.stderr)
+        sys.exit(1)
+    raw_issues = resolve_jira_issues(
+        config,
+        query=query,
+        issues_arg=issues,
+        issue_type=issue_type,
+        max_results=max_results,
+        build_jql_fn=_build_jql,
+    )
 
     if not raw_issues:
         msg = "No Jira issues found to analyze."
@@ -130,15 +151,45 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     print(f"[analyze] analyzing {len(raw_issues)} issue(s) ...", flush=True)
     issues_text = _format_for_analysis(raw_issues, base_url)
 
+    skill_result = find_skill_for_query(query or issues_text[:200], config)
+    git_context: str | None = None
+
     try:
-        analysis = run_analysis(config, issues_text)
+        if skill_result:
+            skill_name, skill_path = skill_result
+            print(f"[analyze] using skill '{skill_name}' for analysis", flush=True)
+            analysis = _run_skill_analysis(config, issues_text, skill_name, pathlib.Path(skill_path))
+            print(f"::add-task-context SKILL_USED::{skill_name}", flush=True)
+        else:
+            git_context = _try_git_archaeology(config, [i.get("key") for i in raw_issues if i.get("key")])
+            analysis = run_analysis(config, issues_text, git_context=git_context)
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr)
         sys.exit(1)
 
+    print(f"::add-task-context GIT_ARCHAEOLOGY::{'yes' if git_context else 'no'}", flush=True)
+
     keys_list = [i.get("key", "?") for i in raw_issues]
     keys_str = ", ".join(keys_list)
-    header = f"*Analysis of {len(raw_issues)} issue(s): {keys_str}*\n\n"
+
+    git_header_line = ""
+    if git_context:
+        stats = _extract_stats(git_context)
+        ws = config.get("BITBUCKET_WORKSPACE", "")
+        repo = config.get("BITBUCKET_REPO", "")
+        repo_label = f"{ws}/{repo}" if ws and repo else repo or ws
+        print(f"::add-task-context GIT_REPO::{repo_label}", flush=True)
+        print(f"::add-task-context GIT_COMMITS_FOUND::{stats['commits_found']}", flush=True)
+        print(f"::add-task-context GIT_HOT_FILES::{stats['hot_files']}", flush=True)
+        parts = [f"cloned `{repo_label}`"] if repo_label else []
+        if stats["commits_found"]:
+            parts.append(f"{stats['commits_found']} related commits")
+        if stats["top_hot_file"]:
+            parts.append(f"hottest: `{stats['top_hot_file']}`")
+        if parts:
+            git_header_line = f"📂 *Git context:* {', '.join(parts)}\n"
+
+    header = f"*Analysis of {len(raw_issues)} issue(s): {keys_str}*\n{git_header_line}\n"
     full_text = header + analysis
 
     print(full_text, flush=True)

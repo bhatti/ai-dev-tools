@@ -154,6 +154,8 @@ HAIKU_OVERRIDES = {
 POLL_INTERVAL = 10   # seconds between status checks
 # PR_URL used for review/pr-comments tests — set via PR_URL env var
 PR_URL = os.environ.get("PR_URL", "")
+# ISSUE_ID: Jira issue key for analyze tests (e.g. PROJ-123) — set via env var, no hardcoded defaults
+ISSUE_ID = os.environ.get("ISSUE_ID", "")
 # GitHub org/repo for gh-query/gh-analyze tests — loaded from ~/.zshrc via _load_zshrc()
 GH_ORG = os.environ.get("GH_ORG", "bhatti")
 GH_REPO = os.environ.get("GH_REPO", "todo-sample")
@@ -190,7 +192,8 @@ ALL_TESTS: list[TestCase] = [
     TestCase(
         name="analyze",
         job_type="ai-jira-query",
-        params={"Query": "flaky tests", "Mode": "analyze", **HAIKU_OVERRIDES},
+        params={"Issues": ISSUE_ID, "Mode": "analyze", **HAIKU_OVERRIDES} if ISSUE_ID
+              else {"Query": "flaky tests", "Mode": "analyze", **HAIKU_OVERRIDES},
         task_type="query",
         expected_files=["reports/result.json", "reports/report.md", "reports/report.html"],
         timeout=600,
@@ -246,8 +249,9 @@ ALL_TESTS: list[TestCase] = [
         task_type="run",
         expected_files=["adhoc_result.json"],
         timeout=900,
+        # ygs-pr-queue uses disable-model-invocation: true — no Claude call, so SKILLS_INVOKED is not emitted.
         required_context_keys=["SKILL", "SKILL_LOADED", "YGS_SKILLS_COUNT",
-                                "YGS_SKILLS_INSTALLED", "YGS_SKILLS_REPO_COMMIT", "SKILLS_INVOKED"],
+                                "YGS_SKILLS_INSTALLED", "YGS_SKILLS_REPO_COMMIT"],
     ),
     TestCase(
         name="pr-comments",

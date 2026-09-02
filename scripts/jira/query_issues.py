@@ -25,7 +25,7 @@ import click
 import requests
 
 from scripts.common.config import load_config, get_workspace_dir
-from scripts.common.jira_api import _auth_headers, _base, search_issues
+from scripts.common.jira_api import _auth_headers, _base, resolve_jira_issues, search_issues
 from scripts.common.report_renderer import render_simple_html
 from scripts.standup.slack_client import build_issue_blocks, notify
 
@@ -161,10 +161,13 @@ def main(query: str, issue_type: str | None, max_results: int) -> None:
     config = load_config(required=["JIRA_PROJECT", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_BASE_URL"])
     base_url = config["JIRA_BASE_URL"].rstrip("/")
 
-    jql = _build_jql(config, query, issue_type)
-    print(f"[jira-query] JQL: {jql}", flush=True)
-
-    issues = search_issues(config, jql, max_results=max_results)
+    issues = resolve_jira_issues(
+        config,
+        query=query,
+        issue_type=issue_type,
+        max_results=max_results,
+        build_jql_fn=_build_jql,
+    )
     if not issues:
         msg = f"No open Jira issues matching *{query}*."
         print(msg)

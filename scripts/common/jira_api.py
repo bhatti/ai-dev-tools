@@ -10,11 +10,72 @@ Required env (passed via config dict):
 """
 
 import json
+import re
 import sys
 from base64 import b64encode
 from typing import Any
 
 import requests
+
+_JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
+_JIRA_URL_RE = re.compile(r"https?://[^/]+/browse/([A-Z][A-Z0-9_]+-\d+)")
+
+
+def extract_jira_keys(text: str) -> list[str]:
+    """Extract all Jira issue keys from free-form text (prose, comma lists, browse URLs).
+
+    Uses finditer so keys embedded anywhere in the text are found, e.g.
+    "give tldr for PROJ-123" → ["PROJ-123"].
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _JIRA_URL_RE.finditer(text):
+        k = m.group(1)
+        if k not in seen:
+            found.append(k)
+            seen.add(k)
+    for m in _JIRA_KEY_RE.finditer(text):
+        k = m.group(1)
+        if k not in seen:
+            found.append(k)
+            seen.add(k)
+    return found
+
+
+def resolve_jira_issues(
+    config: dict,
+    query: str | None = None,
+    issues_arg: str | None = None,
+    issue_type: str | None = None,
+    max_results: int = 20,
+    build_jql_fn=None,
+) -> list[dict]:
+    """Resolve Jira issues from a query or explicit key list.
+
+    Resolution order:
+    1. If ``issues_arg`` is given, extract issue keys and fetch each directly.
+    2. If ``query`` contains embedded issue keys, fetch them directly.
+    3. Otherwise call ``build_jql_fn(config, query, issue_type)`` and search.
+
+    ``build_jql_fn`` is injected to avoid a circular import with query_issues.py.
+    """
+    if issues_arg:
+        keys = extract_jira_keys(issues_arg)
+        if keys:
+            return [i for i in (get_issue(config, k) for k in keys) if i]
+
+    if query:
+        inline_keys = extract_jira_keys(query)
+        if inline_keys:
+            print(f"[jira] found issue key(s) in text: {inline_keys}", flush=True)
+            return [i for i in (get_issue(config, k) for k in inline_keys) if i]
+
+    if build_jql_fn and (query or issue_type):
+        jql = build_jql_fn(config, query or "", issue_type)
+        print(f"[jira] JQL: {jql}", flush=True)
+        return search_issues(config, jql, max_results=max_results)
+
+    return []
 
 
 def _auth_headers(config: dict) -> dict[str, str]:

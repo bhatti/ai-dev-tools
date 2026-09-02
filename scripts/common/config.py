@@ -81,6 +81,11 @@ DEFAULTS: dict[str, str] = {
 
 # Short alias → canonical name.
 # If the canonical name is already set, it takes precedence.
+# Two alias groups:
+#   1. Short env var prefixes (BB_*, GITHUB_*) → canonical long forms
+#   2. Formicary org config CamelCase names → canonical UPPER_SNAKE env var names
+#      Formicary normally injects org config via YAML templates, but these aliases let
+#      scripts handle CamelCase values when passed directly as params or config dicts.
 _ALIASES: list[tuple[str, str]] = [
     # GitHub: GITHUB_* → GH_*
     ("GITHUB_TOKEN",     "GH_TOKEN"),
@@ -91,6 +96,46 @@ _ALIASES: list[tuple[str, str]] = [
     ("BB_USERNAME",      "BITBUCKET_USERNAME"),
     ("BB_WORKSPACE",     "BITBUCKET_WORKSPACE"),
     ("BB_REPO",          "BITBUCKET_REPO"),
+    # Formicary org config CamelCase → canonical env vars
+    ("BitbucketToken",              "BITBUCKET_TOKEN"),
+    ("BitbucketUsername",           "BITBUCKET_USERNAME"),
+    ("BitbucketWorkspace",          "BITBUCKET_WORKSPACE"),
+    ("BitbucketRepo",               "BITBUCKET_REPO"),
+    ("GitHubToken",                 "GH_TOKEN"),
+    ("GitHubOrg",                   "GH_ORG"),
+    ("GitHubRepo",                  "GH_REPO"),
+    ("JiraUrl",                     "JIRA_BASE_URL"),
+    ("JiraProject",                 "JIRA_PROJECT"),
+    ("JiraSpace",                   "JIRA_SPACE"),
+    ("JiraTeamField",               "JIRA_TEAM_FIELD"),
+    ("JiraBoards",                  "JIRA_BOARDS"),
+    ("JiraEmail",                   "JIRA_EMAIL"),
+    ("JiraApiToken",                "JIRA_API_TOKEN"),
+    ("SlackToken",                  "SLACK_BOT_TOKEN"),
+    ("SlackChannel",                "SLACK_CHANNEL"),
+    ("SlackThreadTs",               "SLACK_THREAD_TS"),
+    ("DefaultTracker",              "DEFAULT_TRACKER"),
+    ("StandupTeamMembers",          "STANDUP_TEAM_MEMBERS"),
+    ("StandupLookbackHours",        "STANDUP_LOOKBACK_HOURS"),
+    ("StandupStaleDays",            "STANDUP_STALE_DAYS"),
+    ("ClaudeUseBedrock",            "CLAUDE_CODE_USE_BEDROCK"),
+    ("ClaudeSkipBedrockAuth",       "CLAUDE_CODE_SKIP_BEDROCK_AUTH"),
+    ("AnthropicBedrockBaseUrl",     "ANTHROPIC_BEDROCK_BASE_URL"),
+    ("AnthropicSonnetModel",        "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+    ("AnthropicOpusModel",          "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+    ("AnthropicHaikuModel",         "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+    ("AnthropicComplexityLowModel", "ANTHROPIC_COMPLEXITY_LOW_MODEL"),
+    ("AnthropicComplexityHighModel","ANTHROPIC_COMPLEXITY_HIGH_MODEL"),
+    ("MaxClaudeProcessTimeout",     "MAX_CLAUDE_PROCESS_TIMEOUT"),
+    ("ExtraSkillsRepos",            "EXTRA_SKILLS_REPOS"),
+    ("GitUserName",                 "GIT_USER_NAME"),
+    ("GitUserEmail",                "GIT_USER_EMAIL"),
+    ("FormicaryUrl",                "FORMICARY_URL"),
+    ("FormicaryPublicURL",          "FORMICARY_PUBLIC_URL"),
+    ("CodebaseDir",                 "CODEBASE_DIR"),
+    ("CodebaseRepoUrl",             "CODEBASE_REPO_URL"),
+    ("GitBranch",                   "GIT_BRANCH"),
+    ("AiModel",                     "AI_MODEL_OVERRIDE"),
 ]
 
 

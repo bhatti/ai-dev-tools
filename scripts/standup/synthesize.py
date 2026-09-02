@@ -73,6 +73,9 @@ STRICT DATA RULES:
 • Use ONLY data from signals.json — never fetch or invent additional issues or PRs.
 • Report on all sprint assignees — do NOT add notes about team roster or configuration files.
 • Only show PRs from open_prs[] in signals.json. Never add aged/org-wide/unrelated PRs.
+• NO hedging language: never write "likely", "probably", "might be", "seems to be", "appears to". State facts or say "no data".
+• Surface priority and release labels: show Blocker/Critical/High priority in the issue description; include release-tracking labels (e.g. "2609-release") when present. Skip Medium/Low.
+• Slack signals are optional: if slack_messages in signals.json is empty, omit ALL Slack references — do NOT write "No Slack activity detected" or ask people to post.
 
 ## Standup Skill Instructions
 
@@ -101,6 +104,9 @@ STRICT DATA RULES:
 • Use ONLY data from signals.json — never fetch or invent additional issues or PRs.
 • Report on all sprint assignees — do NOT add notes about team roster or configuration files.
 • Only show PRs from open_prs[] in signals.json. Never add aged/org-wide/unrelated PRs.
+• NO hedging language: never write "likely", "probably", "might be". State facts or say "no data".
+• Show Blocker/Critical/High priority in issue descriptions; include release labels when present.
+• Slack signals are optional: if slack_messages in signals.json is empty, omit ALL Slack references — do NOT write "No Slack activity detected" or ask people to post.
 
 ## Instructions
 

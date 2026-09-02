@@ -364,3 +364,36 @@ def test_build_pr_blocks_with_prs():
     assert "pull/42" in all_text
     # Approved PR should have approved-by info in fields
     assert "Bob" in all_fields
+
+
+def test_build_pr_blocks_shows_priority_and_labels():
+    """High priority shows 🟠 emoji; labels appear in the reviewer field."""
+    pr_data = {
+        "sprint": "Sprint 5",
+        "pr_count": 1,
+        "prs": [
+            {
+                "id": "77",
+                "jira_key": "PROJ-300",
+                "title": "High prio fix",
+                "jira_summary": "Critical path fix",
+                "url": "https://github.com/org/repo/pull/77",
+                "jira_url": "https://org.atlassian.net/browse/PROJ-300",
+                "author": "Eve",
+                "age_days": 2,
+                "approved_by": [],
+                "reviewers": ["Frank"],
+                "priority": "High",
+                "labels": ["2609-release", "backend"],
+            }
+        ],
+    }
+    blocks = build_pr_blocks("PR Queue", pr_data)
+    all_text = " ".join(b.get("text", {}).get("text", "") for b in blocks if b["type"] == "section")
+    all_fields = " ".join(
+        f.get("text", "") for b in blocks if b["type"] == "section"
+        for f in (b.get("fields") or [])
+    )
+    assert "🟠" in all_text
+    assert "`2609-release`" in all_fields
+    assert "`backend`" in all_fields

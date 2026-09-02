@@ -202,3 +202,85 @@ def test_load_config_no_dotenv_is_fine(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # empty dir, no .env
     config = load_config()
     assert "WORKSPACE_DIR" in config
+
+
+# --- CamelCase org config aliases ---
+
+def test_camelcase_jira_aliases(monkeypatch):
+    monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+    monkeypatch.delenv("JIRA_PROJECT", raising=False)
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+    monkeypatch.setenv("JiraUrl", "https://company.atlassian.net")
+    monkeypatch.setenv("JiraProject", "PROJ")
+    monkeypatch.setenv("JiraEmail", "user@example.com")
+    monkeypatch.setenv("JiraApiToken", "secret")
+    config = load_config()
+    assert config["JIRA_BASE_URL"] == "https://company.atlassian.net"
+    assert config["JIRA_PROJECT"] == "PROJ"
+    assert config["JIRA_EMAIL"] == "user@example.com"
+    assert config["JIRA_API_TOKEN"] == "secret"
+
+
+def test_camelcase_bitbucket_aliases(monkeypatch):
+    monkeypatch.delenv("BITBUCKET_WORKSPACE", raising=False)
+    monkeypatch.delenv("BITBUCKET_REPO", raising=False)
+    monkeypatch.delenv("BITBUCKET_TOKEN", raising=False)
+    monkeypatch.setenv("BitbucketWorkspace", "myworkspace")
+    monkeypatch.setenv("BitbucketRepo", "myrepo")
+    monkeypatch.setenv("BitbucketToken", "ATATT_fake")
+    config = load_config()
+    assert config["BITBUCKET_WORKSPACE"] == "myworkspace"
+    assert config["BITBUCKET_REPO"] == "myrepo"
+    assert config["BITBUCKET_TOKEN"] == "ATATT_fake"
+
+
+def test_camelcase_github_aliases(monkeypatch):
+    monkeypatch.delenv("GH_ORG", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)  # clear existing alias too
+    monkeypatch.setenv("GitHubOrg", "myorg")
+    monkeypatch.setenv("GitHubRepo", "myrepo")
+    monkeypatch.setenv("GitHubToken", "ghp_fake")
+    config = load_config()
+    assert config["GH_ORG"] == "myorg"
+    assert config["GH_REPO"] == "myrepo"
+    assert config["GH_TOKEN"] == "ghp_fake"
+
+
+def test_camelcase_slack_aliases(monkeypatch):
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_CHANNEL", raising=False)
+    monkeypatch.delenv("SLACK_THREAD_TS", raising=False)
+    monkeypatch.setenv("SlackToken", "xoxb-fake")
+    monkeypatch.setenv("SlackChannel", "standup")
+    monkeypatch.setenv("SlackThreadTs", "1234567890.123")
+    config = load_config()
+    assert config["SLACK_BOT_TOKEN"] == "xoxb-fake"
+    assert config["SLACK_CHANNEL"] == "standup"
+    assert config["SLACK_THREAD_TS"] == "1234567890.123"
+
+
+def test_camelcase_claude_aliases(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_USE_BEDROCK", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SKIP_BEDROCK_AUTH", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
+    monkeypatch.delenv("EXTRA_SKILLS_REPOS", raising=False)
+    monkeypatch.setenv("ClaudeUseBedrock", "1")
+    monkeypatch.setenv("ClaudeSkipBedrockAuth", "1")
+    monkeypatch.setenv("AnthropicBedrockBaseUrl", "http://ai/bedrock")
+    monkeypatch.setenv("ExtraSkillsRepos", "/opt/skills")
+    config = load_config()
+    assert config["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    assert config["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] == "1"
+    assert config["ANTHROPIC_BEDROCK_BASE_URL"] == "http://ai/bedrock"
+    assert config["EXTRA_SKILLS_REPOS"] == "/opt/skills"
+
+
+def test_camelcase_canonical_wins(monkeypatch):
+    """UPPER_SNAKE canonical always wins over CamelCase alias."""
+    monkeypatch.setenv("JIRA_BASE_URL", "https://canonical.atlassian.net")
+    monkeypatch.setenv("JiraUrl", "https://alias.atlassian.net")
+    config = load_config()
+    assert config["JIRA_BASE_URL"] == "https://canonical.atlassian.net"

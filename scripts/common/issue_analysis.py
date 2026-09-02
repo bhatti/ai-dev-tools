@@ -29,12 +29,14 @@ Be concise. Use bullet points. Focus on actionable guidance.
 """
 
 
-def run_analysis(config: dict, issues_text: str) -> str:
+def run_analysis(config: dict, issues_text: str, git_context: str | None = None) -> str:
     """Run Claude on pre-formatted issues text; return the analysis string."""
     workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
     log_dir = workspace / "logs"
     prompt_template = config.get("ANALYSIS_PROMPT") or DEFAULT_ANALYSIS_PROMPT
     prompt = prompt_template.format(issues_text=issues_text)
+    if git_context:
+        prompt += f"\n\n{git_context}"
     result = run_claude(
         prompt,
         working_dir=workspace,

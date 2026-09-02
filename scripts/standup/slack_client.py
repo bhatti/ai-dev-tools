@@ -239,6 +239,9 @@ def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
     return blocks
 
 
+_PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
+
+
 def build_pr_blocks(title: str, pr_data: dict) -> list:
     """Build Block Kit blocks from a pr_queue.json dict.
 
@@ -302,6 +305,10 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
             jira_link = f"<{jira_url}|{jira_key}>" if jira_url and jira_key else jira_key
             pr_link = f"<{pr_url}|PR #{pr_num}>" if pr_url and pr_num else f"PR #{pr_num}"
 
+            priority = (pr.get("priority") or "").strip()
+            priority_emoji = _PR_PRIORITY_EMOJI.get(priority.lower(), "")
+            labels = [l for l in (pr.get("labels") or []) if isinstance(l, str) and l and len(l) <= 25][:3]
+
             reviewer_info = ""
             if approved_by:
                 reviewer_info += f"approved-by: {', '.join('@' + n.split()[0] for n in approved_by[:3])}"
@@ -311,8 +318,10 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
                 reviewer_info += f"pending: {', '.join('@' + n.split()[0] for n in pending[:4])}"
             if not reviewer_info:
                 reviewer_info = "no reviewers"
+            if labels:
+                reviewer_info += f"  •  {' '.join(f'`{l}`' for l in labels)}"
 
-            line = f"{jira_link}  {pr_link}  @{author} ({days}d)  {title_text}"
+            line = f"{priority_emoji}{jira_link}  {pr_link}  @{author} ({days}d)  {title_text}"
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},

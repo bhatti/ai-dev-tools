@@ -104,6 +104,8 @@ def _get_sprint_issues_with_ids(config: dict, workspace_dir: Path | None = None)
                     "id": numeric_id,
                     "summary": (fields.get("summary") or "")[:80],
                     "status": ((fields.get("status") or {}).get("name") or ""),
+                    "priority": ((fields.get("priority") or {}).get("name") or ""),
+                    "labels": fields.get("labels") or [],
                 })
 
     if not issues:
@@ -118,6 +120,8 @@ def _get_sprint_issues_with_ids(config: dict, workspace_dir: Path | None = None)
                     "id": numeric_id,
                     "summary": (fields.get("summary") or "")[:80],
                     "status": ((fields.get("status") or {}).get("name") or ""),
+                    "priority": ((fields.get("priority") or {}).get("name") or ""),
+                    "labels": fields.get("labels") or [],
                 })
 
     return issues, sprint_name
@@ -196,6 +200,8 @@ def _build_pr_entry_from_devstatus(pr: dict, issue: dict, config: dict) -> dict:
         "jira_key": issue_key,
         "jira_summary": issue.get("summary", ""),
         "jira_status": issue.get("status", ""),
+        "priority": issue.get("priority", ""),
+        "labels": issue.get("labels") or [],
         "reviewers": pending_reviewers,
         "approved_by": approved_by,
         "changes_requested_by": [],
@@ -318,6 +324,8 @@ def _gather_jira(config: dict, workspace_dir: Path | None = None) -> dict:
             "jira_key": issue_key,
             "jira_summary": matched_issue.get("summary", ""),
             "jira_status": matched_issue.get("status", ""),
+            "priority": matched_issue.get("priority", ""),
+            "labels": matched_issue.get("labels") or [],
             "reviewers": pr.get("reviewers", []),
             "approved_by": [],
             "changes_requested_by": [],
@@ -377,6 +385,8 @@ def _gather_github(config: dict) -> dict:
             "jira_key": jira_key,
             "jira_summary": "",
             "jira_status": "",
+            "priority": "",
+            "labels": [],
             "reviewers": pending_reviewers,
             "approved_by": approved_by,
             "changes_requested_by": changes_requested_by,

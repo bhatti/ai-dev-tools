@@ -16,6 +16,7 @@ import sys
 import click
 
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.common.gh_api import resolve_github_issues
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.shell import run_cmd as _run
 from scripts.standup.slack_client import build_gh_issue_blocks, notify
@@ -96,7 +97,13 @@ def main(query: str, label: str | None, max_results: int) -> None:
     config = load_config(required=["GH_ORG", "GH_REPO", "GH_TOKEN"])
 
     print(f"[gh-query] searching: query={query!r} label={label}", flush=True)
-    issues = _search_issues(config, query, label, max_results)
+    issues = resolve_github_issues(
+        config,
+        query=query,
+        label=label,
+        max_results=max_results,
+        search_fn=_search_issues,
+    )
 
     if not issues:
         msg = f"No open GitHub issues matching *{query}*."

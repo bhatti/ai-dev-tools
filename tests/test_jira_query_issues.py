@@ -94,7 +94,7 @@ def test_format_issue_unassigned():
     assert "Unassigned" in line
 
 
-@patch("scripts.jira.query_issues.search_issues")
+@patch("scripts.common.jira_api.search_issues")
 @patch("scripts.jira.query_issues.notify")
 def test_main_posts_results(mock_notify, mock_search):
     mock_search.return_value = [
@@ -124,7 +124,7 @@ def test_main_posts_results(mock_notify, mock_search):
     assert "Flaky Test" in text
 
 
-@patch("scripts.jira.query_issues.search_issues", return_value=[])
+@patch("scripts.common.jira_api.search_issues", return_value=[])
 @patch("scripts.jira.query_issues.notify")
 def test_main_no_results(mock_notify, mock_search):
     runner = CliRunner()

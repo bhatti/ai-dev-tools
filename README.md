@@ -251,6 +251,55 @@ The poll step only responds to PR comments that start with `ai-bot` (case-insens
 
 ---
 
+## Issue Analysis with Git Archaeology
+
+The `jira-analyze` (`ai-jira-query` Mode=analyze) and `gh-analyze` (`ai-jira-query` Mode=analyze, DefaultTracker=github) workflows go beyond reading the issue text — they clone the associated repository and run a git history pass to surface root-cause signals.
+
+### What it does
+
+When a Bitbucket repo (`BITBUCKET_WORKSPACE` + `BITBUCKET_REPO`) or GitHub repo (`GH_ORG` + `GH_REPO`) is configured, the analyze step:
+
+1. **Clones the repo** at depth 50 into `workspace/repo_cache/` using HTTPS (token) or SSH fallback — matching the same credential pattern as the implement/clone steps
+2. **Finds related commits** — `git log --grep=<issue-key>` for the last 10 matching commits
+3. **Ranks hot files** — change-count per file across the last 50 commits; top 5 shown with a "hot file" marker when change-count ≥ 10
+4. **Shows recent hot-file changes** — last 10 commits touching the three most-changed files
+
+The git context is appended to the Claude prompt as a Markdown block and capped at 3000 characters to keep prompts a reasonable size.
+
+### Skill matching
+
+Before running plain analysis + git archaeology, the workflow checks whether any loaded skill matches the issue query:
+
+- **Search order**: `$CODEBASE_DIR/.claude/skills/` → `EXTRA_SKILLS_REPOS` paths → `~/.claude/skills/` → `~/.claude/skills/you-got-skills/skills/`
+- **Matching**: keyword overlap (score ≥ 2) against each SKILL.md's `name`, `description`, `keywords` frontmatter, and first 600 chars of body
+- **If matched**: the skill's SKILL.md instructions are prepended to the prompt and Claude is given full tool access (Bash, Read, Write, Edit) with `max_turns=20` — enabling active investigation (e.g., checking out the repo, running a flaky test N times, checking coverage)
+- **If no match**: falls back to git archaeology + standard analysis
+
+Task context keys emitted: `SKILL_USED::<name>` (when a skill is invoked), `GIT_ARCHAEOLOGY::yes|no`.
+
+### Config variables
+
+| Variable | CamelCase alias | Purpose |
+|----------|-----------------|---------|
+| `BITBUCKET_WORKSPACE` | `BitbucketWorkspace` | Bitbucket workspace/org |
+| `BITBUCKET_REPO` | `BitbucketRepo` | Bitbucket repo name |
+| `BITBUCKET_TOKEN` | `BitbucketToken` | ATATT token (HTTPS clone + REST API) |
+| `GH_ORG` | `GitHubOrg` | GitHub organization |
+| `GH_REPO` | `GitHubRepo` | GitHub repo name |
+| `GH_TOKEN` | `GitHubToken` | GitHub personal access token |
+| `EXTRA_SKILLS_REPOS` | `ExtraSkillsRepos` | Extra skill repos (JSON array or colon-separated paths) |
+
+All CamelCase aliases match the Formicary org config property names — set them once in the org config and they apply to all workflows without any YAML changes.
+
+### Graceful degradation
+
+- No repo configured → plain analysis only (no git context)
+- Clone fails → warning printed, analysis continues without git context
+- Git commands time out or fail → empty string returned, analysis continues
+- No skill match → standard analysis
+
+---
+
 ## PR Review Workflow
 
 The review pipeline runs Claude against a PR diff using the `ygs-review-pr` skill (or any other you-got-skills skill), posts findings as a Slack Block Kit message with **Approve** / **Request Changes** buttons, then pauses until a human clicks one.
