@@ -47,8 +47,48 @@ def _load_skill_md(skill: str) -> str | None:
         candidate = base / skill / "SKILL.md"
         if candidate.exists():
             print(f"[review] skill path: {candidate}", flush=True)
-            return candidate.read_text(encoding="utf-8")
+            content = candidate.read_text(encoding="utf-8")
+            return _inline_shared_refs(content)
     return None
+
+
+def _inline_shared_refs(content: str) -> str:
+    """Resolve 'read `~/.claude/skills/.../shared/<name>.md`' references and inline them.
+
+    The ygs-review-pr skill tells Claude to "read shared/review-scaffold.md" etc.
+    Claude may skip these reads due to token-efficiency rules. Inlining ensures
+    the full review protocol is always present in the prompt.
+    """
+    import re as _re
+    shared_dirs = [
+        Path.home() / ".claude" / "skills" / "you-got-skills" / "skills" / "shared",
+        Path.home() / ".claude" / "skills" / "shared",
+    ]
+    pattern = _re.compile(
+        r'[Rr]ead\s+`[^`]*?/?shared/([a-z0-9_-]+\.md)`[^.\n]*\.?'
+    )
+    inlined: set[str] = set()
+
+    def _replace(match: _re.Match) -> str:
+        filename = match.group(1)
+        if filename in inlined:
+            return f"(See inlined {filename} above.)"
+        for d in shared_dirs:
+            path = d / filename
+            if path.exists():
+                text = path.read_text(encoding="utf-8").strip()
+                inlined.add(filename)
+                print(f"[review] inlined shared/{filename} ({len(text)} chars)", flush=True)
+                return f"\n\n<!-- inlined from shared/{filename} -->\n{text}\n"
+        return match.group(0)
+
+    resolved = pattern.sub(_replace, content)
+    # Second pass: inlined files may reference other shared files (e.g. review-scaffold → ownership-principles)
+    if inlined:
+        resolved = pattern.sub(_replace, resolved)
+    if inlined:
+        print(f"[review] inlined {len(inlined)} shared file(s): {sorted(inlined)}", flush=True)
+    return resolved
 
 
 REVIEW_PROMPT_TEMPLATE = """\

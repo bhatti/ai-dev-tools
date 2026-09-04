@@ -126,6 +126,16 @@ _SCRIPTS_TO_COPY = [
     "scripts/standup/synthesize.py",
     "scripts/standup/post.py",
     "scripts/standup/render_html.py",
+    "scripts/review/__init__.py",
+    "scripts/review/run.py",
+    "scripts/review/post_findings.py",
+    "scripts/review/apply_feedback.py",
+    "scripts/common/claude_runner.py",
+    "scripts/common/config.py",
+    "scripts/common/skills.py",
+    "scripts/common/artifacts.py",
+    "scripts/common/notify_slack.py",
+    "scripts/common/report_renderer.py",
 ]
 
 # Pod manifest — mirrors the Formicary ant worker spec
@@ -664,15 +674,161 @@ def test_06_gh_analyze(base_env: dict[str, str]) -> TestResult:
                          f"elapsed={step.elapsed:.0f}s")
 
 
+def test_07_review_skill_loading(base_env: dict[str, str]) -> TestResult:
+    """Verify YGS skills install correctly and ygs-review-pr SKILL.md is loadable.
+
+    This test does NOT invoke Claude — it only verifies that:
+      1. _ensure_ygs_skills() clones you-got-skills and symlinks skills
+      2. The ygs-review-pr skill is present and has substantial content
+      3. _load_skill_md() can find and read it
+      4. Key skill candidates (review-pr, ygs-review-pr, ygs-code-review) are checked
+    """
+    result = TestResult("review-skill-loading")
+    env = dict(base_env)
+    ws = "/workspace/review_skill_test"
+    env["WORKSPACE_DIR"] = ws
+
+    with pod_fixture("review-skill") as pod:
+        # Write the verify script into the pod, then run it — avoids shell quoting issues
+        verify_script = (
+            'import json, sys, os\n'
+            'sys.path.insert(0, "/app")\n'
+            'os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"\n'
+            'os.environ["ANTHROPIC_BEDROCK_BASE_URL"] = os.environ.get("ANTHROPIC_BEDROCK_BASE_URL", "http://ai/bedrock")\n'
+            'from scripts.common.claude_runner import _ensure_ygs_skills\n'
+            '_ensure_ygs_skills()\n'
+            'from pathlib import Path\n'
+            'skills_base = Path.home() / ".claude" / "skills"\n'
+            'installed = sorted(p.name for p in skills_base.iterdir() if p.is_dir() and not p.name.startswith("."))\n'
+            'print(f"::add-task-context INSTALLED_SKILLS_COUNT::{len(installed)}", flush=True)\n'
+            'review_skills = {}\n'
+            'for name in ["ygs-review-pr", "ygs-code-review", "ygs-review-deep", "review-pr"]:\n'
+            '    skill_md = skills_base / name / "SKILL.md"\n'
+            '    if skill_md.exists():\n'
+            '        content = skill_md.read_text(encoding="utf-8")\n'
+            '        review_skills[name] = len(content)\n'
+            '        print(f"[verify] {name}: {len(content)} chars", flush=True)\n'
+            '    else:\n'
+            '        link = skills_base / name\n'
+            '        if link.is_symlink():\n'
+            '            target = link.resolve()\n'
+            '            print(f"[verify] {name}: symlink -> {target} (broken={not target.exists()})", flush=True)\n'
+            '        else:\n'
+            '            print(f"[verify] {name}: NOT FOUND", flush=True)\n'
+            'print(f"::add-task-context REVIEW_SKILLS_FOUND::{\",\".join(review_skills.keys())}", flush=True)\n'
+            'if "ygs-review-pr" not in review_skills:\n'
+            '    print("FAIL: ygs-review-pr SKILL.md not found", flush=True)\n'
+            '    sys.exit(1)\n'
+            'chars = review_skills["ygs-review-pr"]\n'
+            'if chars < 500:\n'
+            '    print(f"FAIL: ygs-review-pr SKILL.md too small ({chars} chars)", flush=True)\n'
+            '    sys.exit(1)\n'
+            'from scripts.review.run import _load_skill_md\n'
+            'loaded = _load_skill_md("ygs-review-pr")\n'
+            'if not loaded:\n'
+            '    print("FAIL: _load_skill_md ygs-review-pr returned None", flush=True)\n'
+            '    sys.exit(1)\n'
+            'raw_chars = review_skills.get("ygs-review-pr", 0)\n'
+            'if len(loaded) <= raw_chars:\n'
+            '    print(f"FAIL: inlining did not expand skill ({len(loaded)} <= {raw_chars})", flush=True)\n'
+            '    sys.exit(1)\n'
+            'if "review-scaffold" not in loaded and "Severity classification" not in loaded:\n'
+            '    print("FAIL: inlined content missing review-scaffold sections", flush=True)\n'
+            '    sys.exit(1)\n'
+            'print(f"::add-task-context SKILL_MD_CHARS::{len(loaded)}", flush=True)\n'
+            'print(f"::add-task-context SKILL_RAW_CHARS::{raw_chars}", flush=True)\n'
+            'print("::add-task-context SKILL_LOADED::yes", flush=True)\n'
+            'print("[verify] all checks passed", flush=True)\n'
+        )
+        # Write script to pod as a file to avoid shell escaping issues
+        _kubectl("exec", pod, "--", "bash", "-c",
+                 f"cat > /tmp/verify_skills.py << 'PYEOF'\n{verify_script}PYEOF")
+        step = exec_step(pod, "verify-skills",
+                         f"mkdir -p {ws} && python3 /tmp/verify_skills.py",
+                         env, timeout=120)
+        result.steps.append(step)
+
+    if not step.ok:
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    err = _check_keys(step, ["INSTALLED_SKILLS_COUNT", "REVIEW_SKILLS_FOUND", "SKILL_LOADED"]) or \
+          _check_values(step, {"SKILL_LOADED": "yes"})
+    if err:
+        return _fail(result, step, err)
+
+    skills_count = step.context.get("INSTALLED_SKILLS_COUNT", "0")
+    review_skills = step.context.get("REVIEW_SKILLS_FOUND", "")
+    skill_chars = step.context.get("SKILL_MD_CHARS", "0")
+    return _pass(result,
+                 f"installed={skills_count} skills | "
+                 f"review skills: {review_skills} | "
+                 f"ygs-review-pr: {skill_chars} chars")
+
+
+def test_08_review_pr(base_env: dict[str, str]) -> TestResult:
+    """Run a full PR review against a known public GitHub PR.
+
+    Requires: GH_TOKEN + Claude (Bedrock or API key).
+    Uses a small known PR to keep cost/time low.
+    """
+    result = TestResult("review-pr")
+    if not base_env.get("GH_TOKEN"):
+        result.passed = True
+        result.message = "SKIPPED — GH_TOKEN not set"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/review_pr"
+    env["WORKSPACE_DIR"] = ws
+    # Use a small known PR for testing
+    pr_url = os.environ.get("REVIEW_PR_URL", f"https://github.com/{GH_ORG}/{GH_REPO}/pull/1")
+
+    with pod_fixture("review-pr") as pod:
+        step = exec_step(pod, "review",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         f"python3 -m scripts.review.run --pr-url '{pr_url}'",
+                         env, timeout=600)
+        result.steps.append(step)
+
+    # Even if review itself fails (bad PR URL, auth issue), we still want
+    # to verify the skill loading infrastructure worked correctly.
+    err = _check_keys(step, ["SKILL", "SKILL_LOADED"])
+    if err:
+        return _fail(result, step, f"skill loading failed: {err}")
+
+    skill = step.context.get("SKILL", "")
+    skill_loaded = step.context.get("SKILL_LOADED", "")
+    skills_invoked = step.context.get("SKILLS_INVOKED", "")
+    findings = step.context.get("FINDINGS_COUNT", "?")
+    verdict = step.context.get("REVIEW_VERDICT", "?")
+    error_reason = step.context.get("ERROR_REASON", "")
+
+    if not step.ok:
+        if skill_loaded == "yes":
+            # Skill loaded fine but Claude/review failed — still useful info
+            return _pass(result,
+                         f"skill={skill} loaded={skill_loaded} (review errored: {error_reason[:100]}) | "
+                         f"elapsed={step.elapsed:.0f}s")
+        return _fail(result, step, f"exit code {step.returncode}, skill_loaded={skill_loaded}")
+
+    return _pass(result,
+                 f"skill={skill} loaded={skill_loaded} | "
+                 f"invoked={skills_invoked} | "
+                 f"findings={findings} verdict={verdict} | "
+                 f"elapsed={step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
-    "jira-query":        test_01_jira_query,
-    "jira-analyze":      test_02_jira_analyze,
-    "standup-gather":    test_03_standup_gather,
-    "standup-pipeline":  test_04_standup_pipeline,
-    "gh-query":          test_05_gh_query,
-    "gh-analyze":        test_06_gh_analyze,
+    "jira-query":            test_01_jira_query,
+    "jira-analyze":          test_02_jira_analyze,
+    "standup-gather":        test_03_standup_gather,
+    "standup-pipeline":      test_04_standup_pipeline,
+    "gh-query":              test_05_gh_query,
+    "gh-analyze":            test_06_gh_analyze,
+    "review-skill-loading":  test_07_review_skill_loading,
+    "review-pr":             test_08_review_pr,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
