@@ -29,11 +29,14 @@ Be concise. Use bullet points. Focus on actionable guidance.
 """
 
 
-def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path) -> str:
+def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path,
+                       git_context: str | None = None) -> str:
     """Invoke a skill's SKILL.md instructions for analysis via Claude. DRY shared version."""
     workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
     skill_md = pathlib.Path(skill_path).read_text(encoding="utf-8")
     prompt = f"{skill_md}\n\n## Issue Context to Analyze\n\n{issues_text}"
+    if git_context:
+        prompt += f"\n\n## Git Repository Context\n\n{git_context}"
     result = run_claude(
         prompt,
         working_dir=workspace,

@@ -81,6 +81,9 @@ def clone_repo(
         # No GIT_SSH_COMMAND — pure HTTPS path
     elif ssh_key:
         git_url = url
+        # Normalize: env vars serialized via JSON encode newlines as two-char \n;
+        # bash double-quoted exports don't expand them, so Python sees literal \n.
+        ssh_key = ssh_key.replace("\\n", "\n")
         fd, key_path = tempfile.mkstemp(suffix=".pem")
         with os.fdopen(fd, "w") as f:
             f.write(ssh_key)

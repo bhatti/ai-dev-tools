@@ -143,16 +143,18 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
 
     ids = [f"#{i.get('number', '?')}" for i in raw_issues]
     skill_result = _resolve_skill_for_analyze(user_prompt, query, issues_text, config)
-    git_context: str | None = None
-    git_repo_path: pathlib.Path | None = None
+
+    # Always attempt git archaeology when credentials are available — provides
+    # commit history context regardless of whether a skill is used.
+    git_context, git_repo_path = _try_git_archaeology(config, ids)
 
     try:
         if skill_result:
             skill_name, skill_path = skill_result
             print(f"[gh-analyze] using skill '{skill_name}' for analysis", flush=True)
-            analysis = run_skill_analysis(config, issues_text, skill_name, skill_path)
+            analysis = run_skill_analysis(config, issues_text, skill_name, skill_path,
+                                          git_context=git_context)
         else:
-            git_context, git_repo_path = _try_git_archaeology(config, ids)
             analysis = run_analysis(config, issues_text, git_context=git_context)
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr)

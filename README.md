@@ -612,6 +612,13 @@ Key variables:
 
 ## Testing
 
+There are two test layers:
+
+| Layer | What | How to run |
+|-------|------|------------|
+| Unit tests | Python logic, mocked APIs | `make test` |
+| Pod functional tests | Real scripts in real k8s pods | `make pod-test` |
+
 ### Unit and integration tests
 
 ```bash
@@ -619,8 +626,8 @@ Key variables:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run all tests
-make test            # runs pytest tests/
+# Run all unit tests
+make test            # runs pytest tests/ (excludes functional tests)
 
 # Run with coverage
 make test-cov
@@ -629,6 +636,64 @@ make test-cov
 python3 -m pytest tests/test_router.py -v
 python3 -m pytest tests/test_formicary_client.py -v
 python3 -m pytest tests/test_standup_gather_pr_queue.py -v
+```
+
+---
+
+### Pod-based functional tests
+
+`tests/test_pod_functional.py` simulates exactly what Formicary ant workers do —
+without the full build/deploy cycle:
+
+1. Creates a fresh k8s pod (`plexobject/ai-dev-tools:latest`)
+2. Copies your **local** script files into the pod (overrides stale image layers)
+3. Injects credentials from the `ai-dev-credentials` k8s secret
+4. Runs each workflow step via `kubectl exec`
+5. Parses `::add-task-context` markers from stdout
+6. Deletes the pod (one pod per test, guaranteed cleanup)
+
+**Prerequisites:** `kubectl` configured, `ai-dev-credentials` secret deployed,
+`~/.zshrc` exporting `ANTHROPIC_BEDROCK_BASE_URL` (or `ANTHROPIC_API_KEY`).
+
+```bash
+source ~/.zshrc
+
+# Run default tests (jira-query + jira-analyze + standup-gather):
+make pod-test
+
+# Run all tests (requires ISSUE_ID for jira-analyze):
+ISSUE_ID=PROJ-123 make pod-test-all
+
+# Run a specific test:
+python3 tests/test_pod_functional.py --tests jira-query
+python3 tests/test_pod_functional.py --tests standup-gather
+python3 tests/test_pod_functional.py --tests standup-pipeline   # gather → synthesize
+
+# Run the full analyze test with a real Jira issue:
+ISSUE_ID=PROJ-123 python3 tests/test_pod_functional.py --tests jira-analyze
+
+# List all available pod tests:
+python3 tests/test_pod_functional.py --list
+```
+
+**Available pod tests:**
+
+| Test | What it verifies |
+|------|-----------------|
+| `jira-query` | Jira connectivity, context markers `SELECTED_TRACKER`, `ISSUE_COUNT` |
+| `jira-analyze` | Claude analysis of a Jira issue, `ANALYSIS_TYPE` key (requires `ISSUE_ID`) |
+| `standup-gather` | `gather_jira` step — Jira sprint data, `signals.json` written |
+| `standup-pipeline` | Full pipeline: gather → synthesize in one pod (shared workspace) |
+| `gh-query` | GitHub issue query, `SELECTED_TRACKER=github` |
+| `gh-analyze` | Claude analysis of GitHub issues, `ANALYSIS_TYPE` key |
+
+Each test creates its own pod, copies scripts, runs, then deletes the pod — clean isolation.
+The standup-pipeline test runs `gather_jira` then `synthesize` in the **same pod** so
+`synthesize` can read the `signals.json` written by `gather`, matching the real Formicary flow.
+
+```bash
+# Skip copying local scripts (use image as-is):
+SKIP_COPY=1 python3 tests/test_pod_functional.py --tests jira-query
 ```
 
 ---

@@ -80,23 +80,36 @@ def _try_git_archaeology(config: dict, keys: list[str]) -> tuple[str | None, pat
     repo = config.get("BITBUCKET_REPO", "").strip()
     if not workspace or not repo:
         return None, None
-    http_token = config.get("BITBUCKET_TOKEN", "").strip()
     ssh_key = config.get("SSH_PRIVATE_KEY", "").strip()
+    http_token = config.get("BITBUCKET_TOKEN", "").strip()
     dest = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp")) / "repo_cache"
     try:
-        print(f"[analyze] cloning {workspace}/{repo} for git archaeology ...", flush=True)
-        if http_token:
+        ssh_len = len(ssh_key)
+        tok_len = len(http_token)
+        print(f"[analyze] cloning {workspace}/{repo} for git archaeology "
+              f"(ssh_key_len={ssh_len} token_len={tok_len}) ...", flush=True)
+        # Prefer SSH when key is available — more reliable than HTTP token auth
+        if ssh_key:
+            clone_url = detect_bitbucket_url(workspace, repo, use_ssh=True)
+            print(f"[analyze] using SSH clone", flush=True)
+            repo_path = clone_repo(clone_url, dest, depth=50, ssh_key=ssh_key)
+        elif http_token:
             http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
             clone_url = detect_bitbucket_url(workspace, repo, use_ssh=False)
+            print(f"[analyze] using HTTPS clone", flush=True)
             repo_path = clone_repo(clone_url, dest, depth=50, http_token=http_token, http_username=http_username)
         else:
-            clone_url = detect_bitbucket_url(workspace, repo, use_ssh=True)
-            repo_path = clone_repo(clone_url, dest, depth=50, ssh_key=ssh_key)
+            print(f"[analyze] WARNING: no SSH key or HTTP token — cannot clone {workspace}/{repo}", flush=True)
+            print(f"::add-task-context CLONE_METHOD::none", flush=True)
+            return None, None
+        clone_method = "ssh" if ssh_key else "https"
+        print(f"::add-task-context CLONE_METHOD::{clone_method}", flush=True)
         print(f"[analyze] running git archaeology on {repo_path}", flush=True)
         context = _git_build_context(repo_path, keys) or None
         return context, repo_path
     except Exception as e:
         print(f"[analyze] WARNING: git archaeology failed: {e} — continuing without git context", flush=True)
+        print(f"::add-task-context CLONE_METHOD::failed", flush=True)
         return None, None
 
 
@@ -127,7 +140,11 @@ def _resolve_skill_for_analyze(
               help="Original user query for skill resolution (e.g. the full Slack message)")
 def main(issues: str | None, query: str | None, max_results: int, issue_type: str | None,
          user_prompt: str | None) -> None:
-    config = load_config(required=["JIRA_PROJECT", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_BASE_URL"])
+    # JIRA_PROJECT only needed for --query (JQL); when --issues provides keys directly, skip it
+    required = ["JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_BASE_URL"]
+    if not issues:
+        required.append("JIRA_PROJECT")
+    config = load_config(required=required)
     base_url = config["JIRA_BASE_URL"].rstrip("/")
 
     if not issues and not query:
@@ -157,18 +174,19 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     issues_text = _format_for_analysis(raw_issues, base_url)
 
     skill_result = _resolve_skill_for_analyze(user_prompt, query, issues_text, config)
-    git_context: str | None = None
-    git_repo_path: pathlib.Path | None = None
+    keys_for_archaeology = [i.get("key") for i in raw_issues if i.get("key")]
+
+    # Always attempt git archaeology when credentials are available — provides
+    # commit history context regardless of whether a skill is used.
+    git_context, git_repo_path = _try_git_archaeology(config, keys_for_archaeology)
 
     try:
         if skill_result:
             skill_name, skill_path = skill_result
             print(f"[analyze] using skill '{skill_name}' for analysis", flush=True)
-            analysis = run_skill_analysis(config, issues_text, skill_name, skill_path)
+            analysis = run_skill_analysis(config, issues_text, skill_name, skill_path,
+                                          git_context=git_context)
         else:
-            git_context, git_repo_path = _try_git_archaeology(
-                config, [i.get("key") for i in raw_issues if i.get("key")]
-            )
             analysis = run_analysis(config, issues_text, git_context=git_context)
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr)

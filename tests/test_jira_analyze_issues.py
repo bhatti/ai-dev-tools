@@ -184,7 +184,7 @@ def test_direct_ygs_analyze_skill_lookup(mock_notify, mock_skill_analysis, mock_
     """find_skill("ygs-analyze") called directly — no keyword matching needed."""
     from pathlib import Path
     mock_get_issue.return_value = {
-        "key": "CRIBL-44549",
+        "key": "PROJ-123",
         "fields": {"summary": "Some bug", "status": {"name": "Open"},
                    "assignee": None, "priority": {"name": "High"}, "description": ""},
     }
@@ -192,11 +192,11 @@ def test_direct_ygs_analyze_skill_lookup(mock_notify, mock_skill_analysis, mock_
     mock_skill_analysis.return_value = "Deep analysis result"
     runner = CliRunner()
     env = {
-        "JIRA_PROJECT": "CRIBL", "JIRA_EMAIL": "u@e.com",
+        "JIRA_PROJECT": "PROJ", "JIRA_EMAIL": "u@e.com",
         "JIRA_API_TOKEN": "tok", "JIRA_BASE_URL": "https://company.atlassian.net",
         "WORKSPACE_DIR": "/tmp",
     }
-    result = runner.invoke(main, ["--issues", "CRIBL-44549"], env=env)
+    result = runner.invoke(main, ["--issues", "PROJ-123"], env=env)
     assert result.exit_code == 0
     mock_find_skill.assert_called_with("ygs-analyze", ANY)
     assert "SKILL_USED::ygs-analyze" in result.output

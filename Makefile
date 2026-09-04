@@ -76,6 +76,12 @@ functional-test: ## Run functional tests against live Formicary (raw — no rebu
 	PR_URL=$(PR_URL) \
 	python3 tests/test_functional_workflows.py $(ARGS)
 
+pod-test:        ## Run default pod functional tests (jira-query, jira-analyze, standup-gather). Requires k8s + ai-dev-credentials secret.
+	PYTHONPATH=$(CURDIR) python3 tests/test_pod_functional.py --tests jira-query,jira-analyze,standup-gather $(ARGS)
+
+pod-test-all:    ## Run all pod functional tests. Set ISSUE_ID=PROJ-123 for jira-analyze.
+	PYTHONPATH=$(CURDIR) ISSUE_ID=$(ISSUE_ID) python3 tests/test_pod_functional.py --tests all $(ARGS)
+
 deploy-workflows: ## Upload all AI workflow YAMLs and set org configs (requires FORMICARY_TOKEN + SLACK_BOT_TOKEN).
 	cd $(FORMICARY_EXAMPLES) && FORMICARY_URL=$(FORMICARY_URL) bash deploy-ai-standup-jira.sh --set-configs
 	cd $(FORMICARY_EXAMPLES) && FORMICARY_URL=$(FORMICARY_URL) bash deploy-ai-standup-gh.sh --set-configs

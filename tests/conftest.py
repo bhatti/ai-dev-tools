@@ -1,5 +1,9 @@
 """Shared test fixtures."""
 
+# Exclude standalone runner scripts from pytest collection — they use their own
+# argparse-based main() and take non-fixture parameters.
+collect_ignore = ["test_pod_functional.py", "test_functional_workflows.py"]
+
 import json
 import os
 import tempfile
