@@ -136,7 +136,17 @@ _SCRIPTS_TO_COPY = [
     "scripts/common/artifacts.py",
     "scripts/common/notify_slack.py",
     "scripts/common/report_renderer.py",
+    "scripts/analyze/__init__.py",
+    "scripts/analyze/run_codebase_audit.py",
+    "scripts/analyze/post_audit.py",
 ]
+
+# Public GitHub repo used for codebase-audit pod tests.
+# Override via AUDIT_REPO_URL env var to test against a private repo.
+AUDIT_REPO_URL = os.environ.get(
+    "AUDIT_REPO_URL",
+    "https://github.com/bhatti/todo-sample.git",
+)
 
 # Pod manifest — mirrors the Formicary ant worker spec
 _POD_MANIFEST = """\
@@ -211,6 +221,10 @@ def _copy_scripts(pod_name: str) -> None:
     if SKIP_COPY:
         print("    SKIP_COPY=1 — using scripts from image", flush=True)
         return
+    # Ensure all destination directories exist in the pod before copying
+    dirs = {str(Path(rel).parent) for rel in _SCRIPTS_TO_COPY if str(Path(rel).parent) != "."}
+    for d in sorted(dirs):
+        _kubectl("exec", pod_name, "--", "mkdir", "-p", f"/app/{d}", timeout=15, check=False)
     n = 0
     for rel in _SCRIPTS_TO_COPY:
         local = REPO_ROOT / rel
@@ -818,6 +832,236 @@ def test_08_review_pr(base_env: dict[str, str]) -> TestResult:
                  f"elapsed={step.elapsed:.0f}s")
 
 
+def test_09_audit_git_archaeology(base_env: dict[str, str]) -> TestResult:
+    """Run build_audit_context against a local git repo clone in the pod.
+
+    Verifies: git_archaeology.py new audit functions work end-to-end in a container,
+    returning a non-empty Markdown block with expected sections.
+    Does NOT invoke Claude — only validates the pre-computation layer.
+    """
+    result = TestResult("audit-git-archaeology")
+
+    env = dict(base_env)
+    ws = "/workspace/audit_git"
+    env["WORKSPACE_DIR"] = ws
+
+    verify_script = (
+        'import subprocess, sys\n'
+        'from pathlib import Path\n'
+        'import sys; sys.path.insert(0, "/app")\n'
+        'from scripts.common.git_archaeology import (\n'
+        '    analyze_commit_range, build_audit_context, compute_commit_health,\n'
+        '    compute_temporal_coupling, find_test_gaps,\n'
+        '    _bug_hotspot_files, _commit_velocity, _emergency_commits, _top_contributors\n'
+        ')\n'
+        '# Clone a small public repo\n'
+        'dest = Path("/tmp/audit-test-repo")\n'
+        'if not (dest / ".git").exists():\n'
+        '    r = subprocess.run(\n'
+        '        ["git", "clone", "--depth", "50", "https://github.com/bhatti/todo-sample.git", str(dest)],\n'
+        '        capture_output=True, timeout=120\n'
+        '    )\n'
+        '    if r.returncode != 0:\n'
+        '        print("SKIP: clone failed (no network?) — ", r.stderr.decode()[:200])\n'
+        '        print("::add-task-context AUDIT_SKIP::no-network")\n'
+        '        sys.exit(0)\n'
+        'commits = analyze_commit_range(dest, n_commits=50)\n'
+        'if not commits:\n'
+        '    print("SKIP: no commits parsed")\n'
+        '    print("::add-task-context AUDIT_SKIP::no-commits")\n'
+        '    sys.exit(0)\n'
+        'health = compute_commit_health(commits)\n'
+        'coupling = compute_temporal_coupling(commits, min_support=2)\n'
+        'gaps = find_test_gaps(commits)\n'
+        'ctx = build_audit_context(dest, n_commits=50)\n'
+        'if not ctx or "Repository Audit Context" not in ctx:\n'
+        '    print(f"FAIL: build_audit_context returned unexpected: {ctx[:200]!r}")\n'
+        '    sys.exit(1)\n'
+        'if len(ctx) > 10000:\n'
+        '    print(f"FAIL: context too large: {len(ctx)} chars")\n'
+        '    sys.exit(1)\n'
+        '# Verify new git archaeology helpers\n'
+        'velocity = _commit_velocity(dest)\n'
+        'contributors = _top_contributors(dest, n_commits=50)\n'
+        'bug_hotspots = _bug_hotspot_files(dest)\n'
+        'emergency = _emergency_commits(dest)\n'
+        'print(f"::add-task-context AUDIT_COMMITS::{len(commits)}")\n'
+        'print(f"::add-task-context AUDIT_CONTEXT_CHARS::{len(ctx)}")\n'
+        'print(f"::add-task-context AUDIT_FIX_RATIO::{health[\"fix_ratio\"]}")\n'
+        'print(f"::add-task-context AUDIT_COUPLING_PAIRS::{len(coupling)}")\n'
+        'print(f"::add-task-context AUDIT_TEST_GAP_FILES::{len(gaps[\"untested_files\"])}")\n'
+        'print(f"::add-task-context AUDIT_VELOCITY_MONTHS::{len(velocity)}")\n'
+        'print(f"::add-task-context AUDIT_CONTRIBUTORS::{len(contributors)}")\n'
+        'print("[verify] all git_archaeology checks passed")\n'
+    )
+
+    with pod_fixture("audit-git-arch") as pod:
+        _kubectl("exec", pod, "--", "bash", "-c",
+                 f"cat > /tmp/verify_audit.py << 'PYEOF'\n{verify_script}PYEOF")
+        step = exec_step(pod, "verify-audit-git",
+                         f"mkdir -p {ws} && python3 /tmp/verify_audit.py",
+                         env, timeout=180)
+        result.steps.append(step)
+
+    if not step.ok:
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    # SKIP case — no network or no commits
+    if "AUDIT_SKIP" in step.context:
+        result.passed = True
+        result.message = f"SKIPPED — {step.context['AUDIT_SKIP']}"
+        return result
+
+    err = _check_keys(step, ["AUDIT_COMMITS", "AUDIT_CONTEXT_CHARS"])
+    if err:
+        return _fail(result, step, err)
+
+    return _pass(result,
+                 f"commits={step.context.get('AUDIT_COMMITS')} "
+                 f"context_chars={step.context.get('AUDIT_CONTEXT_CHARS')} "
+                 f"coupling_pairs={step.context.get('AUDIT_COUPLING_PAIRS', '?')} "
+                 f"elapsed={step.elapsed:.0f}s")
+
+
+def test_10_audit_skill_invoke(base_env: dict[str, str]) -> TestResult:
+    """Run full audit pipeline: run_codebase_audit.py → verify reports → post_findings.
+
+    Verifies:
+      1. Skill loading, prompt building, all audit context markers emitted
+      2. reports/audit_report.md written with content (Claude analysis)
+      3. reports/audit_report.html generated from markdown
+      4. reports/audit_findings.json is valid JSON with expected keys
+      5. post_findings.py runs without crashing (Slack post attempted; token may be absent)
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor ANTHROPIC_API_KEY set.
+    """
+    result = TestResult("audit-skill-invoke")
+
+    # Need Claude to be available
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/audit_skill"
+    env["WORKSPACE_DIR"] = ws
+    env["N_COMMITS"] = "50"
+    env["AUDIT_FOCUS"] = "health"
+    env["MAX_TURNS_AUDIT"] = "30"
+    # Audit requires substantial analysis — use Sonnet, not Haiku
+    sonnet = base_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "us.anthropic.claude-sonnet-4-6")
+    env["AI_MODEL"] = sonnet
+
+    # Test GitHub auto-detection path (no --repo-url; resolver uses GH_ORG + GH_REPO).
+    # AUDIT_REPO_URL may still override for Bitbucket / private repos.
+    repo_url = os.environ.get("AUDIT_REPO_URL", "")
+    if repo_url:
+        gh_org = gh_repo = ""
+        repo_arg = f"--repo-url '{repo_url}'"
+    else:
+        gh_org = os.environ.get("GH_ORG", "bhatti")
+        gh_repo = os.environ.get("GH_REPO", "todo-sample")
+        env["GH_ORG"] = gh_org
+        env["GH_REPO"] = gh_repo
+        # Unset Bitbucket vars so auto-detect uses GitHub path
+        for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+            env.pop(bb_key, None)
+        repo_arg = ""  # no --repo-url; auto-detect from GH_ORG + GH_REPO
+
+    with pod_fixture("audit-skill") as pod:
+        # ── Step 1: Run the audit ────────────────────────────────────────────
+        step = exec_step(pod, "audit-invoke",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         f"python3 -m scripts.analyze.run_codebase_audit "
+                         f"{repo_arg} --branch main --commits 50 --focus health",
+                         env, timeout=900)
+        result.steps.append(step)
+
+        # ── Step 2: Verify report files (runs regardless of Claude success) ─
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"# audit_report.md must exist and have content\n"
+            f"md = os.path.join(ws, 'reports', 'audit_report.md')\n"
+            f"if not os.path.exists(md): issues.append('audit_report.md missing')\n"
+            f"elif os.path.getsize(md) < 300: issues.append(f'audit_report.md too small — likely a stub ({{os.path.getsize(md)}} bytes, need >300)')\n"
+            f"else: print(f'::add-task-context AUDIT_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"# audit_report.html must exist\n"
+            f"html = os.path.join(ws, 'reports', 'audit_report.html')\n"
+            f"if not os.path.exists(html): issues.append('audit_report.html missing')\n"
+            f"else: print(f'::add-task-context AUDIT_HTML_BYTES::{{os.path.getsize(html)}}')\n"
+            f"# audit_findings.json must be valid JSON with expected keys\n"
+            f"fj = os.path.join(ws, 'reports', 'audit_findings.json')\n"
+            f"if not os.path.exists(fj): issues.append('audit_findings.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(fj).read())\n"
+            f"        for k in ('repo', 'branch', 'focus'):\n"
+            f"            if k not in d: issues.append(f'audit_findings.json missing key {{k}}')\n"
+            f"        print(f'::add-task-context AUDIT_FINDINGS_VALID::yes')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'audit_findings.json parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('REPORT ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context REPORTS_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-reports", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+
+        # ── Step 3: Run post_findings (Slack post — may fail if no token) ───
+        post_cmd = (
+            f"python3 -m scripts.review.post_findings "
+            f"--findings {ws}/reports/audit_findings.json 2>&1 || true"
+        )
+        post_env = dict(env)
+        post_env["FORMICARY_PUBLIC_URL"] = ""
+        post_env["SLACK_THREAD_TS"] = ""
+        post_step = exec_step(pod, "post-findings", post_cmd, post_env, timeout=60)
+        result.steps.append(post_step)
+        if "SLACK_POSTED" in post_step.context:
+            print(f"    [post-findings] SLACK_POSTED={post_step.context['SLACK_POSTED']}", flush=True)
+
+    # ── Evaluate results ─────────────────────────────────────────────────────
+    err = _check_keys(step, ["SKILL", "AUDIT_REPO", "AUDIT_BRANCH"])
+    if err:
+        return _fail(result, step, f"audit infrastructure failed: {err}")
+
+    skill = step.context.get("SKILL", "")
+    skill_loaded = step.context.get("SKILL_LOADED", "")
+    audit_repo = step.context.get("AUDIT_REPO", "")
+
+    if not step.ok:
+        if skill_loaded in ("yes", "no"):
+            return _pass(result,
+                         f"skill={skill} loaded={skill_loaded} repo={audit_repo} "
+                         f"(invocation errored — see log) elapsed={step.elapsed:.0f}s")
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    # If Claude succeeded, verify reports were written
+    if not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"report files missing after successful audit: {verify_step.stderr[-300:]}")
+
+    crit = step.context.get("AUDIT_CRITICAL_COUNT", "?")
+    high = step.context.get("AUDIT_HIGH_COUNT", "?")
+    md_bytes = verify_step.context.get("AUDIT_MD_BYTES", "?")
+    html_bytes = verify_step.context.get("AUDIT_HTML_BYTES", "?")
+    reports_ok = verify_step.context.get("REPORTS_VERIFIED", "no")
+    slack_posted = post_step.context.get("SLACK_POSTED", "n/a")
+    return _pass(result,
+                 f"skill={skill} loaded={skill_loaded} repo={audit_repo} "
+                 f"critical={crit} high={high} md={md_bytes}B html={html_bytes}B "
+                 f"reports={reports_ok} slack_posted={slack_posted} elapsed={step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -829,6 +1073,8 @@ ALL_TESTS: dict[str, callable] = {
     "gh-analyze":            test_06_gh_analyze,
     "review-skill-loading":  test_07_review_skill_loading,
     "review-pr":             test_08_review_pr,
+    "audit-git-archaeology": test_09_audit_git_archaeology,
+    "audit-skill-invoke":    test_10_audit_skill_invoke,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

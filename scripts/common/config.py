@@ -77,6 +77,12 @@ DEFAULTS: dict[str, str] = {
     "ANTHROPIC_DEFAULT_OPUS_MODEL":   MODEL_BEDROCK_OPUS,
     "ANTHROPIC_DEFAULT_SONNET_MODEL": MODEL_BEDROCK_SONNET,
     "ANTHROPIC_DEFAULT_HAIKU_MODEL":  MODEL_BEDROCK_HAIKU,
+    "BB_REPO_BRANCH":                 "main",
+    "GH_REPO_BRANCH":                 "main",
+    "N_COMMITS":                      "1000",
+    "AUDIT_FOCUS":                    "all",
+    "MAX_TURNS_AUDIT":                "80",
+    "MAX_AUDIT_SIZE":                 "10485760",
 }
 
 # Short alias → canonical name.
@@ -136,6 +142,17 @@ _ALIASES: list[tuple[str, str]] = [
     ("CodebaseRepoUrl",             "CODEBASE_REPO_URL"),
     ("GitBranch",                   "GIT_BRANCH"),
     ("AiModel",                     "AI_MODEL_OVERRIDE"),
+    # Codebase audit config
+    # BitbucketRepoBranch/BB_REPO_BRANCH: Bitbucket default branch (e.g. dev, master).
+    # GitHubRepoBranch/GH_REPO_BRANCH: GitHub default branch (defaults to main).
+    # Formicary: org config "BitbucketRepoBranch" / "GitHubRepoBranch" override job_variable
+    # defaults at runtime — no code change needed to switch branches per environment.
+    ("BitbucketRepoBranch",         "BB_REPO_BRANCH"),
+    ("GitHubRepoBranch",            "GH_REPO_BRANCH"),
+    ("NCommits",                    "N_COMMITS"),
+    ("AuditFocus",                  "AUDIT_FOCUS"),
+    ("MaxTurnsAudit",               "MAX_TURNS_AUDIT"),
+    ("MaxAuditSize",                "MAX_AUDIT_SIZE"),
 ]
 
 

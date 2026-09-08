@@ -11,7 +11,48 @@ project-specific overrides once the repo is available on disk.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+
+def inline_shared_refs(content: str) -> str:
+    """Resolve 'read `~/.claude/skills/.../shared/<name>.md`' references and inline them.
+
+    Skill files may reference shared protocols (review-scaffold.md, dep-audit.md, etc.)
+    via backtick-quoted paths. Claude may skip reading those files due to token-efficiency
+    rules. Inlining ensures the full protocol is always present in the prompt.
+
+    Two-pass resolution handles transitive refs (e.g. scaffold → ownership-principles).
+    """
+    shared_dirs = [
+        Path.home() / ".claude" / "skills" / "you-got-skills" / "skills" / "shared",
+        Path.home() / ".claude" / "skills" / "shared",
+    ]
+    pattern = re.compile(
+        r'[Rr]ead\s+`[^`]*?/?shared/([a-z0-9_-]+\.md)`[^.\n]*\.?'
+    )
+    inlined: set[str] = set()
+
+    def _replace(match: re.Match) -> str:
+        filename = match.group(1)
+        if filename in inlined:
+            return f"(See inlined {filename} above.)"
+        for d in shared_dirs:
+            path = d / filename
+            if path.exists():
+                text = path.read_text(encoding="utf-8").strip()
+                inlined.add(filename)
+                print(f"[skills] inlined shared/{filename} ({len(text)} chars)", flush=True)
+                return f"\n\n<!-- inlined from shared/{filename} -->\n{text}\n"
+        return match.group(0)
+
+    resolved = pattern.sub(_replace, content)
+    # Second pass: inlined files may reference other shared files transitively
+    if inlined:
+        resolved = pattern.sub(_replace, resolved)
+    if inlined:
+        print(f"[skills] inlined {len(inlined)} shared file(s): {sorted(inlined)}", flush=True)
+    return resolved
 
 
 def apply_project_skills(repo_dir: Path) -> int:

@@ -27,7 +27,7 @@ import click
 from scripts.common.artifacts import read_text
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, get_issue_dir, load_config, validate_claude_config
-from scripts.common.skills import apply_project_skills
+from scripts.common.skills import apply_project_skills, inline_shared_refs as _inline_shared_refs
 from scripts.review.post_findings import render_report_md, render_report_html
 
 
@@ -50,45 +50,6 @@ def _load_skill_md(skill: str) -> str | None:
             content = candidate.read_text(encoding="utf-8")
             return _inline_shared_refs(content)
     return None
-
-
-def _inline_shared_refs(content: str) -> str:
-    """Resolve 'read `~/.claude/skills/.../shared/<name>.md`' references and inline them.
-
-    The ygs-review-pr skill tells Claude to "read shared/review-scaffold.md" etc.
-    Claude may skip these reads due to token-efficiency rules. Inlining ensures
-    the full review protocol is always present in the prompt.
-    """
-    import re as _re
-    shared_dirs = [
-        Path.home() / ".claude" / "skills" / "you-got-skills" / "skills" / "shared",
-        Path.home() / ".claude" / "skills" / "shared",
-    ]
-    pattern = _re.compile(
-        r'[Rr]ead\s+`[^`]*?/?shared/([a-z0-9_-]+\.md)`[^.\n]*\.?'
-    )
-    inlined: set[str] = set()
-
-    def _replace(match: _re.Match) -> str:
-        filename = match.group(1)
-        if filename in inlined:
-            return f"(See inlined {filename} above.)"
-        for d in shared_dirs:
-            path = d / filename
-            if path.exists():
-                text = path.read_text(encoding="utf-8").strip()
-                inlined.add(filename)
-                print(f"[review] inlined shared/{filename} ({len(text)} chars)", flush=True)
-                return f"\n\n<!-- inlined from shared/{filename} -->\n{text}\n"
-        return match.group(0)
-
-    resolved = pattern.sub(_replace, content)
-    # Second pass: inlined files may reference other shared files (e.g. review-scaffold → ownership-principles)
-    if inlined:
-        resolved = pattern.sub(_replace, resolved)
-    if inlined:
-        print(f"[review] inlined {len(inlined)} shared file(s): {sorted(inlined)}", flush=True)
-    return resolved
 
 
 REVIEW_PROMPT_TEMPLATE = """\

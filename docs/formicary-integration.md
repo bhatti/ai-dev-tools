@@ -29,6 +29,7 @@ file-based artifacts under `/workspace/{issue-id}/`:
 | `formicary/ai-jira-implement.yaml` | Pipeline: plan → implement → self-review → create_pr → monitor_pr (calls learn on exit) |
 | `formicary/ai-jira-review.yaml` | Same review pipeline for Bitbucket/Jira PRs; `ReviewDepth=deep` adds 3 extra passes |
 | `formicary/ai-jira-query.yaml` | Search Jira/GitHub issues by free text, or analyze issues for root cause (Mode=analyze) |
+| `formicary/ai-codebase-audit.yaml` | Post-merge codebase archaeology: analyze last N commits for hotspots, duplicate abstractions, architecture drift, brittle tests, knowledge silos; `RepoUrl` optional — auto-detected from `DEFAULT_TRACKER` env if empty; `AuditFocus` narrows to architecture\|security\|tests\|duplicates\|health |
 | `formicary/ai-adhoc.yaml` | Run any you-got-skills skill with a free-form prompt, post result to Slack |
 
 ## Signal-Based Pause/Resume (Review Workflows)
@@ -86,6 +87,12 @@ formicary submit formicary/ai-jira-review.yaml --var PRUrl=https://bitbucket.org
 
 # Run any skill ad-hoc
 formicary submit formicary/ai-adhoc.yaml --var Skill=ygs-standup --var Prompt="summarize open PRs"
+
+# Codebase audit (auto-detects repo from DEFAULT_TRACKER + BITBUCKET_REPO / GH_REPO)
+formicary submit formicary/ai-codebase-audit.yaml
+
+# Audit a specific repo, last 500 commits, focus on architecture
+formicary submit formicary/ai-codebase-audit.yaml --var RepoUrl=https://github.com/org/repo --var NCommits=500 --var AuditFocus=architecture
 ```
 
 ### Deploy as a cron job

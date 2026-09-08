@@ -72,6 +72,9 @@ The first word is matched against a table of verb aliases:
 | `prs` / `queue` / `pulls` | `pr queue` |
 | `security <rest>` | `security review` (qualifier word stripped from `rest` before URL extraction) |
 | `sre <rest>` | `sre review` (qualifier word stripped from `rest` before URL extraction) |
+| `audit [<repo-url>]` | `audit` → `ai-codebase-audit` |
+| `codebase audit [<repo-url>]` | `codebase-audit` → `ai-codebase-audit` |
+| `archaeology [<repo-url>]` | `archaeology` → `ai-codebase-audit` |
 | `jira <rest>` | sub-intent dispatch: `jira query <text>` → Query=text; `jira analyze <keys>` → Mode=analyze |
 | `search` / `find` | `jira query` |
 | `analyze` / `analyse` | `jira-analyze` |
@@ -254,7 +257,18 @@ Reuse an existing job with static params injected at submission time:
   extra_params:
     Skill: ygs-security-review  # override which skill to run
   description: "Security-focused PR review"
+
+- name: codebase-audit
+  job_type: ai-codebase-audit
+  triggers: ["audit", "codebase audit", "repo audit", "archaeology", "code health", "hotspot", "tech debt"]
+  id_var: RepoUrl        # extracts URL from message if present; empty = auto-detect from DEFAULT_TRACKER
+  description: "Post-merge codebase archaeology (hotspots, drift, silos, test gaps)"
 ```
+
+**Inline Slack flags for audit:**
+- `-- audit for last 200 commits` — overrides `NCommits`
+- `-- audit with max size 2MB` — overrides `MaxAuditSize`
+- `-- audit for last 50 commits, max size 512KB` — both overrides combined
 
 ---
 
