@@ -252,6 +252,10 @@ Write these files using relative paths from the repo root (the `reports/` symlin
    - Executive summary (2-3 sentences: biggest gap area, number of PRs with issues)
    - Critical/High/Medium/Low findings with PR IDs in every finding title
    - Skills Assessment section rating coding/review/testing/SRE/security/architecture
+   - Recommended Skill Updates section: explicit list of skills to update or create,
+     with the specific file path, what to add, and which PRs motivated the change.
+     Example: "Update `.claude/skills/security-review/SKILL.md` — add SQL injection
+     detection for f-string patterns (missed in PRs #45, #67)"
    - Metrics Dashboard with spec coverage %, skill catch rate, human review burden %
    - Checked — No Issues Found section (proves thoroughness)
    - Minimum 2000 chars. If you write less, you did not analyze enough PRs.
