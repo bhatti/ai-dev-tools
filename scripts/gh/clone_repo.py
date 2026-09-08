@@ -20,10 +20,9 @@ from scripts.common.artifacts import read_json, read_text, write_json
 from scripts.common.config import get_issue_dir, load_config
 from scripts.common.skills import apply_project_skills
 from scripts.common.git_utils import (
-    clone_repo,
+    clone_by_tracker,
     configure_git,
     create_branch,
-    detect_repo_url,
     make_branch_name,
 )
 
@@ -53,20 +52,11 @@ def main(issue_id: str) -> None:
         print(f"ERROR: {issue_dir}/plan.md not found", file=sys.stderr)
         sys.exit(1)
 
-    org = config["GH_ORG"]
-    repo = issue.get("repo") or config["GH_REPO"]
-    token = config.get("GH_TOKEN", "")
-    ssh_key = config.get("SSH_PRIVATE_KEY", "")
-    use_ssh = not token or config.get("USE_SSH", "0") == "1"
-
-    if token and not use_ssh:
-        clone_url = f"https://x-access-token:{token}@github.com/{org}/{repo}.git"
-        print(f"[clone-repo] cloning {org}/{repo} via HTTPS token", flush=True)
-        clone_repo(clone_url, repo_dir)
-    else:
-        clone_url = detect_repo_url(org, repo, use_ssh=True)
-        print(f"[clone-repo] cloning {org}/{repo} via SSH", flush=True)
-        clone_repo(clone_url, repo_dir, ssh_key=ssh_key)
+    # Override GH_REPO if the issue specifies a different repo
+    issue_repo = issue.get("repo")
+    if issue_repo:
+        config = {**config, "GH_REPO": issue_repo}
+    clone_by_tracker(config, repo_dir, tracker="github")
 
     configure_git(repo_dir, config["GIT_USER_NAME"], config["GIT_USER_EMAIL"])
 

@@ -260,6 +260,57 @@ def get_commit_count(repo_path: Path, base_branch: str = "main") -> int:
     return 0
 
 
+def clone_by_tracker(config: dict, dest: Path, tracker: str = "") -> Path:
+    """Clone a repo using the correct auth for the tracker (github or bitbucket).
+
+    This is the single source of truth for clone auth logic — all workflows
+    (implement, pr-audit, etc.) should call this instead of duplicating auth.
+
+    Args:
+        config: merged config dict (env vars + org configs)
+        dest: target directory for the clone
+        tracker: "github", "jira", "bitbucket", "jira/bitbucket", or "" (auto-detect)
+
+    Returns the dest Path on success.
+    Raises on clone failure (callers should catch and handle).
+    """
+    if not tracker:
+        tracker = (config.get("DEFAULT_TRACKER") or "").lower().strip()
+
+    ssh_key = config.get("SSH_PRIVATE_KEY", "")
+
+    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+        workspace = config.get("BITBUCKET_WORKSPACE", "")
+        repo_name = config.get("BITBUCKET_REPO", "")
+        if not workspace or not repo_name:
+            raise ValueError("BITBUCKET_WORKSPACE and BITBUCKET_REPO must be set")
+        http_token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
+        if http_token:
+            http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+            clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
+            print(f"[clone] cloning {workspace}/{repo_name} via HTTPS", flush=True)
+            return clone_repo(clone_url, dest, http_token=http_token, http_username=http_username)
+        else:
+            clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=True)
+            print(f"[clone] cloning {workspace}/{repo_name} via SSH", flush=True)
+            return clone_repo(clone_url, dest, ssh_key=ssh_key)
+    else:
+        org = config.get("GH_ORG", "")
+        repo_name = config.get("GH_REPO", "")
+        if not org or not repo_name:
+            raise ValueError("GH_ORG and GH_REPO must be set")
+        token = config.get("GH_TOKEN", "")
+        use_ssh = not token or config.get("USE_SSH", "0") == "1"
+        if token and not use_ssh:
+            clone_url = detect_repo_url(org, repo_name, use_ssh=False)
+            print(f"[clone] cloning {org}/{repo_name} via HTTPS token", flush=True)
+            return clone_repo(clone_url, dest, http_token=token, http_username="x-access-token")
+        else:
+            clone_url = detect_repo_url(org, repo_name, use_ssh=True)
+            print(f"[clone] cloning {org}/{repo_name} via SSH", flush=True)
+            return clone_repo(clone_url, dest, ssh_key=ssh_key)
+
+
 def detect_repo_url(org: str, repo: str, use_ssh: bool = True) -> str:
     """Build the git clone URL."""
     if use_ssh:

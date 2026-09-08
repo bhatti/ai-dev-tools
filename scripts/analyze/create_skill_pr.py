@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.git_utils import clone_repo, configure_git, detect_repo_url
+from scripts.common.git_utils import clone_by_tracker, configure_git
 from scripts.standup.slack_client import post_message
 
 
@@ -76,7 +76,7 @@ def main() -> None:
             print("::add-task-context SKILL_PR_CREATED::no", flush=True)
             if ygs_recs:
                 _write_ygs_recommendations(reports_dir, ygs_recs)
-            return
+            sys.exit(1)
 
     # Read base branch
     branch_file = workspace_dir / "branch.txt"
@@ -200,41 +200,10 @@ def main() -> None:
 # -- Helpers -------------------------------------------------------------------
 
 def _clone_repo(config: dict, dest: Path, tracker: str) -> bool:
-    """Clone the repo into dest. Returns True on success."""
+    """Clone the repo using shared clone_by_tracker (DRY with gh/jira workflows)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-
-    org = config.get("GH_ORG", "")
-    repo = config.get("GH_REPO", "")
-    bb_ws = config.get("BITBUCKET_WORKSPACE", "")
-    bb_repo = config.get("BITBUCKET_REPO", "")
-    token = config.get("GH_TOKEN", "")
-    ssh_key = config.get("SSH_PRIVATE_KEY", "")
-    use_ssh = not token or config.get("USE_SSH", "0") == "1"
-
-    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
-        if not bb_ws or not bb_repo:
-            print("[create-skill-pr] BITBUCKET_WORKSPACE/BITBUCKET_REPO not set", file=sys.stderr, flush=True)
-            return False
-        bb_user = config.get("BITBUCKET_USERNAME", "")
-        bb_token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
-        if bb_user and bb_token:
-            clone_url = f"https://{bb_user}:{bb_token}@bitbucket.org/{bb_ws}/{bb_repo}.git"
-        else:
-            clone_url = f"git@bitbucket.org:{bb_ws}/{bb_repo}.git"
-        print(f"[create-skill-pr] cloning {bb_ws}/{bb_repo} (bitbucket)", flush=True)
-    else:
-        if not org or not repo:
-            print("[create-skill-pr] GH_ORG/GH_REPO not set", file=sys.stderr, flush=True)
-            return False
-        if token and not use_ssh:
-            clone_url = f"https://x-access-token:{token}@github.com/{org}/{repo}.git"
-            print(f"[create-skill-pr] cloning {org}/{repo} via HTTPS token", flush=True)
-        else:
-            clone_url = detect_repo_url(org, repo, use_ssh=True)
-            print(f"[create-skill-pr] cloning {org}/{repo} via SSH", flush=True)
-
     try:
-        clone_repo(clone_url, dest, ssh_key=ssh_key if use_ssh else "")
+        clone_by_tracker(config, dest, tracker)
         return True
     except Exception as e:
         print(f"[create-skill-pr] clone failed: {e}", file=sys.stderr, flush=True)

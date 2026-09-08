@@ -400,11 +400,13 @@ def _fetch_github_issue(issue_ref: dict, config: dict) -> dict | None:
     except json.JSONDecodeError:
         return None
     body = data.get("body", "")
+    has_ac, ac_text = _detect_acceptance_criteria(body)
     return {
         "title": data.get("title", ""),
         "body": body,
         "labels": [lb.get("name", "") for lb in data.get("labels", [])],
-        "acceptance_criteria": _extract_section(body, "acceptance criteria"),
+        "acceptance_criteria": ac_text,
+        "has_acceptance_criteria": has_ac,
         "design_doc_links": _extract_links(body),
     }
 
@@ -430,11 +432,13 @@ def _fetch_jira_issue(issue_ref: dict, config: dict) -> dict | None:
     data = resp.json()
     fields = data.get("fields", {})
     description = fields.get("description", "") or ""
+    has_ac, ac_text = _detect_acceptance_criteria(description)
     return {
         "title": fields.get("summary", ""),
         "body": description,
         "labels": fields.get("labels", []),
-        "acceptance_criteria": _extract_section(description, "acceptance criteria"),
+        "acceptance_criteria": ac_text,
+        "has_acceptance_criteria": has_ac,
         "design_doc_links": _extract_links(description),
     }
 
@@ -449,6 +453,51 @@ def _extract_section(text: str, heading: str) -> str:
     )
     m = pattern.search(text)
     return m.group(1).strip() if m else ""
+
+
+def _detect_acceptance_criteria(text: str) -> tuple[bool, str]:
+    """Detect acceptance criteria semantically, not just by heading keyword.
+
+    Returns (has_ac, extracted_text). Checks for:
+    - Explicit AC headings (Acceptance Criteria, Definition of Done, Requirements)
+    - Checkbox lists (- [ ] / - [x])
+    - BDD format (Given/When/Then)
+    - Numbered requirement lists with testable conditions
+    - "must", "should", "shall" requirement language in structured lists
+    """
+    if not text:
+        return False, ""
+
+    # 1. Try explicit section headings (broad set)
+    for heading in ("acceptance criteria", "definition of done", "requirements",
+                    "expected behavior", "success criteria", "done criteria",
+                    "exit criteria", "test criteria", "verification criteria"):
+        section = _extract_section(text, heading)
+        if section and len(section) > 10:
+            return True, section
+
+    # 2. Checkbox lists (- [ ] or - [x] or * [ ])
+    checkboxes = re.findall(r'[-*]\s*\[[ xX]\]\s*.+', text)
+    if len(checkboxes) >= 2:
+        return True, "\n".join(checkboxes[:20])
+
+    # 3. BDD format: Given/When/Then
+    bdd = re.findall(
+        r'(?:^|\n)\s*(?:Given|When|Then|And|But)\s+.+',
+        text, re.IGNORECASE,
+    )
+    if len(bdd) >= 2:
+        return True, "\n".join(bdd[:20])
+
+    # 4. Numbered requirements with modal verbs
+    numbered = re.findall(
+        r'(?:^|\n)\s*\d+[.)]\s+.+(?:must|should|shall|will|needs? to|has to).+',
+        text, re.IGNORECASE,
+    )
+    if len(numbered) >= 2:
+        return True, "\n".join(numbered[:20])
+
+    return False, ""
 
 
 def _extract_links(text: str) -> list[str]:
@@ -504,13 +553,19 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
             details = linked.get("details")
             if details:
                 issue_line += f" — {details.get('title', '')}"
+                has_ac = details.get("has_acceptance_criteria", False)
                 ac = details.get("acceptance_criteria", "")
-                if ac:
+                if has_ac and ac:
                     section.append(issue_line)
+                    section.append(f"  - **has_acceptance_criteria**: true")
                     section.append(f"  - **Acceptance criteria**: {ac[:500]}")
                 else:
                     section.append(issue_line)
+                    section.append(f"  - **has_acceptance_criteria**: false")
                     section.append("  - **Acceptance criteria**: _(none found)_")
+                    issue_body = details.get("body", "")
+                    if issue_body:
+                        section.append(f"  - **Issue description excerpt**: {issue_body[:400]}")
             else:
                 section.append(issue_line)
 
@@ -548,9 +603,6 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         if len(pr_text) > per_pr_budget:
             pr_text = pr_text[:per_pr_budget] + "\n_(truncated)_\n"
 
-        if total + len(pr_text) > max_chars:
-            lines.append(f"\n_(remaining {len(prs) - len(lines) + 1} PRs omitted for token budget)_")
-            break
         lines.append(pr_text)
         total += len(pr_text)
 

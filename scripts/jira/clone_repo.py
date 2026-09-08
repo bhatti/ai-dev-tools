@@ -20,10 +20,9 @@ from scripts.common.artifacts import read_json, read_text, write_json
 from scripts.common.config import get_issue_dir, load_config
 from scripts.common.skills import apply_project_skills
 from scripts.common.git_utils import (
-    clone_repo,
+    clone_by_tracker,
     configure_git,
     create_branch,
-    detect_bitbucket_url,
     make_branch_name,
 )
 
@@ -54,24 +53,16 @@ def main(issue_id: str) -> None:
         print(f"ERROR: {issue_dir}/plan.md not found", file=sys.stderr)
         sys.exit(1)
 
-    workspace = issue.get("bitbucket_workspace") or config.get("BITBUCKET_WORKSPACE", "")
-    repo_name = issue.get("bitbucket_repo") or config.get("BITBUCKET_REPO", "")
-    if not workspace or not repo_name:
-        print("ERROR: BITBUCKET_WORKSPACE and BITBUCKET_REPO must be set", file=sys.stderr)
-        sys.exit(1)
-
-    http_token = config.get("BITBUCKET_TOKEN", "")
-    ssh_key = config.get("SSH_PRIVATE_KEY", "")
-
-    if http_token:
-        http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
-        clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
-        print(f"[clone-repo] cloning {workspace}/{repo_name} via HTTPS", flush=True)
-        clone_repo(clone_url, repo_dir, http_token=http_token, http_username=http_username)
-    else:
-        clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=True)
-        print(f"[clone-repo] cloning {workspace}/{repo_name} via SSH", flush=True)
-        clone_repo(clone_url, repo_dir, ssh_key=ssh_key)
+    # Override workspace/repo if the issue specifies different values
+    issue_ws = issue.get("bitbucket_workspace")
+    issue_repo = issue.get("bitbucket_repo")
+    if issue_ws or issue_repo:
+        config = {**config}
+        if issue_ws:
+            config["BITBUCKET_WORKSPACE"] = issue_ws
+        if issue_repo:
+            config["BITBUCKET_REPO"] = issue_repo
+    clone_by_tracker(config, repo_dir, tracker="jira")
 
     configure_git(repo_dir, config["GIT_USER_NAME"], config["GIT_USER_EMAIL"])
 

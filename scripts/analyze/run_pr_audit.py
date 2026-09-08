@@ -125,6 +125,9 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
         print(f"::add-task-context PR_AUDIT_DESIGN_GAPS::{design_gaps}", flush=True)
         print(f"::add-task-context PR_AUDIT_SKILL_GAPS::{skill_gaps}", flush=True)
         print(f"::add-task-context PR_AUDIT_PRACTICE_GAPS::{practice_gaps}", flush=True)
+        pr_ids = data.get("pr_ids", "")
+        if pr_ids:
+            print(f"::add-task-context PR_AUDIT_PR_IDS::{pr_ids}", flush=True)
     except Exception as e:
         print(f"[pr-audit] could not parse findings for markers: {e}", flush=True)
 
@@ -192,24 +195,74 @@ Use the PR data to identify patterns, then verify findings by examining the actu
 
 {pr_context}
 
+## CRITICAL: Analyze ALL {n_prs} PRs
+
+You MUST analyze EVERY PR in the data above -- not just a handful of interesting ones.
+A common failure mode is deeply analyzing 8-10 PRs and ignoring the rest. This is NOT acceptable.
+
+For EVERY PR:
+- Check spec coverage (linked issue, acceptance criteria present or absent)
+- Check design doc presence (for complex PRs >300 LOC)
+- Check bot vs human comment patterns (skill gaps)
+- Check test coverage, review quality, PR size, practices
+
+Then synthesize cross-PR patterns. The value of this audit is the patterns across ALL {n_prs} PRs,
+not a deep-dive into a few.
+
+## CRITICAL: Acceptance criteria detection
+
+The `has_acceptance_criteria` field uses semantic detection (checkbox lists, BDD Given/When/Then,
+numbered requirements with "must"/"should"/"shall", not just a literal "Acceptance Criteria" heading).
+When `has_acceptance_criteria` is false, verify by reading the issue description excerpt -- the issue
+may use different language for its requirements. Report the actual AC coverage accurately.
+
+## CRITICAL: Include PR IDs everywhere
+
+Every finding MUST reference specific PR numbers (e.g., "PR #46468", "PRs #47554, #47533").
+The report header MUST include the count of PRs analyzed.
+The findings JSON MUST include `pr_number` or `prs` array for every finding.
+
+## REQUIRED: Additional analysis dimensions
+
+Beyond the 4 specialist dimensions, also check for:
+- **Conflicting changes**: PRs that modify the same files/modules with divergent intent
+- **Duplicate abstractions**: PRs introducing new abstractions that overlap with existing ones
+- **Brittle tests**: Tests using sleep/timing, excessive mocking, environment-dependent assertions
+- **Industry practice violations**: Missing rollback plans, rubber-stamp reviews on risky changes,
+  no documentation updates for new features
+
+## REQUIRED: Skills assessment summary
+
+Include a dedicated section in the report analyzing what skills/capabilities were demonstrated
+and what was lacking across all PRs:
+- Coding skills (correctness, error handling, performance)
+- Review skills (thoroughness, domain knowledge, constructive feedback)
+- Testing skills (coverage, edge cases, integration testing)
+- SRE/operational skills (monitoring, rollback plans, feature flags)
+- Security awareness (auth, input validation, secrets management)
+- Architecture skills (modularity, separation of concerns, API design)
+
+Rate each as Strong/Developing/Gap based on evidence from the PR data.
+
 ## REQUIRED OUTPUTS -- Must be written before emitting the final JSON line
 
 Write these files using relative paths from the repo root (the `reports/` symlink resolves to the workspace reports directory):
 
 1. `reports/pr_audit_report.md` -- Comprehensive markdown PR audit report:
    - Executive summary (2-3 sentences: biggest gap area, number of PRs with issues)
-   - Spec Gaps section: PRs without linked issues/specs, missing acceptance criteria
-   - Design Gaps section: large PRs without design docs, undocumented architecture decisions
-   - Skill Gaps section: repeated review feedback, common mistakes across PRs
-   - Practice Gaps section: missing tests, no reviews, inconsistent descriptions
-   - Recommendations section: top 5 actionable improvements
-   - Minimum 1000 chars. If you write less than 1000 chars, you did not do the job.
+   - Critical/High/Medium/Low findings with PR IDs in every finding title
+   - Skills Assessment section rating coding/review/testing/SRE/security/architecture
+   - Metrics Dashboard with spec coverage %, skill catch rate, human review burden %
+   - Checked — No Issues Found section (proves thoroughness)
+   - Minimum 2000 chars. If you write less, you did not analyze enough PRs.
 
 2. `reports/pr_audit_findings.json` -- Structured JSON:
    {{"repo":"{repo_label}","branch":"{branch}","prs_analyzed":{n_prs},"focus":"{focus}",
+    "pr_ids":"{pr_ids}",
     "spec_gap_count":N,"design_gap_count":N,"skill_gap_count":N,"practice_gap_count":N,
-    "findings":[{{"severity":"HIGH|MEDIUM|LOW","category":"spec|design|skill|practice","pr_number":N,"title":"...","evidence":"specific finding","recommendation":"specific action"}}],
-    "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"recommendation":"..."}}]}}
+    "findings":[{{"severity":"HIGH|MEDIUM|LOW","category":"spec|design|skill|practice","pr_number":N,"prs":[N,M],"title":"...","evidence":"specific finding","recommendation":"specific action"}}],
+    "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"recommendation":"..."}}],
+    "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}}}}
 
 3. `reports/skill_improvements.json` -- Proposed improvements:
    {{"repo_skill_changes":[{{"action":"update|create","file_path":"relative/path","description":"what to change","changes":"content to write"}}],
@@ -339,8 +392,10 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 if details:
                     linked["details"] = details
 
-        pr_context = build_pr_context(prs, max_chars=100_000)
+        pr_context = build_pr_context(prs, max_chars=150_000)
+        pr_ids_str = ",".join(str(pr.get("number", "")) for pr in prs if pr.get("number"))
         print(f"[pr-audit] PR context: {len(pr_context)} chars from {len(prs)} PRs", flush=True)
+        print(f"::add-task-context PR_AUDIT_PR_IDS::{pr_ids_str}", flush=True)
 
         # -- Load PR audit skill -----------------------------------------------
         _pr_audit_skill_candidates = ["pr-audit", skill, "ygs-pr-audit"]
@@ -364,6 +419,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 focus=focus,
                 pr_context=pr_context,
                 skill_instructions=skill_md,
+                pr_ids=pr_ids_str,
             )
         else:
             print("[pr-audit] WARNING: no SKILL.md found -- using fallback prompt", flush=True)
@@ -444,6 +500,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 for key, val in [
                     ("repo", label), ("branch", branch),
                     ("prs_analyzed", len(prs)), ("focus", focus),
+                    ("pr_ids", pr_ids_str),
                 ]:
                     if not fdata.get(key):
                         fdata[key] = val
