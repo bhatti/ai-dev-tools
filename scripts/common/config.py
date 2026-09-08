@@ -83,6 +83,9 @@ DEFAULTS: dict[str, str] = {
     "AUDIT_FOCUS":                    "all",
     "MAX_TURNS_AUDIT":                "80",
     "MAX_AUDIT_SIZE":                 "10485760",
+    "N_PRS":                          "50",
+    "PR_AUDIT_FOCUS":                 "all",
+    "MAX_PR_AUDIT_SIZE":              "10000000",
 }
 
 # Short alias → canonical name.
@@ -153,6 +156,10 @@ _ALIASES: list[tuple[str, str]] = [
     ("AuditFocus",                  "AUDIT_FOCUS"),
     ("MaxTurnsAudit",               "MAX_TURNS_AUDIT"),
     ("MaxAuditSize",                "MAX_AUDIT_SIZE"),
+    # PR audit config
+    ("NPrs",                        "N_PRS"),
+    ("PrAuditFocus",                "PR_AUDIT_FOCUS"),
+    ("MaxPrAuditSize",              "MAX_PR_AUDIT_SIZE"),
 ]
 
 

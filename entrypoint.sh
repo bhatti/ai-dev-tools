@@ -109,6 +109,26 @@ elif [ -n "${SSH_PRIVATE_KEY:-}" ]; then
 fi
 
 # --------------------------------------------------------------------------
+# 4b. Debug mode: overwrite /app/scripts/ from a fresh clone of ai-dev-tools
+#     Set AI_DEV_TOOLS_DEBUG=1 to enable. Clones main branch every time.
+# --------------------------------------------------------------------------
+if [ "${AI_DEV_TOOLS_DEBUG:-0}" = "1" ]; then
+  _debug_tmp="/tmp/ai-dev-tools-debug"
+  echo "[debug] Cloning ai-dev-tools main to overwrite /app/scripts/ ..."
+  rm -rf "${_debug_tmp}"
+  if git clone --depth 1 https://github.com/bhatti/ai-dev-tools.git "${_debug_tmp}" 2>&1; then
+    cp -r "${_debug_tmp}/scripts" /app/scripts.new
+    rm -rf /app/scripts
+    mv /app/scripts.new /app/scripts
+    echo "[debug] /app/scripts/ overwritten from ai-dev-tools@main"
+    rm -rf "${_debug_tmp}"
+  else
+    echo "[debug] WARNING: clone failed — continuing with image scripts" >&2
+    rm -rf "${_debug_tmp}"
+  fi
+fi
+
+# --------------------------------------------------------------------------
 # 5. Install you-got-skills (base skills — always fresh per pod)
 #    Clone into ~/.claude/skills/you-got-skills; symlink each skill directly
 #    under ~/.claude/skills/<name> so Claude Code's Skill tool discovers them.

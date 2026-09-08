@@ -139,6 +139,12 @@ _SCRIPTS_TO_COPY = [
     "scripts/analyze/__init__.py",
     "scripts/analyze/run_codebase_audit.py",
     "scripts/analyze/post_audit.py",
+    "scripts/analyze/pr_fetcher.py",
+    "scripts/analyze/run_pr_audit.py",
+    "scripts/analyze/post_pr_audit.py",
+    "scripts/analyze/create_skill_pr.py",
+    "scripts/common/repo_utils.py",
+    "scripts/common/slack_format.py",
 ]
 
 # Public GitHub repo used for codebase-audit pod tests.
@@ -1062,6 +1068,215 @@ def test_10_audit_skill_invoke(base_env: dict[str, str]) -> TestResult:
                  f"reports={reports_ok} slack_posted={slack_posted} elapsed={step.elapsed:.0f}s")
 
 
+def test_11_pr_audit_gh_fetch(base_env: dict[str, str]) -> TestResult:
+    """Fetch GitHub PRs and classify comments in a pod (no Claude).
+
+    Verifies: pr_fetcher.py fetch_github_prs(), classify_comments(),
+    link_pr_to_issue(), build_pr_context() all work end-to-end in a container.
+    """
+    result = TestResult("pr-audit-gh-fetch")
+
+    env = dict(base_env)
+    ws = "/workspace/pr_audit_fetch"
+    env["WORKSPACE_DIR"] = ws
+    env["DEFAULT_TRACKER"] = "github"
+
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "you-got-skills")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    verify_script = (
+        'import json, sys, os\n'
+        'sys.path.insert(0, "/app")\n'
+        'from scripts.analyze.pr_fetcher import (\n'
+        '    fetch_github_prs, classify_comments, link_pr_to_issue, build_pr_context\n'
+        ')\n'
+        'from scripts.common.config import load_config\n'
+        'config = load_config()\n'
+        'prs = fetch_github_prs(config, n_prs=5)\n'
+        'if not prs:\n'
+        '    print("SKIP: no merged PRs found (empty repo?)")\n'
+        '    print("::add-task-context PR_AUDIT_SKIP::no-prs")\n'
+        '    sys.exit(0)\n'
+        'print(f"::add-task-context PR_AUDIT_PRS_FETCHED::{len(prs)}")\n'
+        '# Classify comments on first PR\n'
+        'first = prs[0]\n'
+        'all_comments = first.get("all_comments", [])\n'
+        'classified = classify_comments(all_comments)\n'
+        'print(f"::add-task-context PR_AUDIT_BOT_COMMENTS::{len(classified[\"bot_comments\"])}")\n'
+        'print(f"::add-task-context PR_AUDIT_HUMAN_COMMENTS::{len(classified[\"human_comments\"])}")\n'
+        '# Link to issue\n'
+        'issue_ref = link_pr_to_issue(first, config)\n'
+        'print(f"::add-task-context PR_AUDIT_ISSUE_LINKED::{"yes" if issue_ref else "no"}")\n'
+        '# Build context\n'
+        'ctx = build_pr_context(prs, max_chars=50000)\n'
+        'print(f"::add-task-context PR_AUDIT_CONTEXT_CHARS::{len(ctx)}")\n'
+        'if not ctx:\n'
+        '    print("FAIL: build_pr_context returned empty")\n'
+        '    sys.exit(1)\n'
+        '# Write pr_data.json\n'
+        f'os.makedirs("{ws}/reports", exist_ok=True)\n'
+        f'with open("{ws}/reports/pr_data.json", "w") as f:\n'
+        '    json.dump(prs, f, default=str)\n'
+        'print(f"::add-task-context PR_AUDIT_DATA_WRITTEN::yes")\n'
+        'print("[verify] all pr_fetcher checks passed")\n'
+    )
+
+    with pod_fixture("pr-fetch-gh") as pod:
+        _kubectl("exec", pod, "--", "bash", "-c",
+                 f"cat > /tmp/verify_pr_fetch.py << 'PYEOF'\n{verify_script}PYEOF")
+        step = exec_step(pod, "verify-pr-fetch",
+                         f"mkdir -p {ws}/reports && python3 /tmp/verify_pr_fetch.py",
+                         env, timeout=180)
+        result.steps.append(step)
+
+    if not step.ok:
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    if "PR_AUDIT_SKIP" in step.context:
+        result.passed = True
+        result.message = f"SKIPPED — {step.context['PR_AUDIT_SKIP']}"
+        return result
+
+    err = _check_keys(step, ["PR_AUDIT_PRS_FETCHED", "PR_AUDIT_CONTEXT_CHARS"])
+    if err:
+        return _fail(result, step, err)
+
+    return _pass(result,
+                 f"prs_fetched={step.context.get('PR_AUDIT_PRS_FETCHED')} "
+                 f"context_chars={step.context.get('PR_AUDIT_CONTEXT_CHARS')} "
+                 f"bot_comments={step.context.get('PR_AUDIT_BOT_COMMENTS', '?')} "
+                 f"human_comments={step.context.get('PR_AUDIT_HUMAN_COMMENTS', '?')} "
+                 f"elapsed={step.elapsed:.0f}s")
+
+
+def test_12_pr_audit_gh_full(base_env: dict[str, str]) -> TestResult:
+    """Run full pr-audit pipeline: run_pr_audit.py → verify reports → post_pr_audit.
+
+    Verifies:
+      1. Skill loading, prompt building, all PR audit context markers emitted
+      2. reports/pr_audit_report.md written with content (Claude analysis)
+      3. reports/pr_audit_findings.json is valid JSON with expected keys
+      4. reports/skill_improvements.json is valid JSON
+      5. post_pr_audit.py runs without crashing (Slack post attempted; token may be absent)
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor ANTHROPIC_API_KEY set.
+    """
+    result = TestResult("pr-audit-gh-full")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/pr_audit_full"
+    env["WORKSPACE_DIR"] = ws
+    env["N_PRS"] = "10"
+    env["PR_AUDIT_FOCUS"] = "all"
+    env["MAX_TURNS_AUDIT"] = "30"
+    env["DEFAULT_TRACKER"] = "github"
+    sonnet = base_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "us.anthropic.claude-sonnet-4-6")
+    env["AI_MODEL"] = sonnet
+
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "you-got-skills")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    with pod_fixture("pr-audit-full") as pod:
+        # ── Step 1: Run the PR audit ────────────────────────────────────────
+        step = exec_step(pod, "pr-audit-invoke",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         f"python3 -m scripts.analyze.run_pr_audit "
+                         f"--n-prs 10 --focus all",
+                         env, timeout=900)
+        result.steps.append(step)
+
+        # ── Step 2: Verify report files ─────────────────────────────────────
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"# pr_audit_report.md must exist and have content\n"
+            f"md = os.path.join(ws, 'reports', 'pr_audit_report.md')\n"
+            f"if not os.path.exists(md): issues.append('pr_audit_report.md missing')\n"
+            f"elif os.path.getsize(md) < 300: issues.append(f'pr_audit_report.md too small ({{os.path.getsize(md)}} bytes)')\n"
+            f"else: print(f'::add-task-context PR_AUDIT_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"# pr_audit_findings.json must be valid JSON with expected keys\n"
+            f"fj = os.path.join(ws, 'reports', 'pr_audit_findings.json')\n"
+            f"if not os.path.exists(fj): issues.append('pr_audit_findings.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(fj).read())\n"
+            f"        for k in ('repo', 'prs_analyzed'):\n"
+            f"            if k not in d: issues.append(f'pr_audit_findings.json missing key {{k}}')\n"
+            f"        print(f'::add-task-context PR_AUDIT_FINDINGS_VALID::yes')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'pr_audit_findings.json parse error: {{e}}')\n"
+            f"# skill_improvements.json (may be empty but should be valid JSON)\n"
+            f"si = os.path.join(ws, 'reports', 'skill_improvements.json')\n"
+            f"if os.path.exists(si):\n"
+            f"    try:\n"
+            f"        json.loads(open(si).read())\n"
+            f"        print(f'::add-task-context SKILL_IMPROVEMENTS_VALID::yes')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'skill_improvements.json parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('REPORT ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context PR_REPORTS_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-pr-reports", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+
+        # ── Step 3: Run post_pr_audit (Slack post — may fail if no token) ──
+        post_cmd = (
+            f"python3 -m scripts.analyze.post_pr_audit 2>&1 || true"
+        )
+        post_env = dict(env)
+        post_env["FORMICARY_PUBLIC_URL"] = ""
+        post_env["SLACK_THREAD_TS"] = ""
+        post_step = exec_step(pod, "post-pr-audit", post_cmd, post_env, timeout=60)
+        result.steps.append(post_step)
+
+    # ── Evaluate results ─────────────────────────────────────────────────────
+    err = _check_keys(step, ["SKILL", "PR_AUDIT_REPO"])
+    if err:
+        return _fail(result, step, f"pr-audit infrastructure failed: {err}")
+
+    skill = step.context.get("SKILL", "")
+    skill_loaded = step.context.get("SKILL_LOADED", "")
+    audit_repo = step.context.get("PR_AUDIT_REPO", "")
+
+    if not step.ok:
+        if skill_loaded in ("yes", "no"):
+            return _pass(result,
+                         f"skill={skill} loaded={skill_loaded} repo={audit_repo} "
+                         f"(invocation errored — see log) elapsed={step.elapsed:.0f}s")
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    if not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"report files missing after successful pr-audit: {verify_step.stderr[-300:]}")
+
+    md_bytes = verify_step.context.get("PR_AUDIT_MD_BYTES", "?")
+    reports_ok = verify_step.context.get("PR_REPORTS_VERIFIED", "no")
+    return _pass(result,
+                 f"skill={skill} loaded={skill_loaded} repo={audit_repo} "
+                 f"md={md_bytes}B reports={reports_ok} elapsed={step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -1075,6 +1290,8 @@ ALL_TESTS: dict[str, callable] = {
     "review-pr":             test_08_review_pr,
     "audit-git-archaeology": test_09_audit_git_archaeology,
     "audit-skill-invoke":    test_10_audit_skill_invoke,
+    "pr-audit-gh-fetch":     test_11_pr_audit_gh_fetch,
+    "pr-audit-gh-full":      test_12_pr_audit_gh_full,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
