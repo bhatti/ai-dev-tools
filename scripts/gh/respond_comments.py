@@ -70,7 +70,7 @@ def _respond_to_comment(
     comment: dict,
     repo_dir: Path,
     branch: str,
-) -> None:
+) -> bool:
     issue_dir = get_issue_dir(config, issue_id)
     max_turns = int(config.get("MAX_TURNS_FEEDBACK", "10"))
     user = comment["user"]
@@ -104,7 +104,13 @@ You are an AI agent responding to a PR review comment.
         system_prompt=SYSTEM_PROMPTS["respond"],
     )
 
-    commit_all(repo_dir, f"feedback: address comment from @{user}")
+    committed = commit_all(repo_dir, f"feedback: address comment from @{user}")
+
+    if not committed:
+        status = (result.status_json or {}).get("status", "")
+        reason = (result.status_json or {}).get("reason", "no file changes produced")
+        print(f"[respond-comments] comment {comment_id}: no changes committed (status={status} reason={reason})", flush=True)
+        return False
 
     refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
     fetch_result = _run(["git", "-C", str(repo_dir), "fetch", "--depth", "100", "origin", refspec], check=False)
@@ -114,13 +120,14 @@ You are an AI agent responding to a PR review comment.
     push_branch(repo_dir, branch, force_with_lease=True)
 
     summary = (result.status_json or {}).get("summary", "")
-    reply_body = f"Addressed feedback from @{user}. {summary}".strip()
+    reply_body = f"Addressed feedback from @{user}: {summary}".strip().rstrip(":")
     reply = _run([
         "gh", "api", f"repos/{org}/{repo}/issues/{pr_number}/comments",
         "-f", f"body={reply_body}",
     ], check=False)
     if reply.returncode != 0:
         raise RuntimeError(f"Failed to post reply on PR #{pr_number}: {reply.stderr.strip()}")
+    return True
 
 
 @click.command()
@@ -157,20 +164,23 @@ def main(issue_id: str) -> None:
 
     _ensure_repo_clone(config, org, repo, branch, repo_dir)
 
+    addressed = 0
     for comment in actionable:
         comment_id = comment["id"]
         user = comment.get("user", "unknown")
         print(f"  Responding to comment #{comment_id} from @{user}", flush=True)
         try:
-            _respond_to_comment(config, issue_id, org, repo, pr_number, comment, repo_dir, branch)
+            if _respond_to_comment(config, issue_id, org, repo, pr_number, comment, repo_dir, branch):
+                addressed += 1
         except Exception as e:
             print(f"WARNING: failed to respond to comment #{comment_id}: {e}", file=sys.stderr)
 
-    notify(
-        config,
-        f"🔄 Addressed {len(actionable)} review comment(s) on PR #{pr_number} (issue #{issue_id}): {pr.get('url', '')}",
-    )
-    print(f"[respond-comments] handled {len(actionable)} comment(s)", flush=True)
+    print(f"[respond-comments] handled {len(actionable)} comment(s), committed changes for {addressed}", flush=True)
+    if addressed > 0:
+        notify(
+            config,
+            f"🔄 Addressed {addressed} review comment(s) on PR #{pr_number} (issue #{issue_id}): {pr.get('url', '')}",
+        )
     sys.exit(3)
 
 

@@ -72,7 +72,7 @@ def _respond_to_comment(
     comment: dict,
     repo_dir: Path,
     branch: str,
-) -> None:
+) -> bool:
     issue_dir = get_issue_dir(config, issue_id)
     http_token = config.get("BITBUCKET_TOKEN", "")
     http_username = get_bitbucket_git_username(config)
@@ -106,7 +106,13 @@ You are an AI agent responding to BitBucket PR review feedback.
         log_file=issue_dir / "logs" / f"feedback_{comment_id}.log",
         system_prompt=SYSTEM_PROMPTS["respond"],
     )
-    commit_all(repo_dir, f"feedback: address comment from @{author}")
+    committed = commit_all(repo_dir, f"feedback: address comment from @{author}")
+
+    if not committed:
+        status = (result.status_json or {}).get("status", "")
+        reason = (result.status_json or {}).get("reason", "no file changes produced")
+        print(f"[respond-comments] comment {comment_id}: no changes committed (status={status} reason={reason})", flush=True)
+        return False
 
     refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
     fetch_result = _run(["git", "-C", str(repo_dir), "fetch", "--depth", "100", "origin", refspec], check=False)
@@ -121,8 +127,9 @@ You are an AI agent responding to BitBucket PR review feedback.
         push_branch(repo_dir, branch, force_with_lease=True)
 
     summary = (result.status_json or {}).get("summary", "")
-    reply = f"Addressed feedback from @{author}. {summary}".strip()
+    reply = f"Addressed feedback from @{author}: {summary}".strip().rstrip(":")
     add_pr_comment(config, workspace, repo_name, pr_id, reply)
+    return True
 
 
 @click.command()
@@ -159,20 +166,23 @@ def main(issue_id: str) -> None:
 
     _ensure_repo_clone(config, workspace, repo_name, branch, repo_dir)
 
+    addressed = 0
     for comment in ai_bot_comments:
         comment_id = comment.get("id")
         author = comment.get("author", {}).get("nickname", "unknown")
         print(f"  Responding to comment {comment_id} from @{author}", flush=True)
         try:
-            _respond_to_comment(config, issue_id, workspace, repo_name, pr_id, comment, repo_dir, branch)
+            if _respond_to_comment(config, issue_id, workspace, repo_name, pr_id, comment, repo_dir, branch):
+                addressed += 1
         except Exception as e:
             print(f"WARNING: failed to respond to comment {comment_id}: {e}", file=sys.stderr)
 
-    notify(
-        config,
-        f"🔄 Addressed {len(ai_bot_comments)} review comment(s) on PR {pr_id} (issue {issue_id}): {pr.get('url', '')}",
-    )
-    print(f"[respond-comments] handled {len(ai_bot_comments)} comment(s)", flush=True)
+    print(f"[respond-comments] handled {len(ai_bot_comments)} comment(s), committed changes for {addressed}", flush=True)
+    if addressed > 0:
+        notify(
+            config,
+            f"🔄 Addressed {addressed} review comment(s) on PR {pr_id} (issue {issue_id}): {pr.get('url', '')}",
+        )
     sys.exit(3)
 
 

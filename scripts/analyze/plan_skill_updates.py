@@ -58,11 +58,16 @@ Your job is to review the findings and create a detailed, actionable skill updat
    - Correct file paths (must be relative to repo root)
    - Combine duplicates or near-duplicates into a single entry
    - Remove any entries that are already covered by existing skills
+   - **REJECT any proposed change that introduces generic process rules** (LOC-based thresholds,
+     mandatory reviewer counts, blanket "design doc required" policies, etc.) unless the audit
+     report cites multiple specific PRs where the absence of that practice caused a real defect.
+     The team has millions of LOC and thousands of engineers — process overhead must be justified
+     by observed recurring problems, not textbook best practices.
 6. Identify gaps: anything the audit report flags that `skill_improvements.json` does not address.
 7. Write your detailed plan to `reports/skill_update_plan.md` with:
-   - **Executive summary**: which gaps are addressed and why they matter
-   - **Per-change entry**: file path, gap addressed, exact change/content to write
-   - **Priority order**: highest-impact changes first
+   - **Executive summary**: which SPECIFIC recurring gaps are addressed and the PRs that evidence them
+   - **Per-change entry**: file path, gap addressed, exact change/content to write, PRs that motivated it
+   - **Priority order**: highest-impact changes first (most frequently recurring gap → highest priority)
 8. Output ONLY this JSON on the last line (no text after it):
    {{"status":"DONE","skill_updates":<N>,"new_skills":<M>,"summary":"<one sentence>"}}
    Or if blocked:

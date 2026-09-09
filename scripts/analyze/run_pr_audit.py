@@ -202,7 +202,7 @@ A common failure mode is deeply analyzing 8-10 PRs and ignoring the rest. This i
 
 For EVERY PR:
 - Check spec coverage (linked issue, acceptance criteria present or absent)
-- Check design doc presence (for complex PRs >300 LOC)
+- Check design doc presence (for PRs with complex architectural changes, NOT based on LOC alone)
 - Check bot vs human comment patterns (skill gaps)
 - Check test coverage, review quality, PR size, practices
 
@@ -268,10 +268,20 @@ Write these files using relative paths from the repo root (the `reports/` symlin
     "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"recommendation":"..."}}],
     "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}}}}
 
-3. `reports/skill_improvements.json` -- Proposed improvements:
+3. `reports/skill_improvements.json` -- Proposed improvements grounded ONLY in observed patterns:
    {{"repo_skill_changes":[{{"action":"update|create","file_path":"relative/path","description":"what to change","changes":"content to write"}}],
     "new_docs":[{{"path":"relative/path","description":"what this doc covers","content":"full content"}}],
     "ygs_recommendations":[{{"skill":"skill-name","recommendation":"what to improve"}}]}}
+
+   CRITICAL RULES for skill_improvements:
+   - Every change MUST reference specific PRs that motivated it (e.g. "PRs #123, #456 repeatedly missed X")
+   - NEVER propose generic industry rules (LOC thresholds, reviewer count formulas, mandatory review checklists)
+     unless MULTIPLE PRs in this audit show evidence that the team is missing that specific practice
+   - NEVER invent process overhead (required approvals, mandatory design docs for all large PRs, etc.)
+     without evidence from the actual PR data that such overhead would have caught real bugs
+   - The goal is to address RECURRING GAPS specific to this codebase and team, not to impose
+     generic software engineering textbook rules
+   - If you cannot cite 2+ PRs as evidence for a proposed change, do not propose it
 
 DO NOT emit any ::add-task-context markers yourself -- the orchestrator script reads
 your JSON output and emits them automatically. Focus only on writing the three report files.

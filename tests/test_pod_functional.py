@@ -1711,6 +1711,84 @@ def test_15_create_skill_pr_jira(base_env: dict[str, str]) -> TestResult:
                  f"elapsed={run_step.elapsed:.0f}s")
 
 
+def test_16_respond_comments_jira(base_env: dict[str, str]) -> TestResult:
+    """Verify respond_comments.py clones a BB repo using x-token-auth for ATATT tokens.
+
+    Does NOT call Claude — verifies only that:
+      1. get_bitbucket_git_username returns 'x-token-auth' for ATATT tokens
+      2. The repo can be cloned via HTTPS with that username (actual network clone)
+
+    This exercises the exact code path that failed when BITBUCKET_USERNAME (email)
+    was used instead of x-token-auth for ATATT tokens.
+
+    Requires BITBUCKET_TOKEN, BITBUCKET_WORKSPACE, BITBUCKET_REPO in env. Skipped if missing.
+    """
+    result = TestResult("respond-comments-jira")
+
+    bb_token = base_env.get("BITBUCKET_TOKEN", "")
+    bb_workspace = base_env.get("BITBUCKET_WORKSPACE", os.environ.get("BITBUCKET_WORKSPACE", ""))
+    bb_repo = base_env.get("BITBUCKET_REPO", os.environ.get("BITBUCKET_REPO", ""))
+
+    if not bb_token or not bb_workspace or not bb_repo:
+        result.passed = True
+        result.message = "SKIPPED — BITBUCKET_TOKEN/WORKSPACE/REPO not set"
+        return result
+
+    env = dict(base_env)
+    env["BITBUCKET_WORKSPACE"] = bb_workspace
+    env["BITBUCKET_REPO"] = bb_repo
+    env["BITBUCKET_TOKEN"] = bb_token
+
+    # Test 1: verify get_bitbucket_git_username returns x-token-auth for ATATT tokens
+    username_check_cmd = (
+        "python3 -c \""
+        "import os; "
+        "from scripts.common.git_utils import get_bitbucket_git_username; "
+        "config = {'BITBUCKET_TOKEN': os.environ['BITBUCKET_TOKEN'], 'BITBUCKET_USERNAME': 'sbhatti@cribl.io'}; "
+        "u = get_bitbucket_git_username(config); "
+        "print(f'git_username={u}'); "
+        "assert u == 'x-token-auth', f'Expected x-token-auth, got {u}'; "
+        "print('::add-task-context GIT_USERNAME::' + u)"
+        "\""
+    )
+
+    # Test 2: clone the BB repo via HTTPS with x-token-auth (depth=1 for speed)
+    clone_cmd = (
+        "python3 -c \""
+        "import os, shutil; "
+        "from scripts.common.git_utils import clone_repo, detect_bitbucket_url, get_bitbucket_git_username; "
+        "config = {'BITBUCKET_TOKEN': os.environ['BITBUCKET_TOKEN'], 'BITBUCKET_USERNAME': 'sbhatti@cribl.io'}; "
+        "username = get_bitbucket_git_username(config); "
+        "token = config['BITBUCKET_TOKEN']; "
+        "url = detect_bitbucket_url(os.environ['BITBUCKET_WORKSPACE'], os.environ['BITBUCKET_REPO'], use_ssh=False); "
+        "dest = '/tmp/pod_test_respond_clone'; "
+        "shutil.rmtree(dest, ignore_errors=True); "
+        "clone_repo(url, dest, http_token=token, http_username=username, depth=1); "
+        "import subprocess; r = subprocess.run(['git','-C',dest,'log','--oneline','-1'], capture_output=True, text=True); "
+        "print('clone OK, HEAD:', r.stdout.strip()); "
+        "print('::add-task-context CLONE_OK::yes')"
+        "\""
+    )
+
+    with pod_fixture("respond-comments-jira") as pod:
+        # Step 1: check username helper
+        step1 = exec_step(pod, "check-git-username", username_check_cmd, env, timeout=20)
+        result.steps.append(step1)
+        if not step1.ok:
+            return _fail(result, step1, f"get_bitbucket_git_username check failed: {step1.stderr[-300:]}")
+
+        # Step 2: clone repo with correct credentials
+        step2 = exec_step(pod, "clone-bb-repo", clone_cmd, env, timeout=90)
+        result.steps.append(step2)
+        if not step2.ok:
+            return _fail(result, step2,
+                         f"BB HTTPS clone failed (ATATT token auth bug?): {step2.stderr[-400:]}")
+
+    git_username = step1.context.get("GIT_USERNAME", "?")
+    clone_ok = step2.context.get("CLONE_OK", "no")
+    return _pass(result, f"git_username={git_username} clone_ok={clone_ok} elapsed={step2.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -1729,6 +1807,7 @@ ALL_TESTS: dict[str, callable] = {
     "plan-skill-updates":    test_13_plan_skill_updates,
     "create-skill-pr":       test_14_create_skill_pr,
     "create-skill-pr-jira":  test_15_create_skill_pr_jira,
+    "respond-comments-jira": test_16_respond_comments_jira,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
