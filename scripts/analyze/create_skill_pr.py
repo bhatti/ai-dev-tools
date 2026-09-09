@@ -209,12 +209,14 @@ def main() -> None:
 
     pr_url = pr_info.get("url", "")
     pr_num = pr_info.get("number", 0)
+    is_bb = tracker in ("jira", "bitbucket", "jira/bitbucket")
     pr_json = {
         "url": pr_url,
         "number": pr_num,
         "branch": pr_branch,
-        "repo": f"{org}/{repo}" if org and repo else "",
-        "tracker": "bitbucket" if tracker in ("jira", "bitbucket", "jira/bitbucket") else "github",
+        "repo": repo,          # just the repo name (not "workspace/repo")
+        "workspace": org if is_bb else "",  # needed by check_pr_state for BB API path
+        "tracker": "bitbucket" if is_bb else "github",
     }
     # Write to /workspace/pr.json via artifacts module (get_issue_dir returns workspace root)
     artifacts_write_json(config, _ISSUE_ID, "pr.json", pr_json)
