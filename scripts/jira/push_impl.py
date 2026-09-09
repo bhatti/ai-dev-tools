@@ -19,6 +19,7 @@ from scripts.common.config import get_issue_dir, load_config
 from scripts.common.git_utils import (
     commit_all,
     detect_bitbucket_url,
+    get_bitbucket_git_username,
     get_commit_count,
     push_branch,
 )
@@ -49,7 +50,7 @@ def main(issue_id: str) -> None:
 
     repo_dir = issue_dir / "repo"
     http_token = config.get("BITBUCKET_TOKEN", "")
-    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+    http_username = get_bitbucket_git_username(config)
     base_branch = config.get("BASE_BRANCH", "main")
 
     commit_all(repo_dir, "implement: changes from AI agent")

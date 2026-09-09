@@ -28,7 +28,7 @@ from scripts.common import bitbucket_api
 from scripts.common.artifacts import read_json as artifacts_read_json
 from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.git_utils import clone_by_tracker, configure_git, detect_bitbucket_url, push_branch
+from scripts.common.git_utils import clone_by_tracker, configure_git, detect_bitbucket_url, get_bitbucket_git_username, push_branch
 from scripts.common.shell import run_cmd
 from scripts.standup.slack_client import post_message
 
@@ -100,7 +100,8 @@ def main() -> None:
     if branch_file.exists():
         base_branch = branch_file.read_text().strip()
     elif tracker in ("jira", "bitbucket", "jira/bitbucket"):
-        base_branch = config.get("BB_REPO_BRANCH", "main")
+        # Auto-detect BB default branch from API (org config may differ from actual default)
+        base_branch = _detect_bb_default_branch(config) or config.get("BB_REPO_BRANCH", "main")
     else:
         base_branch = config.get("GH_REPO_BRANCH", "main")
 
@@ -170,7 +171,7 @@ def main() -> None:
             push_branch(
                 codebase_dir, pr_branch,
                 http_token=config.get("BITBUCKET_TOKEN", ""),
-                http_username=config.get("BITBUCKET_USERNAME", "x-token-auth"),
+                http_username=get_bitbucket_git_username(config),
                 url=detect_bitbucket_url(workspace, repo_name, use_ssh=False),
             )
         else:
@@ -403,6 +404,29 @@ def _read_text_safe(path: Path) -> str:
         return path.read_text(encoding="utf-8") if path.exists() else ""
     except OSError:
         return ""
+
+
+def _detect_bb_default_branch(config: dict) -> str:
+    """Detect the default branch of the Bitbucket repo via API."""
+    import requests
+    workspace = config.get("BITBUCKET_WORKSPACE", "")
+    repo = config.get("BITBUCKET_REPO", "")
+    token = config.get("BITBUCKET_TOKEN", "")
+    if not workspace or not repo or not token:
+        return ""
+    try:
+        resp = requests.get(
+            f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}",
+            headers={"Authorization": f"Bearer {token}"}, timeout=10,
+        )
+        if resp.ok:
+            branch = resp.json().get("mainbranch", {}).get("name", "")
+            if branch:
+                print(f"[create-skill-pr] detected BB default branch: {branch}", flush=True)
+            return branch
+    except Exception as e:
+        print(f"[create-skill-pr] could not detect BB default branch: {e}", flush=True)
+    return ""
 
 
 def _write_ygs_recommendations(reports_dir: Path, recs: list[dict]) -> None:

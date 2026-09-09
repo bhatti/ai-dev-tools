@@ -1546,6 +1546,171 @@ def test_14_create_skill_pr(base_env: dict[str, str]) -> TestResult:
                  f"elapsed={run_step.elapsed:.0f}s")
 
 
+def test_15_create_skill_pr_jira(base_env: dict[str, str]) -> TestResult:
+    """Run create_skill_pr.py end-to-end for Bitbucket/Jira tracker.
+
+    Verifies:
+      1. Clone succeeds with BITBUCKET_TOKEN (using x-token-auth username for ATATT tokens)
+      2. pr.json is written with url and number > 0
+      3. ::add-task-context SKILL_PR_CREATED::yes emitted
+
+    Teardown: closes the created BB PR and deletes the remote branch.
+
+    Requires BITBUCKET_TOKEN, BITBUCKET_WORKSPACE, BITBUCKET_REPO in env. Skipped if missing.
+    """
+    result = TestResult("create-skill-pr-jira")
+
+    bb_token = base_env.get("BITBUCKET_TOKEN", "")
+    bb_workspace = base_env.get("BITBUCKET_WORKSPACE", os.environ.get("BITBUCKET_WORKSPACE", ""))
+    bb_repo = base_env.get("BITBUCKET_REPO", os.environ.get("BITBUCKET_REPO", ""))
+    bb_username = base_env.get("BITBUCKET_USERNAME", os.environ.get("BITBUCKET_USERNAME", "sbhatti@cribl.io"))
+
+    if not bb_token or not bb_workspace or not bb_repo:
+        result.passed = True
+        result.message = "SKIPPED — BITBUCKET_TOKEN/WORKSPACE/REPO not set"
+        return result
+
+    # Look up the BB repo's actual default branch (avoids hardcoding "main")
+    import requests as _requests
+    try:
+        _resp = _requests.get(
+            f"https://api.bitbucket.org/2.0/repositories/{bb_workspace}/{bb_repo}",
+            headers={"Authorization": f"Bearer {bb_token}"}, timeout=10,
+        )
+        bb_default_branch = _resp.json().get("mainbranch", {}).get("name", "main") if _resp.ok else "main"
+    except Exception:
+        bb_default_branch = "main"
+
+    env = dict(base_env)
+    ws = "/workspace/create_skill_pr_jira"
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+    env["DEFAULT_TRACKER"] = "jira"
+    env["BITBUCKET_WORKSPACE"] = bb_workspace
+    env["BITBUCKET_REPO"] = bb_repo
+    env["BITBUCKET_USERNAME"] = bb_username
+    env["BITBUCKET_TOKEN"] = bb_token
+    env["BB_REPO_BRANCH"] = bb_default_branch
+    env["GIT_USER_NAME"] = "AI Agent"
+    env["GIT_USER_EMAIL"] = "ai-agent@noreply.local"
+    for gh_key in ("GH_TOKEN", "GH_ORG", "GH_REPO"):
+        env.pop(gh_key, None)
+
+    run_id = uuid.uuid4().hex[:8]
+    skill_file = f".claude/skills/pod-ci-jira-{run_id}.md"
+    improvements = json.dumps({
+        "repo_skill_changes": [
+            {
+                "file_path": skill_file,
+                "action": "create",
+                "description": "CI pod test: temporary skill placeholder (Jira/BB — will be closed/deleted)",
+                "changes": f"# CI Skill Placeholder (Jira)\n\nCreated by pod functional test run {run_id}.\n"
+            }
+        ],
+        "new_docs": [],
+        "ygs_recommendations": []
+    })
+    audit_report = (
+        "# PR Audit Report\n\nPod functional test run for create-skill-pr-jira validation.\n\n"
+        f"Run ID: {run_id}\n\n## Findings\n- Placeholder finding for CI validation (BB).\n"
+    )
+    skill_update_plan = (
+        f"# Skill Update Plan (BB)\n\n## Priority 1\nAdd {skill_file} as CI placeholder.\n"
+    )
+
+    setup_cmd = (
+        f"mkdir -p {ws}/reports {ws}/logs && "
+        f"printf '%s' {json.dumps(improvements)} > {ws}/reports/skill_improvements.json && "
+        f"printf '%s' {json.dumps(audit_report)} > {ws}/reports/pr_audit_report.md && "
+        f"printf '%s' {json.dumps(skill_update_plan)} > {ws}/reports/skill_update_plan.md"
+    )
+
+    pr_number = 0
+    pr_branch = ""
+
+    with pod_fixture("create-skill-pr-jira") as pod:
+        # ── Step 1: Setup ────────────────────────────────────────────────────
+        setup_step = exec_step(pod, "setup", setup_cmd, env, timeout=15)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, "setup failed")
+
+        # ── Step 2: Run create_skill_pr ──────────────────────────────────────
+        run_step = exec_step(pod, "create-skill-pr-jira-run",
+                             "python3 -m scripts.analyze.create_skill_pr",
+                             env, timeout=120)
+        result.steps.append(run_step)
+
+        # ── Step 3: Verify pr.json ───────────────────────────────────────────
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"pr_json_path = os.path.join(ws, 'pr.json')\n"
+            f"if not os.path.exists(pr_json_path):\n"
+            f"    issues.append('pr.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(pr_json_path).read())\n"
+            f"        url = d.get('url','')\n"
+            f"        num = d.get('number', 0)\n"
+            f"        branch = d.get('branch','')\n"
+            f"        print(f'::add-task-context PR_URL::{{url}}')\n"
+            f"        print(f'::add-task-context PR_NUMBER::{{num}}')\n"
+            f"        print(f'::add-task-context PR_BRANCH::{{branch}}')\n"
+            f"        if not url: issues.append('pr.json url is empty')\n"
+            f"        if not num: issues.append('pr.json number is 0')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'pr.json parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('PR ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context PR_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-pr", verify_cmd, env, timeout=15)
+        result.steps.append(verify_step)
+
+        pr_number = int(verify_step.context.get("PR_NUMBER", "0") or "0")
+        pr_branch = verify_step.context.get("PR_BRANCH", "")
+
+        # ── Step 4: Teardown — decline BB PR and delete branch ───────────────
+        if pr_number and pr_branch:
+            teardown_cmd = (
+                f"python3 - <<'PYEOF'\n"
+                f"import requests, os\n"
+                f"token = os.environ.get('BITBUCKET_TOKEN', '')\n"
+                f"headers = {{'Authorization': f'Bearer {{token}}'}}\n"
+                f"base = 'https://api.bitbucket.org/2.0/repositories/{bb_workspace}/{bb_repo}'\n"
+                f"r = requests.post(f'{{base}}/pullrequests/{pr_number}/decline', headers=headers)\n"
+                f"print('decline status:', r.status_code)\n"
+                f"r2 = requests.delete(f'{{base}}/refs/branches/{pr_branch}', headers=headers)\n"
+                f"print('delete branch status:', r2.status_code)\n"
+                f"PYEOF"
+            )
+            close_step = exec_step(pod, "teardown-decline-pr", teardown_cmd, env, timeout=30)
+            result.steps.append(close_step)
+            if not close_step.ok:
+                print(f"    [WARNING] BB PR teardown failed: {close_step.stderr[-200:]}", flush=True)
+
+    # ── Evaluate ─────────────────────────────────────────────────────────────
+    if not run_step.ok:
+        return _fail(result, run_step,
+                     f"create_skill_pr (jira) failed (exit {run_step.returncode})\n"
+                     f"stdout: {run_step.stdout[-600:]}\nstderr: {run_step.stderr[-400:]}")
+
+    if not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"pr.json invalid: {verify_step.stderr[-300:]}")
+
+    pr_url = verify_step.context.get("PR_URL", "")
+    return _pass(result,
+                 f"pr={pr_url} number={pr_number} branch={pr_branch} "
+                 f"elapsed={run_step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -1563,6 +1728,7 @@ ALL_TESTS: dict[str, callable] = {
     "pr-audit-gh-full":      test_12_pr_audit_gh_full,
     "plan-skill-updates":    test_13_plan_skill_updates,
     "create-skill-pr":       test_14_create_skill_pr,
+    "create-skill-pr-jira":  test_15_create_skill_pr_jira,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

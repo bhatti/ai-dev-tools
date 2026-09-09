@@ -34,6 +34,18 @@ def make_branch_name(issue_id: str, title: str, nonce: str | None = None) -> str
     return f"ai/{issue_id}-{slug}-{nonce}"
 
 
+def get_bitbucket_git_username(config: dict) -> str:
+    """Return the correct username for Bitbucket git HTTPS operations.
+
+    Atlassian ATATT access tokens require 'x-token-auth' as the git username,
+    not the account email. App passwords use the account email/username.
+    """
+    token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
+    if token.startswith("ATATT"):
+        return "x-token-auth"
+    return config.get("BITBUCKET_USERNAME", "x-token-auth")
+
+
 def _embed_credentials(url: str, username: str, token: str) -> str:
     """Return URL with credentials embedded: https://user:token@host/path.
 
@@ -286,7 +298,7 @@ def clone_by_tracker(config: dict, dest: Path, tracker: str = "") -> Path:
             raise ValueError("BITBUCKET_WORKSPACE and BITBUCKET_REPO must be set")
         http_token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
         if http_token:
-            http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+            http_username = get_bitbucket_git_username(config)
             clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
             print(f"[clone] cloning {workspace}/{repo_name} via HTTPS", flush=True)
             return clone_repo(clone_url, dest, http_token=http_token, http_username=http_username)
