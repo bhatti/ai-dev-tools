@@ -28,7 +28,7 @@ from scripts.common import bitbucket_api
 from scripts.common.artifacts import read_json as artifacts_read_json
 from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.git_utils import clone_by_tracker, configure_git
+from scripts.common.git_utils import clone_by_tracker, configure_git, push_branch
 from scripts.common.shell import run_cmd
 from scripts.standup.slack_client import post_message
 
@@ -60,6 +60,10 @@ def main() -> None:
     repo_changes = improvements.get("repo_skill_changes", [])
     new_docs = improvements.get("new_docs", [])
     ygs_recs = improvements.get("ygs_recommendations", [])
+
+    # Read optional plan and findings for enriched PR body
+    audit_report = _read_text_safe(reports_dir / "pr_audit_report.md")
+    skill_update_plan = _read_text_safe(reports_dir / "skill_update_plan.md")
 
     if not repo_changes and not new_docs:
         print("[create-skill-pr] No repo changes to propose", flush=True)
@@ -147,16 +151,37 @@ def main() -> None:
             _write_ygs_recommendations(reports_dir, ygs_recs)
         return
 
-    # Commit + push
+    # Commit + push (DRY: same credential logic as implement workflow's push_impl.py)
     _run_git(codebase_dir, ["add", "-A"])
     commit_msg = (
         f"pr-audit: improve skills based on {len(changes_made)} changes\n\n"
         "Co-Authored-By: Claude <noreply@anthropic.com>"
     )
     _run_git(codebase_dir, ["commit", "-m", commit_msg])
-    push_result = _run_git(codebase_dir, ["push", "-u", "origin", pr_branch])
-    if push_result.returncode != 0:
-        print("[create-skill-pr] Push failed — cannot create PR", file=sys.stderr, flush=True)
+    try:
+        if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+            workspace = config.get("BITBUCKET_WORKSPACE", "")
+            repo_name = config.get("BITBUCKET_REPO", "")
+            bb_token = config.get("BITBUCKET_TOKEN", "")
+            bb_user = config.get("BITBUCKET_USERNAME", "")
+            push_branch(
+                codebase_dir, pr_branch,
+                http_token=bb_token,
+                http_username=bb_user,
+                url=f"https://bitbucket.org/{workspace}/{repo_name}.git",
+            )
+        else:
+            gh_token = config.get("GH_TOKEN", "")
+            gh_org = config.get("GH_ORG", "")
+            repo_name = config.get("GH_REPO", "")
+            push_branch(
+                codebase_dir, pr_branch,
+                http_token=gh_token,
+                http_username="x-access-token",
+                url=f"https://github.com/{gh_org}/{repo_name}.git",
+            )
+    except Exception as e:
+        print(f"[create-skill-pr] Push failed — cannot create PR: {e}", file=sys.stderr, flush=True)
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         if ygs_recs:
@@ -164,7 +189,8 @@ def main() -> None:
         sys.exit(1)
 
     # Create PR (DRY: uses run_cmd for GH, bitbucket_api for BB — same as implement workflow)
-    pr_info = _create_pr(config, pr_branch, base_branch, repo_changes, new_docs, tracker)
+    pr_info = _create_pr(config, pr_branch, base_branch, repo_changes, new_docs, tracker,
+                         audit_report=audit_report, skill_update_plan=skill_update_plan)
 
     # Determine org/repo for pr.json metadata
     org = config.get("GH_ORG", config.get("BITBUCKET_WORKSPACE", ""))
@@ -246,38 +272,82 @@ def _create_pr(
     repo_changes: list[dict],
     new_docs: list[dict],
     tracker: str,
+    audit_report: str = "",
+    skill_update_plan: str = "",
 ) -> dict:
     """Create a PR on GitHub or Bitbucket.
 
     Returns {'url': ..., 'number': ...}. Calls sys.exit(1) on failure.
     Uses run_cmd (GH) and bitbucket_api.create_pr (BB) — same as implement workflow (DRY).
+    PR body includes audit findings summary and skill update plan for reviewer context.
     """
     title = f"[AI] PR audit: skill & doc improvements ({len(repo_changes) + len(new_docs)} changes)"
-
-    body_lines = [
-        "## Summary",
-        "",
-        "Automated improvements identified by PR audit analysis.",
-        "",
-    ]
-    if repo_changes:
-        body_lines.append("### Skill Updates")
-        for ch in repo_changes[:10]:
-            body_lines.append(f"- `{ch.get('file_path', '?')}`: {ch.get('description', '')}")
-        if len(repo_changes) > 10:
-            body_lines.append(f"- ...and {len(repo_changes) - 10} more")
-        body_lines.append("")
-    if new_docs:
-        body_lines.append("### New Documentation")
-        for d in new_docs[:10]:
-            body_lines.append(f"- `{d.get('path', '?')}`: {d.get('description', '')}")
-        body_lines.append("")
-    body_lines.append("_This PR was created by an AI agent based on PR audit findings._")
-    body = "\n".join(body_lines)
+    body = _build_pr_body(repo_changes, new_docs, audit_report, skill_update_plan)
 
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
         return _create_bitbucket_pr(config, title, body, head_branch, base_branch)
     return _create_github_pr(config, title, body, head_branch)
+
+
+def _build_pr_body(
+    repo_changes: list[dict],
+    new_docs: list[dict],
+    audit_report: str = "",
+    skill_update_plan: str = "",
+) -> str:
+    """Build enriched PR body with findings summary, change list, and full audit report.
+
+    Kept in one place (DRY) so both GH and BB get identical descriptions.
+    """
+    # Extract first non-empty paragraph from audit report as the summary
+    summary = "Automated improvements identified by PR audit analysis."
+    if audit_report:
+        for line in audit_report.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                summary = stripped[:400]
+                break
+
+    body_lines = ["## Summary", "", summary, ""]
+
+    if repo_changes:
+        body_lines.append(f"## Skill Updates ({len(repo_changes)} changes)")
+        body_lines.append("")
+        for ch in repo_changes[:15]:
+            body_lines.append(f"- `{ch.get('file_path', '?')}`: {ch.get('description', '')}")
+        if len(repo_changes) > 15:
+            body_lines.append(f"- ...and {len(repo_changes) - 15} more")
+        body_lines.append("")
+
+    if new_docs:
+        body_lines.append(f"## New Documentation ({len(new_docs)} files)")
+        body_lines.append("")
+        for d in new_docs[:15]:
+            body_lines.append(f"- `{d.get('path', '?')}`: {d.get('description', '')}")
+        if len(new_docs) > 15:
+            body_lines.append(f"- ...and {len(new_docs) - 15} more")
+        body_lines.append("")
+
+    if skill_update_plan:
+        body_lines.append("## Skill Update Plan")
+        body_lines.append("")
+        body_lines.append(skill_update_plan[:3000])
+        if len(skill_update_plan) > 3000:
+            body_lines.append("\n_... (truncated — see reports/skill_update_plan.md for full plan)_")
+        body_lines.append("")
+
+    if audit_report:
+        body_lines.append("<details><summary>Full Audit Report</summary>")
+        body_lines.append("")
+        body_lines.append(audit_report[:8000])
+        if len(audit_report) > 8000:
+            body_lines.append("\n_... (truncated — see reports/pr_audit_report.md for full report)_")
+        body_lines.append("")
+        body_lines.append("</details>")
+        body_lines.append("")
+
+    body_lines.append("_This PR was created by an AI agent based on PR audit findings._")
+    return "\n".join(body_lines)
 
 
 def _create_github_pr(config: dict, title: str, body: str, head_branch: str) -> dict:
@@ -315,6 +385,14 @@ def _create_bitbucket_pr(config: dict, title: str, body: str, head_branch: str, 
 def _write_empty_pr_json(config: dict) -> None:
     """Write an empty pr.json to signal no PR was created (at /workspace/pr-audit/pr.json)."""
     artifacts_write_json(config, _ISSUE_ID, "pr.json", {"url": "", "number": 0, "branch": "", "repo": "", "tracker": ""})
+
+
+def _read_text_safe(path: Path) -> str:
+    """Read a text file, returning empty string if missing or unreadable."""
+    try:
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError:
+        return ""
 
 
 def _write_ygs_recommendations(reports_dir: Path, recs: list[dict]) -> None:
