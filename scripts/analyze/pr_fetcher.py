@@ -20,6 +20,51 @@ KNOWN_BOTS = {
 }
 _KNOWN_BOTS_LOWER = frozenset(b.lower() for b in KNOWN_BOTS)
 
+# CI bots: build runners, test runners, status reporters — NOT code reviewers
+_CI_BOT_USERNAMES: frozenset[str] = frozenset({
+    "github-actions[bot]", "circleci", "jenkins", "travis-ci",
+    "buildkite", "teamcity", "azure-pipelines[bot]", "circle-ci[bot]",
+})
+_CI_BOT_BODY_PATTERNS: tuple[str, ...] = (
+    "Linux - ", "Windows - ", "macOS - ", "Build #",
+    "GitHub Actions", "CircleCI", "Jenkins build", "Travis CI",
+)
+
+# Code-review bots: AI reviewers that catch logical/security/style issues
+_CODE_REVIEW_BOT_USERNAME_SUBSTRINGS: tuple[str, ...] = (
+    "claude", "copilot", "coderabbit", "codeclimate",
+    "sonarcloud", "codacy", "snyk", "deepsource", "reviewdog",
+)
+_CODE_REVIEW_BOT_BODY_MARKERS: tuple[str, ...] = (
+    "ygs-review-pr", "ygs-security-review", "## Code Review",
+    "## Security Review", "## Audit Report", "pr-review-agent",
+)
+
+# Cache for raw issue API responses (populated by fetch_issue_details)
+_issue_raw_cache: dict[str, dict] = {}
+
+
+def _reports_dir() -> Path:
+    """Return workspace/reports directory, creating it if needed."""
+    d = Path(os.environ.get("WORKSPACE_DIR", ".")) / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_raw(filename: str, data: object) -> None:
+    """Silently write data as JSON to reports/<filename>."""
+    try:
+        path = _reports_dir() / filename
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    except Exception as e:
+        print(f"[pr-fetch] WARNING: could not write {filename}: {e}", file=sys.stderr, flush=True)
+
+
+def write_issues_raw() -> None:
+    """Write accumulated raw issue API responses to reports/issues_raw.json."""
+    if _issue_raw_cache:
+        _write_raw("issues_raw.json", _issue_raw_cache)
+
 
 # ---------------------------------------------------------------------------
 # Dispatcher
@@ -75,7 +120,12 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         print(f"[pr-fetch] could not parse gh output: {e}", file=sys.stderr, flush=True)
         return []
 
+    # A.1: save raw PR list to artifact
+    _write_raw("pr_data_raw.json", raw_prs)
+
     prs: list[dict] = []
+    reviews_raw: dict[int, list] = {}
+
     for rp in raw_prs:
         # Collect all comments (PR-level + review bodies)
         all_comments: list[dict] = []
@@ -95,8 +145,11 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
                 })
 
         # Fetch inline review comments (code-level)
-        inline = _fetch_gh_review_comments(org, repo, rp.get("number", 0))
+        pr_number = rp.get("number", 0)
+        inline = _fetch_gh_review_comments(org, repo, pr_number)
         all_comments.extend(inline)
+        if inline:
+            reviews_raw[pr_number] = inline
 
         classified = classify_comments(all_comments)
 
@@ -106,8 +159,12 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         deletions = sum(f.get("deletions", 0) for f in files_list if isinstance(f, dict))
         file_paths = [f.get("path", "") for f in files_list if isinstance(f, dict)]
 
+        # A.2: derive review_decision from actual reviews array; fall back to reviewDecision field
+        reviews_list = rp.get("reviews", [])
+        review_decision = _derive_review_decision(reviews_list, rp.get("reviewDecision", ""))
+
         pr = {
-            "number": rp.get("number", 0),
+            "number": pr_number,
             "title": rp.get("title", ""),
             "author": rp.get("author", {}).get("login", ""),
             "merged_at": rp.get("mergedAt", ""),
@@ -120,14 +177,37 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "file_paths": file_paths[:50],
             "all_comments": all_comments,
             "bot_comments": classified["bot_comments"],
+            "ci_comments": classified["ci_comments"],
+            "review_bot_comments": classified["review_bot_comments"],
             "human_comments": classified["human_comments"],
             "linked_issue": None,
-            "review_decision": rp.get("reviewDecision", ""),
+            "review_decision": review_decision,
+            "review_decision_protected": rp.get("reviewDecision", ""),
         }
         prs.append(pr)
 
+    # A.1: save inline review comments to artifact
+    if reviews_raw:
+        _write_raw("pr_reviews_raw.json", reviews_raw)
+
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from GitHub ({org}/{repo})", flush=True)
     return prs
+
+
+def _derive_review_decision(reviews: list, fallback: str = "") -> str:
+    """Derive review decision from the reviews array (more reliable than reviewDecision field).
+
+    Falls back to the reviewDecision field value when the reviews array is empty,
+    since some repos populate reviewDecision via branch protection rules.
+    """
+    states = [r.get("state", "") for r in (reviews or [])]
+    if "CHANGES_REQUESTED" in states:
+        return "CHANGES_REQUESTED"
+    if "APPROVED" in states:
+        return "APPROVED"
+    if states:
+        return "COMMENTED"
+    return fallback or ""
 
 
 def _fetch_gh_review_comments(org: str, repo: str, pr_number: int) -> list[dict]:
@@ -199,11 +279,18 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         raw_prs.extend(data.get("values", []))
         url = data.get("next", "")
 
+    # A.1: save raw PR list to artifact
+    _write_raw("pr_data_raw.json", raw_prs[:n_prs])
+
     prs: list[dict] = []
+    reviews_raw: dict[int, list] = {}
+
     for rp in raw_prs[:n_prs]:
         pr_id = rp.get("id", 0)
         # Fetch comments
         all_comments = _fetch_bb_comments(base, pr_id, auth)
+        if all_comments:
+            reviews_raw[pr_id] = all_comments
         classified = classify_comments(all_comments)
 
         # Fetch diffstat for file-level metrics
@@ -227,11 +314,17 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "file_paths": file_paths[:50],
             "all_comments": all_comments,
             "bot_comments": classified["bot_comments"],
+            "ci_comments": classified["ci_comments"],
+            "review_bot_comments": classified["review_bot_comments"],
             "human_comments": classified["human_comments"],
             "linked_issue": None,
             "review_decision": "",
         }
         prs.append(pr)
+
+    # A.1: save per-PR comments to artifact
+    if reviews_raw:
+        _write_raw("pr_reviews_raw.json", reviews_raw)
 
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
     return prs
@@ -288,23 +381,69 @@ def _fetch_bb_diffstat(base_url: str, pr_id: int, auth: tuple | None) -> list[di
 # ---------------------------------------------------------------------------
 
 def classify_comments(comments: list[dict]) -> dict:
-    """Separate bot vs human comments.
+    """Separate comments into ci_comments, review_bot_comments, and human_comments.
 
-    Bot: username ends with 'bot' or '[bot]' (case-insensitive), or in KNOWN_BOTS.
-    Returns {'bot_comments': [...], 'human_comments': [...]}.
+    CI bots (build runners, test reporters) are separated from code-review bots
+    (AI reviewers, SAST tools) so the caller can compute meaningful skill catch rates.
+
+    Returns:
+        {
+            'ci_comments': [...],        # CI/build automation
+            'review_bot_comments': [...], # AI code-review bots
+            'human_comments': [...],     # humans
+            'bot_comments': [...],       # union of ci + review_bot (backward compat)
+        }
     """
-    bot: list[dict] = []
+    ci: list[dict] = []
+    review_bot: list[dict] = []
     human: list[dict] = []
     for c in comments:
         author = c.get("author", "")
-        if _is_bot(author):
-            bot.append(c)
+        bucket = _classify_comment(author, c.get("body", ""))
+        if bucket == "ci":
+            ci.append(c)
+        elif bucket == "review_bot":
+            review_bot.append(c)
         else:
             human.append(c)
-    return {"bot_comments": bot, "human_comments": human}
+    return {
+        "ci_comments": ci,
+        "review_bot_comments": review_bot,
+        "human_comments": human,
+        "bot_comments": ci + review_bot,
+    }
+
+
+def _classify_comment(author: str, body: str) -> str:
+    """Return 'ci', 'review_bot', or 'human' for a single comment."""
+    lower_author = author.lower()
+
+    # 1. Known CI bot usernames
+    if lower_author in _CI_BOT_USERNAMES:
+        return "ci"
+
+    # 2. Known code-review bot username substrings
+    for sub in _CODE_REVIEW_BOT_USERNAME_SUBSTRINGS:
+        if sub in lower_author:
+            return "review_bot"
+
+    # 3. Code-review bot body markers
+    for marker in _CODE_REVIEW_BOT_BODY_MARKERS:
+        if marker in body:
+            return "review_bot"
+
+    # 4. Generic bot suffix — then distinguish CI vs review-bot by body content
+    if lower_author in _KNOWN_BOTS_LOWER or lower_author.endswith("[bot]") or lower_author.endswith("bot"):
+        for pattern in _CI_BOT_BODY_PATTERNS:
+            if pattern in body:
+                return "ci"
+        return "review_bot"
+
+    return "human"
 
 
 def _is_bot(author: str) -> bool:
+    """Backward-compat helper — returns True for any bot (CI or review-bot)."""
     if not author:
         return False
     lower = author.lower()
@@ -401,6 +540,8 @@ def _fetch_github_issue(issue_ref: dict, config: dict) -> dict | None:
         return None
     body = data.get("body", "")
     has_ac, ac_text = _detect_acceptance_criteria(body)
+    # A.1: cache raw issue data
+    _issue_raw_cache[issue_ref.get("key", key)] = data
     return {
         "title": data.get("title", ""),
         "body": body,
@@ -433,6 +574,8 @@ def _fetch_jira_issue(issue_ref: dict, config: dict) -> dict | None:
     fields = data.get("fields", {})
     description = fields.get("description", "") or ""
     has_ac, ac_text = _detect_acceptance_criteria(description)
+    # A.1: cache raw issue data
+    _issue_raw_cache[issue_ref.get("key", key)] = {"key": key, "fields": fields}
     return {
         "title": fields.get("summary", ""),
         "body": description,
@@ -569,8 +712,30 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
             else:
                 section.append(issue_line)
 
-        # Human comments summary
+        # Reviewer summary: separate CI bots, review bots, humans (A.3 + A.4)
         human = pr.get("human_comments", [])
+        ci_bot = pr.get("ci_comments", [])
+        review_bot = pr.get("review_bot_comments", [])
+        # Fallback for PRs fetched before the 3-bucket split
+        if not ci_bot and not review_bot:
+            bot_all = pr.get("bot_comments", [])
+            review_bot = bot_all
+
+        human_authors = sorted({c.get("author", "?") for c in human if c.get("author")})
+        review_bot_authors = sorted({c.get("author", "?") for c in review_bot if c.get("author")})
+        ci_bot_authors = sorted({c.get("author", "?") for c in ci_bot if c.get("author")})
+        reviewer_summary = "none"
+        parts = []
+        if human_authors:
+            parts.append(f"human: {', '.join(human_authors[:5])}")
+        if review_bot_authors:
+            parts.append(f"review-bots: {', '.join(review_bot_authors[:3])}")
+        if ci_bot_authors:
+            parts.append(f"ci-bots: {', '.join(ci_bot_authors[:3])}")
+        if parts:
+            reviewer_summary = " | ".join(parts)
+        section.append(f"- **Reviewers**: {reviewer_summary}")
+
         if human:
             section.append(f"- **Human comments** ({len(human)}):")
             for c in human[:5]:
@@ -583,21 +748,40 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
             if len(human) > 5:
                 section.append(f"  - ...and {len(human) - 5} more")
 
-        # Bot comments with content (not just count)
-        bot = pr.get("bot_comments", [])
-        if bot:
-            section.append(f"- **Bot comments** ({len(bot)}):")
-            for c in bot[:3]:
+        if review_bot:
+            section.append(f"- **Code-review bot comments** ({len(review_bot)}):")
+            for c in review_bot[:3]:
                 body = c.get("body", "")[:300]
                 section.append(f"  - @{c.get('author', '?')}: {body}")
-            if len(bot) > 3:
-                section.append(f"  - ...and {len(bot) - 3} more")
+            if len(review_bot) > 3:
+                section.append(f"  - ...and {len(review_bot) - 3} more")
+
+        if ci_bot:
+            section.append(f"- **CI bot comments** ({len(ci_bot)} — build/test status reporters):")
+            for c in ci_bot[:2]:
+                body = c.get("body", "")[:150]
+                section.append(f"  - @{c.get('author', '?')}: {body}")
+            if len(ci_bot) > 2:
+                section.append(f"  - ...and {len(ci_bot) - 2} more")
 
         # PR body excerpt
         body = pr.get("body", "")
         if body:
             excerpt = body[:300].replace("\n", " ")
             section.append(f"- **Description**: {excerpt}")
+
+        # A.4: data completeness note
+        missing: list[str] = []
+        if not pr.get("linked_issue"):
+            missing.append("no linked issue")
+        if not pr.get("review_decision"):
+            missing.append("review_decision unknown")
+        if pr.get("files_changed", 0) == 0 and pr.get("additions", 0) == 0:
+            missing.append("no file-change data")
+        if not pr.get("all_comments"):
+            missing.append("no comments")
+        if missing:
+            section.append(f"- **Data completeness**: missing: {', '.join(missing)}")
 
         pr_text = "\n".join(section) + "\n"
         if len(pr_text) > per_pr_budget:

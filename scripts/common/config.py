@@ -86,6 +86,8 @@ DEFAULTS: dict[str, str] = {
     "N_PRS":                          "50",
     "PR_AUDIT_FOCUS":                 "all",
     "MAX_PR_AUDIT_SIZE":              "10000000",
+    "MAX_DEEP_REVIEWS":               "2",
+    "YGS_SKILLS_REPO":                "",
 }
 
 # Short alias → canonical name.
@@ -160,6 +162,8 @@ _ALIASES: list[tuple[str, str]] = [
     ("NPrs",                        "N_PRS"),
     ("PrAuditFocus",                "PR_AUDIT_FOCUS"),
     ("MaxPrAuditSize",              "MAX_PR_AUDIT_SIZE"),
+    ("MaxDeepReviews",              "MAX_DEEP_REVIEWS"),
+    ("YgsSkillsRepo",               "YGS_SKILLS_REPO"),
 ]
 
 

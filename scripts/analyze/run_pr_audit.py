@@ -41,7 +41,7 @@ from scripts.common.report_renderer import render_simple_html
 from scripts.common.skills import apply_project_skills, inline_shared_refs
 from scripts.analyze.pr_fetcher import (
     fetch_prs, classify_comments, link_pr_to_issue,
-    fetch_issue_details, build_pr_context,
+    fetch_issue_details, build_pr_context, write_issues_raw,
 )
 
 
@@ -231,6 +231,19 @@ Beyond the 4 specialist dimensions, also check for:
 - **Industry practice violations**: Missing rollback plans, rubber-stamp reviews on risky changes,
   no documentation updates for new features
 
+## REQUIRED: Distinguish CI bots vs code-review bots
+
+The PR context labels each PR's comments into three groups:
+- `ci_comments` (or "CI bot comments"): build runners, test status reporters, linters. Their reports are build failures — NOT code-review findings.
+- `review_bot_comments` (or "Code-review bot comments"): Claude PR Review Agent, CodeRabbit, SonarCloud, etc. Their comments are code-quality observations.
+- `human_comments`: human reviewers.
+
+For the Metrics Dashboard, compute SEPARATE rates:
+- **CI catch rate** = CI bot catches / (CI bot + human catches) — measures pipeline health
+- **Code-review skill catch rate** = review-bot catches / (review-bot + human catches) — measures review skill quality
+
+NEVER report a single combined "skill catch rate" that mixes CI bots with code-review bots. The two metrics tell different stories.
+
 ## REQUIRED: Skills assessment summary
 
 Include a dedicated section in the report analyzing what skills/capabilities were demonstrated
@@ -406,6 +419,9 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 if details:
                     linked["details"] = details
 
+        # A.1: flush raw issue cache to artifact
+        write_issues_raw()
+
         pr_context = build_pr_context(prs, max_chars=150_000)
         pr_ids_str = ",".join(str(pr.get("number", "")) for pr in prs if pr.get("number"))
         print(f"[pr-audit] PR context: {len(pr_context)} chars from {len(prs)} PRs", flush=True)
@@ -460,7 +476,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 max_turns=max_turns,
                 log_file=log_path,
                 allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS,Skill",
-                system_prompt=SYSTEM_PROMPTS["review"],
+                system_prompt=SYSTEM_PROMPTS.get("pr_audit", SYSTEM_PROMPTS["review"]),
                 primary_skill=actual_skill,
             )
         except RuntimeError as e:

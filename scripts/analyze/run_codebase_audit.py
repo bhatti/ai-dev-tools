@@ -502,7 +502,7 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
                 max_turns=max_turns,
                 log_file=log_path,
                 allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS,Skill",
-                system_prompt=SYSTEM_PROMPTS["review"],
+                system_prompt=SYSTEM_PROMPTS.get("codebase_audit", SYSTEM_PROMPTS["review"]),
                 primary_skill=actual_skill,
             )
         except RuntimeError as e:
@@ -515,6 +515,24 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
 
         status_data: dict = result.status_json or {"status": result.status}
         (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
+
+        # Save raw audit metadata for debugging and audit trail
+        try:
+            from datetime import datetime
+            audit_meta = {
+                "repo": repo_label,
+                "branch": branch,
+                "analyzed_at": datetime.utcnow().isoformat() + "Z",
+                "n_commits": n_commits,
+                "focus": focus,
+                "data_sources": ["git_log", "hotspot_analysis", "test_coverage"],
+                "status": status_data.get("status", "unknown"),
+            }
+            (reports_dir / "audit_data_raw.json").write_text(
+                json.dumps(audit_meta, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
 
         # If Claude didn't write audit_report.md (or wrote a stub), recover from stdout or log.
         report_md_path = reports_dir / "audit_report.md"

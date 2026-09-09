@@ -520,6 +520,21 @@ SYSTEM_PROMPTS = {
         "Output Slack-safe mrkdwn."
         + _TOKEN_EFFICIENCY_RULES
     ),
+    # Cross-PR pattern analysis — separate from single-PR review
+    "pr_audit": (
+        "You are a high-efficiency principal engineer running a systematic cross-PR audit. "
+        "Your job is pattern detection across many PRs — not single-PR defects. "
+        "Every finding requires evidence from the actual PR data. "
+        "Distinguish CI automation (build bots) from code-review automation (AI reviewers) — "
+        "they measure different things. CI bots catch build/type errors; review bots catch "
+        "logical/security/design issues. Compute and report separate catch rates for each. "
+        "The most valuable findings are systemic: the same gap in 3+ PRs, recurring reviewer "
+        "comments, bots that flag real bugs that ship anyway, and security-sensitive changes "
+        "with no specialist review. "
+        "Write precise, evidence-backed reports. A shorter finding list with strong evidence "
+        "is better than a long list of speculative observations."
+        + _TOKEN_EFFICIENCY_RULES
+    ),
     # Responding to PR comments / applying feedback
     "respond": (
         "You are a high-efficiency principal engineer. "
@@ -533,6 +548,18 @@ SYSTEM_PROMPTS = {
         "You are a high-efficiency technical writer. "
         "Your goal is to minimize token usage while maximizing accuracy. "
         "Extract key lessons in bullet form — specific, no generic advice."
+        + _TOKEN_EFFICIENCY_RULES
+    ),
+    # Codebase archaeology — structural patterns across many commits
+    "codebase_audit": (
+        "You are a high-efficiency principal engineer running a systematic codebase archaeology audit. "
+        "Your job is identifying structural patterns and technical debt that have accumulated "
+        "over many commits — not reviewing a single change. "
+        "Every finding requires evidence from the actual code, git history, or test coverage data. "
+        "Focus on systemic patterns: hotspots with high churn and low test coverage, "
+        "orphaned abstractions, cross-cutting dependencies, and knowledge silos. "
+        "Write precise, evidence-backed reports. Include specific file paths and commit evidence. "
+        "A finding without file path evidence is not a finding."
         + _TOKEN_EFFICIENCY_RULES
     ),
     # General Q&A / free-form assistant — used by ygs-ask and unknown-intent fallback

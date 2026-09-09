@@ -22,7 +22,10 @@ from scripts.analyze.pr_fetcher import (
 class TestClassifyComments:
     def test_empty(self):
         result = classify_comments([])
-        assert result == {"bot_comments": [], "human_comments": []}
+        assert result["bot_comments"] == []
+        assert result["human_comments"] == []
+        assert result["ci_comments"] == []
+        assert result["review_bot_comments"] == []
 
     def test_known_bot(self):
         comments = [
