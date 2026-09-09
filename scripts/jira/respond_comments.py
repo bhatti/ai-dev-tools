@@ -29,6 +29,7 @@ from scripts.common.git_utils import (
     configure_git,
     create_branch,
     detect_bitbucket_url,
+    get_bitbucket_git_username,
     push_branch,
 )
 from scripts.common.shell import run_cmd as _run
@@ -38,7 +39,7 @@ from scripts.standup.slack_client import notify
 def _ensure_repo_clone(config: dict, workspace: str, repo_name: str, branch: str, repo_dir: Path) -> None:
     http_token = config.get("BITBUCKET_TOKEN", "")
     ssh_key = config.get("SSH_PRIVATE_KEY", "")
-    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+    http_username = get_bitbucket_git_username(config)
 
     clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=not http_token)
 
@@ -74,7 +75,7 @@ def _respond_to_comment(
 ) -> None:
     issue_dir = get_issue_dir(config, issue_id)
     http_token = config.get("BITBUCKET_TOKEN", "")
-    http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+    http_username = get_bitbucket_git_username(config)
     author = comment.get("author", {}).get("nickname", "unknown")
     body = comment.get("content", {}).get("raw", "") or comment.get("body", "")
     comment_id = comment.get("id")

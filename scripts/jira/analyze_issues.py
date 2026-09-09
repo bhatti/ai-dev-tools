@@ -29,7 +29,7 @@ from scripts.common.git_archaeology import (
     extract_stats as _extract_stats,
     get_repo_info as _get_repo_info,
 )
-from scripts.common.git_utils import clone_repo, detect_bitbucket_url
+from scripts.common.git_utils import clone_repo, detect_bitbucket_url, get_bitbucket_git_username
 from scripts.common.issue_analysis import run_analysis, run_skill_analysis, write_analysis_output
 from scripts.common.jira_api import extract_jira_keys, resolve_jira_issues
 from scripts.common.skill_resolver import find_skill, find_skill_for_query
@@ -94,7 +94,7 @@ def _try_git_archaeology(config: dict, keys: list[str]) -> tuple[str | None, pat
             print(f"[analyze] using SSH clone", flush=True)
             repo_path = clone_repo(clone_url, dest, depth=50, ssh_key=ssh_key)
         elif http_token:
-            http_username = config.get("BITBUCKET_USERNAME", "x-token-auth")
+            http_username = get_bitbucket_git_username(config)
             clone_url = detect_bitbucket_url(workspace, repo, use_ssh=False)
             print(f"[analyze] using HTTPS clone", flush=True)
             repo_path = clone_repo(clone_url, dest, depth=50, http_token=http_token, http_username=http_username)
