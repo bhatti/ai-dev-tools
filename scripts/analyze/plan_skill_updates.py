@@ -65,9 +65,15 @@ Your job is to review the findings and create a detailed, actionable skill updat
      by observed recurring problems, not textbook best practices.
 6. Identify gaps: anything the audit report flags that `skill_improvements.json` does not address.
 7. Write your detailed plan to `reports/skill_update_plan.md` with:
-   - **Executive summary**: which SPECIFIC recurring gaps are addressed and the PRs that evidence them
-   - **Per-change entry**: file path, gap addressed, exact change/content to write, PRs that motivated it
+   - **Executive summary**: which SPECIFIC recurring gaps are addressed, their frequency (e.g. "8/50 PRs"), and the PRs that evidence them
+   - **Per-change entry** for EACH proposed change:
+     - File path (must exist or be a new `.claude/skills/` path)
+     - Gap addressed (name the recurring problem, cite the PRs)
+     - **EXACT CONTENT to write** — write the full proposed skill text, not just a description.
+       Reviewers must be able to approve the content before `create_skill_pr` writes it.
+       If updating an existing file, show the specific section to add/change with before/after.
    - **Priority order**: highest-impact changes first (most frequently recurring gap → highest priority)
+   - **Rejected proposals**: list any proposals from `skill_improvements.json` that were rejected and why
 8. Output ONLY this JSON on the last line (no text after it):
    {{"status":"DONE","skill_updates":<N>,"new_skills":<M>,"summary":"<one sentence>"}}
    Or if blocked:

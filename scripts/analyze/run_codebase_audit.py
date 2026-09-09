@@ -229,23 +229,42 @@ Verify every finding by running a Bash command and showing actual output.
 
 {audit_context}
 
+## CRITICAL: Evidence-first — no speculative findings
+
+Every finding MUST be verified with a Bash command before being reported.
+Show the command and its output as the evidence. If you cannot verify it, do not report it.
+
+Severity definitions (use these exactly):
+- CRITICAL: exploitable security issue or data loss risk — show specific vulnerable code
+- HIGH: incorrect behavior that affects users, or structural issue affecting >10% of the codebase
+- MEDIUM: maintainability/performance risk that increases future bug probability
+- LOW: style or convention inconsistency — mention briefly, never rank HIGH or above
+
+A shorter, verified finding list is better than a long list of speculative observations.
+Findings repeated across multiple modules are systemic — rate them higher and propose specific fixes.
+
 ## REQUIRED OUTPUTS — Must be written before emitting the final JSON line
 
 Write these files using relative paths from the repo root (the `reports/` symlink resolves to the workspace reports directory):
 
 1. `reports/audit_report.md` — Comprehensive markdown audit report:
-   - Executive summary (2-3 sentences: most critical risk, fix: ratio, top hotspot)
-   - CRITICAL findings section with file:line evidence and Bash command output
-   - HIGH findings section (same format)
-   - MEDIUM findings section
-   - "Checked — No Issues Found" section for clean dimensions
-   - Metrics Dashboard table
-   - Minimum 1000 chars. If you write less than 1000 chars, you did not do the job.
+   - **Executive summary** (3-4 sentences): lead with the most critical verified risk,
+     include the actual file/module name, and quantify scope ("affects 12 files in auth/")
+   - **CRITICAL findings** section: file:line evidence, Bash command + output, specific fix recommendation
+   - **HIGH findings** section (same format)
+   - **MEDIUM findings** section
+   - **"Checked — No Issues Found"** section for clean dimensions (proves thoroughness)
+   - **Metrics Dashboard** table
+   - Minimum 1500 chars. If you write less, you did not verify enough findings.
 
 2. `reports/audit_findings.json` — Structured JSON:
    {{"repo":"{repo_label}","branch":"{branch}","commits_analyzed":{n_commits},"focus":"{focus}",
     "critical_count":N,"high_count":N,
-    "findings":[{{"severity":"CRITICAL|HIGH|MEDIUM|LOW","dimension":"hotspot|architecture|security|sre|tests|duplicates|knowledge-silo|commit-quality","location":"path/to/file:line or module","evidence":"command → output snippet","recommendation":"specific action"}}],
+    "findings":[{{"severity":"CRITICAL|HIGH|MEDIUM|LOW",
+      "dimension":"hotspot|architecture|security|sre|tests|duplicates|knowledge-silo|commit-quality",
+      "location":"path/to/file:line or module","evidence":"command → output snippet",
+      "recommendation":"specific action targeting this exact file/module"}}],
+    "patterns":[{{"pattern":"description seen in N files/commits","locations":["a","b"],"recommendation":"..."}}],
     "metrics":{{"fix_ratio":0.0,"avg_files_per_commit":0.0,"single_author_hotspots":0,"temporal_coupling_pairs":0,"test_gap_files":0}}}}
 
 DO NOT emit any ::add-task-context markers yourself — the orchestrator script reads

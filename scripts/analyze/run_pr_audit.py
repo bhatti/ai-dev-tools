@@ -209,6 +209,30 @@ For EVERY PR:
 Then synthesize cross-PR patterns. The value of this audit is the patterns across ALL {n_prs} PRs,
 not a deep-dive into a few.
 
+## CRITICAL: Pattern frequency determines finding priority
+
+A finding seen in 1 PR is an observation. A finding seen in 3+ PRs is a systemic gap worth acting on.
+- **PRIORITIZE** patterns appearing in 3+ PRs — these are the only ones worth skill changes
+- **DEPRIORITIZE** one-off observations — mention them only in a "Single-PR observations" appendix
+- **QUANTIFY** every finding in the executive summary: "X/{n_prs} PRs missing Y" not "some PRs lacked Y"
+- For each finding in the report, state its frequency explicitly: "8/{n_prs} PRs", "seen in PRs #12, #34, #67"
+
+## CRITICAL: Classify each gap by type and impact
+
+For every finding, classify it along two axes:
+
+**Gap type** (what kind of gap):
+- `team_skill` — engineers repeatedly make the same mistake (needs training/skill docs)
+- `process` — the workflow is missing a step (needs process change)
+- `tooling` — automation could catch this but doesn't exist yet (needs tooling)
+
+**Impact type** (what it causes):
+- `blocks_delivery` — causes build failures, blocks merge, directly delays shipping
+- `slows_delivery` — increases review cycles, causes rework, slows velocity
+- `increases_risk` — ships but with latent bugs, security issues, or operational fragility
+
+State both classifications in each finding. Example: "gap_type: team_skill, impact: increases_risk"
+
 ## CRITICAL: Acceptance criteria detection
 
 The `has_acceptance_criteria` field uses semantic detection (checkbox lists, BDD Given/When/Then,
@@ -262,24 +286,40 @@ Rate each as Strong/Developing/Gap based on evidence from the PR data.
 Write these files using relative paths from the repo root (the `reports/` symlink resolves to the workspace reports directory):
 
 1. `reports/pr_audit_report.md` -- Comprehensive markdown PR audit report:
-   - Executive summary (2-3 sentences: biggest gap area, number of PRs with issues)
-   - Critical/High/Medium/Low findings with PR IDs in every finding title
-   - Skills Assessment section rating coding/review/testing/SRE/security/architecture
-   - Recommended Skill Updates section: explicit list of skills to update or create,
-     with the specific file path, what to add, and which PRs motivated the change.
-     Example: "Update `.claude/skills/security-review/SKILL.md` — add SQL injection
-     detection for f-string patterns (missed in PRs #45, #67)"
-   - Metrics Dashboard with spec coverage %, skill catch rate, human review burden %
-   - Checked — No Issues Found section (proves thoroughness)
+   - **Executive summary** (3-4 sentences):
+     - Lead with the most frequent gap: "X/{n_prs} PRs [specific problem]"
+     - State the top gap type (team_skill / process / tooling) and impact type
+     - Name the highest-severity finding with its PR count
+   - **Critical/High/Medium/Low findings**: every finding title includes PR count + IDs
+     e.g. "## HIGH: Missing error handling in async paths (6/{n_prs} PRs: #123, #145, #167, #189, #201, #223)"
+     Each finding must state: gap_type, impact_type, evidence (specific PRs + what was observed),
+     and a concrete recommendation targeting that specific pattern
+   - **Skills Assessment** rating coding/review/testing/SRE/security/architecture as Strong/Developing/Gap
+     with evidence: "Gap — PRs #34, #67, #89 all introduced SQL queries without parameterization"
+   - **Recommended Skill Updates**: only for gaps seen in 3+ PRs. For each, state:
+     - File path in `.claude/skills/`
+     - Which PRs motivated it (minimum 3)
+     - What the skill file currently says (if it exists) vs what needs to change
+   - **Metrics Dashboard**: spec coverage %, CI catch rate, review-bot catch rate, human review burden %
+   - **Single-PR observations** appendix: one-off issues that don't warrant skill changes
+   - **Checked — No Issues Found** section (proves thoroughness)
    - Minimum 2000 chars. If you write less, you did not analyze enough PRs.
 
 2. `reports/pr_audit_findings.json` -- Structured JSON:
    {{"repo":"{repo_label}","branch":"{branch}","prs_analyzed":{n_prs},"focus":"{focus}",
     "pr_ids":"{pr_ids}",
     "spec_gap_count":N,"design_gap_count":N,"skill_gap_count":N,"practice_gap_count":N,
-    "findings":[{{"severity":"HIGH|MEDIUM|LOW","category":"spec|design|skill|practice","pr_number":N,"prs":[N,M],"title":"...","evidence":"specific finding","recommendation":"specific action"}}],
-    "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"recommendation":"..."}}],
+    "findings":[{{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"spec|design|skill|practice",
+      "gap_type":"team_skill|process|tooling","impact_type":"blocks_delivery|slows_delivery|increases_risk",
+      "frequency":N,"pr_number":N,"prs":[N,M],"title":"...","evidence":"specific finding","recommendation":"specific action"}}],
+    "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"gap_type":"team_skill|process|tooling","recommendation":"..."}}],
     "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}}}}
+
+   Severity definitions (use these — do not invent your own):
+   - CRITICAL: security vulnerability, data loss, or production outage risk
+   - HIGH: incorrect behavior shipped to users, or gap seen in 5+ PRs causing rework
+   - MEDIUM: gap seen in 3-4 PRs that slows delivery or increases risk
+   - LOW: gap seen in 1-2 PRs, or a style/process issue with minimal impact
 
 3. `reports/skill_improvements.json` -- Proposed improvements grounded ONLY in observed patterns:
    {{"repo_skill_changes":[{{"action":"update|create","file_path":"relative/path","description":"what to change","changes":"content to write"}}],
@@ -287,14 +327,13 @@ Write these files using relative paths from the repo root (the `reports/` symlin
     "ygs_recommendations":[{{"skill":"skill-name","recommendation":"what to improve"}}]}}
 
    CRITICAL RULES for skill_improvements:
-   - Every change MUST reference specific PRs that motivated it (e.g. "PRs #123, #456 repeatedly missed X")
+   - Every change MUST cite 3+ specific PRs as evidence (e.g. "PRs #123, #456, #789 all missed X")
+   - Before proposing a change to a `.claude/skills/` file, read that file — do NOT duplicate what is already there
    - NEVER propose generic industry rules (LOC thresholds, reviewer count formulas, mandatory review checklists)
-     unless MULTIPLE PRs in this audit show evidence that the team is missing that specific practice
-   - NEVER invent process overhead (required approvals, mandatory design docs for all large PRs, etc.)
-     without evidence from the actual PR data that such overhead would have caught real bugs
-   - The goal is to address RECURRING GAPS specific to this codebase and team, not to impose
-     generic software engineering textbook rules
-   - If you cannot cite 2+ PRs as evidence for a proposed change, do not propose it
+     without 3+ PRs showing the team is missing that specific practice
+   - NEVER invent process overhead without evidence that it would have caught real bugs in these PRs
+   - The goal is to address RECURRING GAPS specific to this codebase and team
+   - If you cannot cite 3+ PRs, do not propose a skill change — add it to the single-PR observations appendix instead
 
 DO NOT emit any ::add-task-context markers yourself -- the orchestrator script reads
 your JSON output and emits them automatically. Focus only on writing the three report files.
