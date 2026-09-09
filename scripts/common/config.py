@@ -200,6 +200,9 @@ def load_config(required: list[str] | None = None) -> dict[str, str]:
 
     Exits with code 1 and a clear message if any required var is missing.
     """
+    from scripts.common.bootstrap import ensure_debug_mode  # noqa: PLC0415
+    ensure_debug_mode()
+
     config = dict(DEFAULTS)
     _load_dotenv(config)   # .env values fill gaps before OS env overrides
     config.update(os.environ)
