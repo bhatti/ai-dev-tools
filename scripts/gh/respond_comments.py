@@ -85,15 +85,15 @@ You are an AI agent responding to a PR review comment.
 {body}{file_ctx}
 
 ## Instructions
-1. Read CLAUDE.md or any repo-specific coding guidelines if they exist and follow them.
-2. Analyze the feedback carefully.
-3. Make the requested changes — edit the file directly. Keep changes minimal and focused.
-4. Do NOT run tests or lint — just make the change and commit.
-5. Commit with: "feedback: address comment from @{user}"
+1. Read CLAUDE.md or any repo-specific coding guidelines and follow them strictly.
+2. Analyze the feedback carefully and understand what change is needed.
+3. Make the requested changes — edit the file(s) directly. Keep changes minimal and focused.
+4. If you changed code files (not markdown/docs/skills), check CLAUDE.md or Makefile for a fast lint/type-check command and run it. Do NOT run full test suites.
+5. Do NOT run git commands — do not commit, stage, or push.
 6. Output ONLY this JSON on the last line:
-   {{"status":"DONE","commits":<N>,"summary":"<one sentence>"}}
+   {{"status":"DONE","summary":"<one sentence describing exactly what was changed and why>"}}
    Or if you cannot address it:
-   {{"status":"SKIPPED","reason":"<explanation>"}}
+   {{"status":"SKIPPED","reason":"<explanation of why the comment cannot be acted on>"}}
 """
     result = run_claude(
         prompt,
@@ -104,13 +104,16 @@ You are an AI agent responding to a PR review comment.
         system_prompt=SYSTEM_PROMPTS["respond"],
     )
 
-    committed = commit_all(repo_dir, f"feedback: address comment from @{user}")
+    status = (result.status_json or {}).get("status", "")
+    if status == "SKIPPED":
+        reason = (result.status_json or {}).get("reason", "unknown")
+        print(f"[respond-comments] comment {comment_id}: SKIPPED — {reason}", file=sys.stderr, flush=True)
+        raise RuntimeError(f"Claude could not address comment {comment_id}: {reason}")
 
+    committed = commit_all(repo_dir, f"feedback: address comment from @{user}")
     if not committed:
-        status = (result.status_json or {}).get("status", "")
-        reason = (result.status_json or {}).get("reason", "no file changes produced")
-        print(f"[respond-comments] comment {comment_id}: no changes committed (status={status} reason={reason})", flush=True)
-        return False
+        print(f"[respond-comments] comment {comment_id}: DONE reported but no file changes found", file=sys.stderr, flush=True)
+        raise RuntimeError(f"Claude reported DONE for comment {comment_id} but made no file changes")
 
     refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
     fetch_result = _run(["git", "-C", str(repo_dir), "fetch", "--depth", "100", "origin", refspec], check=False)
