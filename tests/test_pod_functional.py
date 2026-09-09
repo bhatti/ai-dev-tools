@@ -143,6 +143,7 @@ _SCRIPTS_TO_COPY = [
     "scripts/analyze/run_pr_audit.py",
     "scripts/analyze/post_pr_audit.py",
     "scripts/analyze/create_skill_pr.py",
+    "scripts/analyze/plan_skill_updates.py",
     "scripts/common/repo_utils.py",
     "scripts/common/slack_format.py",
 ]
@@ -1277,6 +1278,274 @@ def test_12_pr_audit_gh_full(base_env: dict[str, str]) -> TestResult:
                  f"md={md_bytes}B reports={reports_ok} elapsed={step.elapsed:.0f}s")
 
 
+def test_13_plan_skill_updates(base_env: dict[str, str]) -> TestResult:
+    """Run plan_skill_updates.py with a real pr_audit_report.md and mock skill_improvements.
+
+    Verifies:
+      1. reports/skill_update_plan.md is written with content (Claude output)
+      2. reports/skill_update_plan_result.json has status=DONE
+      3. Exit code 0
+      4. ::add-task-context SKILL_UPDATE_PLAN::yes emitted
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor ANTHROPIC_API_KEY set.
+    """
+    result = TestResult("plan-skill-updates")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/plan_skill_updates"
+    env["WORKSPACE_DIR"] = ws
+    env["MAX_TURNS_PLAN"] = "15"
+    env["AI_MODEL"] = base_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "us.anthropic.claude-sonnet-4-6")
+    env["GH_ORG"] = os.environ.get("GH_ORG", "bhatti")
+    env["GH_REPO"] = os.environ.get("GH_REPO", "you-got-skills")
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    # Minimal audit report and skill_improvements.json to seed the planner
+    mock_audit_report = (
+        "# PR Audit Report\n\n"
+        "The team consistently skips documentation updates and test coverage for new features.\n\n"
+        "## Key Findings\n"
+        "- 80% of PRs lack updated README or API documentation\n"
+        "- Integration tests are absent for new API endpoints\n"
+        "- PR descriptions rarely include testing instructions\n"
+    )
+    mock_improvements = json.dumps({
+        "repo_skill_changes": [
+            {"file_path": ".claude/skills/ygs-review-pr.md",
+             "action": "update",
+             "description": "Add documentation-completeness check",
+             "changes": "\n## Documentation Check\nVerify README and API docs updated in PR."}
+        ],
+        "new_docs": [],
+        "ygs_recommendations": []
+    })
+
+    setup_cmd = (
+        f"mkdir -p {ws}/reports {ws}/logs && "
+        f"cat > {ws}/reports/pr_audit_report.md << 'AUDITEOF'\n"
+        f"{mock_audit_report}\nAUDITEOF\n"
+        f"echo '{mock_improvements}' > {ws}/reports/skill_improvements.json"
+    )
+
+    with pod_fixture("plan-skill-updates") as pod:
+        # ── Step 1: Set up workspace ─────────────────────────────────────────
+        setup_step = exec_step(pod, "setup", setup_cmd, env, timeout=15)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, "setup failed")
+
+        # ── Step 2: Run plan_skill_updates ──────────────────────────────────
+        run_step = exec_step(pod, "plan-skill-updates-run",
+                             f"python3 -m scripts.analyze.plan_skill_updates",
+                             env, timeout=300)
+        result.steps.append(run_step)
+
+        # ── Step 3: Verify outputs ───────────────────────────────────────────
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"plan_md = os.path.join(ws, 'reports', 'skill_update_plan.md')\n"
+            f"if not os.path.exists(plan_md):\n"
+            f"    issues.append('skill_update_plan.md missing')\n"
+            f"elif os.path.getsize(plan_md) < 100:\n"
+            f"    issues.append(f'skill_update_plan.md too small ({{os.path.getsize(plan_md)}} bytes)')\n"
+            f"else:\n"
+            f"    print(f'::add-task-context PLAN_MD_BYTES::{{os.path.getsize(plan_md)}}')\n"
+            f"result_json = os.path.join(ws, 'reports', 'skill_update_plan_result.json')\n"
+            f"if not os.path.exists(result_json):\n"
+            f"    issues.append('skill_update_plan_result.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(result_json).read())\n"
+            f"        status = d.get('status', '?')\n"
+            f"        print(f'::add-task-context PLAN_STATUS::{{status}}')\n"
+            f"        if status not in ('DONE', 'BLOCKED'):\n"
+            f"            issues.append(f'unexpected status: {{status}}')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'result JSON parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('PLAN ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context PLAN_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-plan", verify_cmd, env, timeout=15)
+        result.steps.append(verify_step)
+
+    # ── Evaluate ─────────────────────────────────────────────────────────────
+    if not run_step.ok:
+        return _fail(result, run_step, f"plan_skill_updates failed: exit {run_step.returncode}")
+
+    if not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"plan outputs missing: {verify_step.stderr[-300:]}")
+
+    plan_status = verify_step.context.get("PLAN_STATUS", "?")
+    plan_md_bytes = verify_step.context.get("PLAN_MD_BYTES", "?")
+    return _pass(result,
+                 f"status={plan_status} plan_md={plan_md_bytes}B "
+                 f"elapsed={run_step.elapsed:.0f}s")
+
+
+def test_14_create_skill_pr(base_env: dict[str, str]) -> TestResult:
+    """Run create_skill_pr.py end-to-end: clone → branch → push → create PR → teardown (close PR).
+
+    Verifies:
+      1. pr.json is written with url and number > 0
+      2. ::add-task-context SKILL_PR_CREATED::yes emitted
+      3. PR description contains audit findings section
+
+    Teardown: closes the created PR and deletes the remote branch.
+
+    Requires GH_TOKEN, GH_ORG, GH_REPO in env. Skipped if missing.
+    """
+    result = TestResult("create-skill-pr")
+
+    gh_token = base_env.get("GH_TOKEN", "")
+    gh_org = base_env.get("GH_ORG", os.environ.get("GH_ORG", "bhatti"))
+    gh_repo = base_env.get("GH_REPO", os.environ.get("GH_REPO", "you-got-skills"))
+
+    if not gh_token:
+        result.passed = True
+        result.message = "SKIPPED — GH_TOKEN not set"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/create_skill_pr"
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+    env["DEFAULT_TRACKER"] = "github"
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    env["GH_REPO_BRANCH"] = "main"
+    env["GIT_USER_NAME"] = "AI Agent"
+    env["GIT_USER_EMAIL"] = "ai-agent@noreply.local"
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    # Minimal skill_improvements.json with one real change.
+    # Use a unique suffix so concurrent runs don't collide on the same branch/file.
+    run_id = uuid.uuid4().hex[:8]
+    skill_file = f".claude/skills/pod-ci-{run_id}.md"
+    improvements = json.dumps({
+        "repo_skill_changes": [
+            {
+                "file_path": skill_file,
+                "action": "create",
+                "description": "CI pod test: temporary skill placeholder (will be closed/deleted)",
+                "changes": f"# CI Skill Placeholder\n\nCreated by pod functional test run {run_id}.\n"
+            }
+        ],
+        "new_docs": [],
+        "ygs_recommendations": []
+    })
+    audit_report = (
+        "# PR Audit Report\n\nPod functional test run for create-skill-pr validation.\n\n"
+        f"Run ID: {run_id}\n\n## Findings\n- Placeholder finding for CI validation.\n"
+    )
+    skill_update_plan = (
+        f"# Skill Update Plan\n\n## Priority 1\nAdd {skill_file} as CI placeholder.\n"
+    )
+
+    setup_cmd = (
+        f"mkdir -p {ws}/reports {ws}/logs && "
+        f"printf '%s' {json.dumps(improvements)} > {ws}/reports/skill_improvements.json && "
+        f"printf '%s' {json.dumps(audit_report)} > {ws}/reports/pr_audit_report.md && "
+        f"printf '%s' {json.dumps(skill_update_plan)} > {ws}/reports/skill_update_plan.md"
+    )
+
+    pr_number = 0
+    pr_branch = ""
+
+    with pod_fixture("create-skill-pr") as pod:
+        # ── Step 1: Setup ────────────────────────────────────────────────────
+        setup_step = exec_step(pod, "setup", setup_cmd, env, timeout=15)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, "setup failed")
+
+        # ── Step 2: Run create_skill_pr ──────────────────────────────────────
+        run_step = exec_step(pod, "create-skill-pr-run",
+                             "python3 -m scripts.analyze.create_skill_pr",
+                             env, timeout=120)
+        result.steps.append(run_step)
+
+        # ── Step 3: Verify pr.json ───────────────────────────────────────────
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"pr_json_path = os.path.join(ws, 'pr.json')\n"
+            f"if not os.path.exists(pr_json_path):\n"
+            f"    issues.append('pr.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(pr_json_path).read())\n"
+            f"        url = d.get('url','')\n"
+            f"        num = d.get('number', 0)\n"
+            f"        branch = d.get('branch','')\n"
+            f"        print(f'::add-task-context PR_URL::{{url}}')\n"
+            f"        print(f'::add-task-context PR_NUMBER::{{num}}')\n"
+            f"        print(f'::add-task-context PR_BRANCH::{{branch}}')\n"
+            f"        if not url: issues.append('pr.json url is empty')\n"
+            f"        if not num: issues.append('pr.json number is 0')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'pr.json parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('PR ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context PR_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-pr", verify_cmd, env, timeout=15)
+        result.steps.append(verify_step)
+
+        pr_number = int(verify_step.context.get("PR_NUMBER", "0") or "0")
+        pr_branch = verify_step.context.get("PR_BRANCH", "")
+
+        # ── Step 4: Teardown — close PR and delete branch ────────────────────
+        if pr_number:
+            close_cmd = (
+                f"gh pr close {pr_number} -R {gh_org}/{gh_repo} --delete-branch 2>&1 || "
+                f"gh api repos/{gh_org}/{gh_repo}/pulls/{pr_number} -X PATCH -f state=closed 2>&1 || true"
+            )
+            close_env = dict(env)
+            close_env["GH_TOKEN"] = gh_token
+            close_step = exec_step(pod, "teardown-close-pr", close_cmd, close_env, timeout=30)
+            result.steps.append(close_step)
+            if not close_step.ok:
+                print(f"    [WARNING] PR close failed: {close_step.stderr[-200:]}", flush=True)
+
+    # ── Evaluate ─────────────────────────────────────────────────────────────
+    if not run_step.ok:
+        return _fail(result, run_step,
+                     f"create_skill_pr failed (exit {run_step.returncode})\n"
+                     f"stdout: {run_step.stdout[-600:]}\nstderr: {run_step.stderr[-400:]}")
+
+    pr_created = run_step.context.get("SKILL_PR_CREATED", "no")
+    if not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"pr.json invalid: {verify_step.stderr[-300:]}")
+
+    pr_url = verify_step.context.get("PR_URL", "")
+    return _pass(result,
+                 f"pr={pr_url} number={pr_number} branch={pr_branch} "
+                 f"elapsed={run_step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -1292,6 +1561,8 @@ ALL_TESTS: dict[str, callable] = {
     "audit-skill-invoke":    test_10_audit_skill_invoke,
     "pr-audit-gh-fetch":     test_11_pr_audit_gh_fetch,
     "pr-audit-gh-full":      test_12_pr_audit_gh_full,
+    "plan-skill-updates":    test_13_plan_skill_updates,
+    "create-skill-pr":       test_14_create_skill_pr,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

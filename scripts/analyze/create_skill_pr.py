@@ -28,7 +28,7 @@ from scripts.common import bitbucket_api
 from scripts.common.artifacts import read_json as artifacts_read_json
 from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.git_utils import clone_by_tracker, configure_git, push_branch
+from scripts.common.git_utils import clone_by_tracker, configure_git, detect_bitbucket_url, push_branch
 from scripts.common.shell import run_cmd
 from scripts.standup.slack_client import post_message
 
@@ -95,9 +95,14 @@ def main() -> None:
                 _write_ygs_recommendations(reports_dir, ygs_recs)
             sys.exit(1)
 
-    # Read base branch
+    # Read base branch — tracker-specific, no cross-fallback
     branch_file = workspace_dir / "branch.txt"
-    base_branch = branch_file.read_text().strip() if branch_file.exists() else config.get("GH_REPO_BRANCH", config.get("BB_REPO_BRANCH", "main"))
+    if branch_file.exists():
+        base_branch = branch_file.read_text().strip()
+    elif tracker in ("jira", "bitbucket", "jira/bitbucket"):
+        base_branch = config.get("BB_REPO_BRANCH", "main")
+    else:
+        base_branch = config.get("GH_REPO_BRANCH", "main")
 
     # Configure git
     git_name = config.get("GIT_USER_NAME", "AI Agent")
@@ -162,39 +167,44 @@ def main() -> None:
         if tracker in ("jira", "bitbucket", "jira/bitbucket"):
             workspace = config.get("BITBUCKET_WORKSPACE", "")
             repo_name = config.get("BITBUCKET_REPO", "")
-            bb_token = config.get("BITBUCKET_TOKEN", "")
-            bb_user = config.get("BITBUCKET_USERNAME", "")
             push_branch(
                 codebase_dir, pr_branch,
-                http_token=bb_token,
-                http_username=bb_user,
-                url=f"https://bitbucket.org/{workspace}/{repo_name}.git",
+                http_token=config.get("BITBUCKET_TOKEN", ""),
+                http_username=config.get("BITBUCKET_USERNAME", "x-token-auth"),
+                url=detect_bitbucket_url(workspace, repo_name, use_ssh=False),
             )
         else:
             gh_token = config.get("GH_TOKEN", "")
             gh_org = config.get("GH_ORG", "")
-            repo_name = config.get("GH_REPO", "")
+            gh_repo = config.get("GH_REPO", "")
+            print(f"[create-skill-pr] pushing to github.com/{gh_org}/{gh_repo} "
+                  f"token={'***' if gh_token else '(MISSING)'} len={len(gh_token)}", flush=True)
             push_branch(
                 codebase_dir, pr_branch,
                 http_token=gh_token,
                 http_username="x-access-token",
-                url=f"https://github.com/{gh_org}/{repo_name}.git",
+                url=f"https://github.com/{gh_org}/{gh_repo}.git",
             )
     except Exception as e:
-        print(f"[create-skill-pr] Push failed — cannot create PR: {e}", file=sys.stderr, flush=True)
+        stderr_detail = (e.stderr + e.output) if isinstance(e, subprocess.CalledProcessError) else str(e)
+        print(f"[create-skill-pr] Push failed: {stderr_detail[:500]}", file=sys.stderr, flush=True)
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         if ygs_recs:
             _write_ygs_recommendations(reports_dir, ygs_recs)
         sys.exit(1)
 
-    # Create PR (DRY: uses run_cmd for GH, bitbucket_api for BB — same as implement workflow)
+    # Create PR — tracker-specific: GH uses gh CLI, BB uses bitbucket_api
     pr_info = _create_pr(config, pr_branch, base_branch, repo_changes, new_docs, tracker,
                          audit_report=audit_report, skill_update_plan=skill_update_plan)
 
-    # Determine org/repo for pr.json metadata
-    org = config.get("GH_ORG", config.get("BITBUCKET_WORKSPACE", ""))
-    repo = config.get("GH_REPO", config.get("BITBUCKET_REPO", ""))
+    # Determine org/repo for pr.json metadata — tracker-specific, no cross-fallback
+    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+        org = config.get("BITBUCKET_WORKSPACE", "")
+        repo = config.get("BITBUCKET_REPO", "")
+    else:
+        org = config.get("GH_ORG", "")
+        repo = config.get("GH_REPO", "")
 
     pr_url = pr_info.get("url", "")
     pr_num = pr_info.get("number", 0)

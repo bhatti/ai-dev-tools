@@ -104,8 +104,13 @@ def main() -> None:
     else:
         improvements_summary = "(not available — audit produced no skill_improvements.json)"
 
-    org = config.get("GH_ORG", config.get("BITBUCKET_WORKSPACE", "unknown"))
-    repo = config.get("GH_REPO", config.get("BITBUCKET_REPO", "unknown"))
+    tracker = (config.get("DEFAULT_TRACKER") or "").lower().strip()
+    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+        org = config.get("BITBUCKET_WORKSPACE", "unknown")
+        repo = config.get("BITBUCKET_REPO", "unknown")
+    else:
+        org = config.get("GH_ORG", "unknown")
+        repo = config.get("GH_REPO", "unknown")
     prompt = _PLAN_PROMPT_TEMPLATE.format(
         org=org,
         repo=repo,
