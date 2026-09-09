@@ -131,7 +131,7 @@ You are an AI agent responding to BitBucket PR review feedback.
 
     summary = (result.status_json or {}).get("summary", "")
     reply = f"Addressed feedback from @{author}: {summary}".strip().rstrip(":")
-    add_pr_comment(config, workspace, repo_name, pr_id, reply)
+    add_pr_comment(config, workspace, repo_name, pr_id, reply, parent_id=comment_id)
     return True
 
 

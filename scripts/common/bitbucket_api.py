@@ -87,16 +87,15 @@ def list_pr_comments(config: dict, workspace: str, repo: str, pr_id: int | str) 
 
 
 def add_pr_comment(
-    config: dict, workspace: str, repo: str, pr_id: int | str, body: str
+    config: dict, workspace: str, repo: str, pr_id: int | str, body: str,
+    parent_id: int | str | None = None,
 ) -> bool:
-    """Post a comment on a PR."""
+    """Post a comment on a PR, optionally as a threaded reply to parent_id."""
     url = f"{_repo(workspace, repo)}/pullrequests/{pr_id}/comments"
-    resp = requests.post(
-        url,
-        auth=_auth(config),
-        json={"content": {"raw": body}},
-        timeout=30,
-    )
+    payload: dict = {"content": {"raw": body}}
+    if parent_id:
+        payload["parent"] = {"id": int(parent_id)}
+    resp = requests.post(url, auth=_auth(config), json=payload, timeout=30)
     if not resp.ok:
         print(f"BitBucket add_comment error {resp.status_code}: {resp.text}", file=sys.stderr)
         return False

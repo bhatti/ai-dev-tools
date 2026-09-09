@@ -58,8 +58,8 @@ def main(issue_id: str) -> None:
     issue = read_json(config, issue_id, "issue.json")
     impl_result = read_json(config, issue_id, "impl_result.json") or {}
 
-    if not pr or not issue:
-        print("ERROR: Missing pr.json or issue.json", file=sys.stderr)
+    if not pr:
+        print("ERROR: Missing pr.json", file=sys.stderr)
         sys.exit(1)
 
     workspace = pr.get("workspace") or config.get("BITBUCKET_WORKSPACE", "")
@@ -74,10 +74,30 @@ def main(issue_id: str) -> None:
         for c in comments
     ) or "(no comments)"
 
+    # pr-audit workflow has no issue.json — build context from audit reports instead
+    if not issue:
+        from scripts.common.config import get_workspace_dir
+        workspace_dir = get_workspace_dir(config)
+        audit_report = ""
+        skill_plan = ""
+        for path in [
+            workspace_dir / "reports" / "pr_audit_report.md",
+            workspace_dir / "reports" / "skill_update_plan.md",
+        ]:
+            if path.exists():
+                audit_report += f"\n\n## {path.name}\n" + path.read_text(encoding="utf-8")[:2000]
+        impl_summary = audit_report or json.dumps(impl_result, indent=2)
+        title = f"PR audit skill improvements — {pr.get('url', pr_id)}"
+        issue_id_label = "pr-audit"
+    else:
+        impl_summary = json.dumps(impl_result, indent=2)
+        title = issue["title"]
+        issue_id_label = issue_id
+
     prompt = LEARN_PROMPT_TEMPLATE.format(
-        issue_id=issue_id,
-        title=issue["title"],
-        impl_summary=json.dumps(impl_result, indent=2),
+        issue_id=issue_id_label,
+        title=title,
+        impl_summary=impl_summary,
         comments_text=comments_text,
     )
 

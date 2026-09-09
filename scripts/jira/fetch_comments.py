@@ -58,10 +58,19 @@ def main(issue_id: str) -> None:
     for c in all_new:
         processed_ids.add(c.get("id"))
 
+    # Build set of comment IDs the bot has already replied to (robust fallback:
+    # works even if processed_comments.json is lost between iterations).
+    already_replied_ids: set[int] = {
+        c["parent"]["id"]
+        for c in comments
+        if c.get("parent") and c.get("author", {}).get("nickname", "").lower() == bot_username.lower()
+    }
+
     ai_bot_comments = [
         c for c in all_new
         if (c.get("content", {}).get("raw", "") or c.get("body", "")).strip().lower().startswith("ai-bot")
         and c.get("author", {}).get("nickname", "").lower() != bot_username.lower()
+        and c.get("id") not in already_replied_ids
     ]
 
     write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
