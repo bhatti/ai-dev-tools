@@ -11,23 +11,28 @@ Reads:
     /workspace/branch.txt
 
 Writes:
-    /workspace/pr.json
+    /workspace/pr.json                   (via artifacts module; get_issue_dir returns workspace root)
     /workspace/reports/ygs_recommendations.md
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import subprocess
 import sys
 from pathlib import Path
 
+from scripts.common import bitbucket_api
+from scripts.common.artifacts import read_json as artifacts_read_json
+from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.git_utils import clone_by_tracker, configure_git
+from scripts.common.shell import run_cmd
 from scripts.standup.slack_client import post_message
+
+_ISSUE_ID = "pr-audit"
 
 
 def main() -> None:
@@ -40,7 +45,7 @@ def main() -> None:
     improvements_path = reports_dir / "skill_improvements.json"
     if not improvements_path.exists():
         print("[create-skill-pr] No skill_improvements.json found", flush=True)
-        _write_empty_pr_json(workspace_dir)
+        _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         return
 
@@ -48,7 +53,7 @@ def main() -> None:
         improvements = json.loads(improvements_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         print(f"[create-skill-pr] Could not parse skill_improvements.json: {e}", flush=True)
-        _write_empty_pr_json(workspace_dir)
+        _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         return
 
@@ -58,10 +63,18 @@ def main() -> None:
 
     if not repo_changes and not new_docs:
         print("[create-skill-pr] No repo changes to propose", flush=True)
-        _write_empty_pr_json(workspace_dir)
+        _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         if ygs_recs:
             _write_ygs_recommendations(reports_dir, ygs_recs)
+        return
+
+    # Idempotency: skip if PR was already created (e.g. task retry)
+    existing = artifacts_read_json(config, _ISSUE_ID, "pr.json")
+    if existing and existing.get("url"):
+        print(f"[create-skill-pr] PR already exists: {existing['url']} — skipping", flush=True)
+        print("::add-task-context SKILL_PR_CREATED::yes", flush=True)
+        print(f"::add-task-context PR_URL::{existing['url']}", flush=True)
         return
 
     # Clone the repo (each task runs in a separate pod — workspace is not shared)
@@ -72,7 +85,7 @@ def main() -> None:
         ok = _clone_repo(config, codebase_dir, tracker)
         if not ok:
             print("[create-skill-pr] Clone failed — cannot create PR", file=sys.stderr, flush=True)
-            _write_empty_pr_json(workspace_dir)
+            _write_empty_pr_json(config)
             print("::add-task-context SKILL_PR_CREATED::no", flush=True)
             if ygs_recs:
                 _write_ygs_recommendations(reports_dir, ygs_recs)
@@ -106,8 +119,8 @@ def main() -> None:
             if action == "create":
                 target.write_text(content, encoding="utf-8")
             else:
-                existing = target.read_text(encoding="utf-8") if target.exists() else ""
-                target.write_text(existing + "\n" + content, encoding="utf-8")
+                existing_text = target.read_text(encoding="utf-8") if target.exists() else ""
+                target.write_text(existing_text + "\n" + content, encoding="utf-8")
             changes_made.append(file_path)
         except OSError as e:
             print(f"[create-skill-pr] Could not write {file_path}: {e}", flush=True)
@@ -128,7 +141,7 @@ def main() -> None:
     if not changes_made:
         print("[create-skill-pr] No files written -- nothing to commit", flush=True)
         _run_git(codebase_dir, ["checkout", base_branch])
-        _write_empty_pr_json(workspace_dir)
+        _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         if ygs_recs:
             _write_ygs_recommendations(reports_dir, ygs_recs)
@@ -144,20 +157,19 @@ def main() -> None:
     push_result = _run_git(codebase_dir, ["push", "-u", "origin", pr_branch])
     if push_result.returncode != 0:
         print("[create-skill-pr] Push failed — cannot create PR", file=sys.stderr, flush=True)
-        _write_empty_pr_json(workspace_dir)
+        _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         if ygs_recs:
             _write_ygs_recommendations(reports_dir, ygs_recs)
-        return
+        sys.exit(1)
 
-    # Create PR
-    pr_info = _create_pr(config, codebase_dir, pr_branch, base_branch, repo_changes, new_docs, tracker)
+    # Create PR (DRY: uses run_cmd for GH, bitbucket_api for BB — same as implement workflow)
+    pr_info = _create_pr(config, pr_branch, base_branch, repo_changes, new_docs, tracker)
 
-    # Determine org/repo
+    # Determine org/repo for pr.json metadata
     org = config.get("GH_ORG", config.get("BITBUCKET_WORKSPACE", ""))
     repo = config.get("GH_REPO", config.get("BITBUCKET_REPO", ""))
 
-    # Write pr.json
     pr_url = pr_info.get("url", "")
     pr_num = pr_info.get("number", 0)
     pr_json = {
@@ -167,7 +179,8 @@ def main() -> None:
         "repo": f"{org}/{repo}" if org and repo else "",
         "tracker": "bitbucket" if tracker in ("jira", "bitbucket", "jira/bitbucket") else "github",
     }
-    (workspace_dir / "pr.json").write_text(json.dumps(pr_json, indent=2), encoding="utf-8")
+    # Write to /workspace/pr.json via artifacts module (get_issue_dir returns workspace root)
+    artifacts_write_json(config, _ISSUE_ID, "pr.json", pr_json)
 
     # Emit context markers
     print(f"::add-task-context SKILL_PR_CREATED::{'yes' if pr_url else 'no'}", flush=True)
@@ -228,17 +241,19 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess:
 
 def _create_pr(
     config: dict,
-    cwd: Path,
     head_branch: str,
     base_branch: str,
     repo_changes: list[dict],
     new_docs: list[dict],
     tracker: str,
 ) -> dict:
-    """Create a PR on GitHub or Bitbucket. Returns {'url': ..., 'number': ...}."""
+    """Create a PR on GitHub or Bitbucket.
+
+    Returns {'url': ..., 'number': ...}. Calls sys.exit(1) on failure.
+    Uses run_cmd (GH) and bitbucket_api.create_pr (BB) — same as implement workflow (DRY).
+    """
     title = f"[AI] PR audit: skill & doc improvements ({len(repo_changes) + len(new_docs)} changes)"
 
-    # Build body
     body_lines = [
         "## Summary",
         "",
@@ -262,30 +277,21 @@ def _create_pr(
 
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
         return _create_bitbucket_pr(config, title, body, head_branch, base_branch)
-    return _create_github_pr(config, cwd, title, body, head_branch)
+    return _create_github_pr(config, title, body, head_branch)
 
 
-def _create_github_pr(config: dict, cwd: Path, title: str, body: str, head_branch: str) -> dict:
-    """Create a GitHub PR via gh CLI."""
+def _create_github_pr(config: dict, title: str, body: str, head_branch: str) -> dict:
+    """Create a GitHub PR via gh CLI (DRY: uses run_cmd same as gh/build_pr.py)."""
     org = config.get("GH_ORG", "")
     repo = config.get("GH_REPO", "")
-    cmd = [
-        "gh", "pr", "create",
-        "-R", f"{org}/{repo}",
-        "--title", title,
-        "--body", body,
-        "--head", head_branch,
-    ]
-    try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[create-skill-pr] gh pr create failed: {e}", file=sys.stderr, flush=True)
-        return {"url": "", "number": 0}
-
+    result = run_cmd(
+        ["gh", "pr", "create", "-R", f"{org}/{repo}",
+         "--title", title, "--body", body, "--head", head_branch],
+        check=False,
+    )
     if result.returncode != 0:
-        print(f"[create-skill-pr] gh pr create error: {result.stderr.strip()[:300]}", file=sys.stderr, flush=True)
-        return {"url": "", "number": 0}
-
+        print(f"[create-skill-pr] gh pr create failed: {result.stderr.strip()[:300]}", file=sys.stderr, flush=True)
+        sys.exit(1)
     m = re.search(r'https://github\.com/[^\s]+/pull/(\d+)', result.stdout)
     if m:
         return {"url": m.group(0), "number": int(m.group(1))}
@@ -293,43 +299,22 @@ def _create_github_pr(config: dict, cwd: Path, title: str, body: str, head_branc
 
 
 def _create_bitbucket_pr(config: dict, title: str, body: str, head_branch: str, base_branch: str) -> dict:
-    """Create a Bitbucket PR via REST API."""
-    import requests as _requests
-
+    """Create a Bitbucket PR (DRY: delegates to bitbucket_api.create_pr same as jira/build_pr.py)."""
     workspace = config.get("BITBUCKET_WORKSPACE", "")
     repo = config.get("BITBUCKET_REPO", "")
-    username = config.get("BITBUCKET_USERNAME", "")
-    token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
-
-    if not all([workspace, repo, username, token]):
-        print("[create-skill-pr] Bitbucket credentials incomplete", file=sys.stderr, flush=True)
-        return {"url": "", "number": 0}
-
-    url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests"
-    payload = {
-        "title": title,
-        "description": body,
-        "source": {"branch": {"name": head_branch}},
-        "destination": {"branch": {"name": base_branch}},
-        "close_source_branch": True,
+    pr_data = bitbucket_api.create_pr(config, workspace, repo, title, body, head_branch, base_branch)
+    if pr_data is None:
+        print("[create-skill-pr] Bitbucket PR creation failed", file=sys.stderr, flush=True)
+        sys.exit(1)
+    return {
+        "url": pr_data.get("links", {}).get("html", {}).get("href", ""),
+        "number": pr_data.get("id", 0),
     }
-    try:
-        resp = _requests.post(url, json=payload, auth=(username, token), timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            "url": data.get("links", {}).get("html", {}).get("href", ""),
-            "number": data.get("id", 0),
-        }
-    except Exception as e:
-        print(f"[create-skill-pr] Bitbucket PR creation failed: {e}", file=sys.stderr, flush=True)
-        return {"url": "", "number": 0}
 
 
-def _write_empty_pr_json(workspace: Path) -> None:
-    """Write an empty pr.json to signal no PR was created."""
-    pr_json = {"url": "", "number": 0, "branch": "", "repo": "", "tracker": ""}
-    (workspace / "pr.json").write_text(json.dumps(pr_json, indent=2), encoding="utf-8")
+def _write_empty_pr_json(config: dict) -> None:
+    """Write an empty pr.json to signal no PR was created (at /workspace/pr-audit/pr.json)."""
+    artifacts_write_json(config, _ISSUE_ID, "pr.json", {"url": "", "number": 0, "branch": "", "repo": "", "tracker": ""})
 
 
 def _write_ygs_recommendations(reports_dir: Path, recs: list[dict]) -> None:

@@ -59,6 +59,7 @@ class TestPromptTemplate:
             focus="all",
             pr_context="## PRs\n(test data)",
             skill_instructions="Analyze the PRs.",
+            pr_ids="1,2,3",
         )
         assert "org/repo" in result
         assert "50" in result

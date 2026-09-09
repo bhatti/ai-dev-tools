@@ -166,8 +166,10 @@ class TestBuildPrContext:
                 "body": "Long description " * 50,
             })
         result = build_pr_context(prs, max_chars=5000)
-        assert len(result) <= 6000  # some slack for truncation markers
-        assert "omitted" in result or "truncated" in result
+        # All 100 PRs are always included (design intent: never drop PRs).
+        # Each PR is truncated to per_pr_budget = max(5000//100, 500) = 500 chars.
+        assert result.count("### PR #") == 100
+        assert "_(truncated)_" in result  # per-PR truncation markers present
 
     def test_multiple_prs(self):
         prs = [

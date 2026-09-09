@@ -311,10 +311,10 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     max_pr_size = int(config.get("MAX_PR_AUDIT_SIZE", "10000000"))
 
     slack_n_prs, slack_focus = _parse_slack_flags(config)
-    if slack_n_prs and not n_prs:
+    if slack_n_prs is not None:
         n_prs = slack_n_prs
         print(f"[pr-audit] Slack override: n_prs={n_prs}", flush=True)
-    if slack_focus:
+    if slack_focus is not None:
         focus = slack_focus
         print(f"[pr-audit] Slack override: focus={focus}", flush=True)
 

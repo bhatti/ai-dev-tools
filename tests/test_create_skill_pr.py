@@ -15,15 +15,20 @@ from scripts.analyze.create_skill_pr import (
 
 class TestWriteEmptyPrJson:
     def test_writes_empty_json(self, tmp_path):
-        _write_empty_pr_json(tmp_path)
-        pr_json = json.loads((tmp_path / "pr.json").read_text())
+        # artifacts module (get_issue_dir) uses workspace root directly — no issue_id subdir
+        config = {"WORKSPACE_DIR": str(tmp_path)}
+        _write_empty_pr_json(config)
+        pr_json_path = tmp_path / "pr.json"
+        assert pr_json_path.exists()
+        pr_json = json.loads(pr_json_path.read_text())
         assert pr_json["url"] == ""
         assert pr_json["number"] == 0
         assert pr_json["branch"] == ""
 
     def test_overwrites_existing(self, tmp_path):
         (tmp_path / "pr.json").write_text('{"old": true}')
-        _write_empty_pr_json(tmp_path)
+        config = {"WORKSPACE_DIR": str(tmp_path)}
+        _write_empty_pr_json(config)
         pr_json = json.loads((tmp_path / "pr.json").read_text())
         assert "old" not in pr_json
         assert pr_json["url"] == ""
