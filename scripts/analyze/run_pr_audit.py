@@ -272,6 +272,20 @@ Beyond the 4 specialist dimensions, also check for:
 - **Blast-radius review adequacy**: When assessing review quality, prioritize blast-radius over LOC.
   A 2-line change to auth/ACL/config/flags can have higher risk than a 300-line refactor. Always note
   the blast-radius reason when flagging zero-review changes.
+- **Recommendations must NOT cite arbitrary LOC thresholds or repo-specific directory paths.**
+  Write recommendations in terms of risk categories (e.g., "PRs touching auth, feature flags,
+  or infra should require ≥1 human reviewer") not specific numbers and paths ("PRs with >400 LOC
+  in src/"). LOC is a loose signal, not a policy gate.
+- **Review activities include approvals**: The PR context includes an "Approved by" field listing
+  Bitbucket approvers, and a "Review decision" field. A PR that shows approvers or an APPROVED
+  decision IS human-reviewed — even if the approver left no inline comments. Do NOT count it as
+  "no human review". Only flag PRs where `Approved by` is absent AND human comments are absent.
+  A silent approval on a high-blast-radius change is still a rubber-stamp concern — but it is a
+  different finding ("insufficient scrutiny") than "no human review".
+- **AC detection is semantic**: When `has_acceptance_criteria: false`, read the "Issue description
+  excerpt" carefully. Prose that clearly describes the desired fix or behavior (e.g., "Fix —
+  wire up event-driven refresh instead of backoff") satisfies the intent of AC. Only flag as
+  missing if the description provides no testable expected behavior at all.
 
 ## REQUIRED: Distinguish CI bots vs code-review bots
 

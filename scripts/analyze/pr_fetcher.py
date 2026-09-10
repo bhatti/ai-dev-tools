@@ -300,6 +300,16 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         deletions = sum(d.get("lines_removed", 0) for d in diffstat)
         file_paths = [d.get("path", "") for d in diffstat]
 
+        # Extract approvals from the participants list (present in merged PR data)
+        participants = rp.get("participants", [])
+        approvers = [
+            p.get("user", {}).get("display_name") or p.get("user", {}).get("nickname", "")
+            for p in participants
+            if p.get("approved") and p.get("role") != "AUTHOR"
+        ]
+        approvers = [a for a in approvers if a]
+        review_decision = "APPROVED" if approvers else ""
+
         pr = {
             "number": pr_id,
             "title": rp.get("title", ""),
@@ -317,8 +327,9 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "ci_comments": classified["ci_comments"],
             "review_bot_comments": classified["review_bot_comments"],
             "human_comments": classified["human_comments"],
+            "approvers": approvers,
             "linked_issue": None,
-            "review_decision": "",
+            "review_decision": review_decision,
         }
         prs.append(pr)
 
@@ -648,6 +659,28 @@ def _detect_acceptance_criteria(text: str) -> tuple[bool, str]:
     if len(numbered) >= 2:
         return True, "\n".join(numbered[:20])
 
+    # 5. Prose behavioral specification — description explicitly states the desired approach/fix.
+    # Matches patterns like "Fix — ...", "Revised approach:", "Expected behavior:", "Goal:", etc.
+    # Also matches substantial prose (>300 chars) that contains multiple behavioral sentences.
+    prose_heading = re.search(
+        r'(?:^|\n)\s*(?:Fix\s*[—–-]|Revised approach|Expected behavior|Desired behavior|'
+        r'Approach:|Goal:|Objective:|Behavior:|Solution:|The fix:|This PR (?:fixes|adds|changes|wires))',
+        text, re.IGNORECASE,
+    )
+    if prose_heading and len(text.strip()) > 150:
+        # Extract the sentence(s) after the prose heading (up to 500 chars)
+        start = prose_heading.start()
+        return True, text[start:start + 500].strip()
+
+    # 6. Behavioral sentences with clear subject + verb + condition (at least 2)
+    behavioral = re.findall(
+        r'(?:^|\n)\s*.{10,}(?:will|should|must|needs to|has to|is expected to)'
+        r'.{10,}(?:when|if|after|before|until|on|upon).+',
+        text, re.IGNORECASE,
+    )
+    if len(behavioral) >= 2:
+        return True, "\n".join(behavioral[:10])
+
     return False, ""
 
 
@@ -720,7 +753,7 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
                     section.append("  - **Acceptance criteria**: _(none found)_")
                     issue_body = details.get("body", "")
                     if issue_body:
-                        section.append(f"  - **Issue description excerpt**: {issue_body[:400]}")
+                        section.append(f"  - **Issue description excerpt**: {issue_body[:600]}")
             else:
                 section.append(issue_line)
 
@@ -747,6 +780,11 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         if parts:
             reviewer_summary = " | ".join(parts)
         section.append(f"- **Reviewers**: {reviewer_summary}")
+        approvers = pr.get("approvers", [])
+        if approvers:
+            section.append(f"- **Approved by**: {', '.join(approvers[:5])}")
+        elif pr.get("review_decision") == "APPROVED":
+            section.append("- **Approved by**: (approval recorded, name unavailable)")
 
         if human:
             section.append(f"- **Human comments** ({len(human)}):")
