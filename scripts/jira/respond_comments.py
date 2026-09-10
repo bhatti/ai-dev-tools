@@ -111,8 +111,14 @@ You are an AI agent responding to BitBucket PR review feedback.
     status = (result.status_json or {}).get("status", "")
     if status == "SKIPPED":
         reason = (result.status_json or {}).get("reason", "unknown")
-        print(f"[respond-comments] comment {comment_id}: SKIPPED — {reason}", file=sys.stderr, flush=True)
-        raise RuntimeError(f"Claude could not address comment {comment_id}: {reason}")
+        print(f"[respond-comments] comment {comment_id}: SKIPPED — {reason}", flush=True)
+        # Post the explanation so the dedup marker is recorded and this comment isn't retried
+        reply = (
+            f"Note: this comment was reviewed but does not require code changes — {reason}\n\n"
+            f"<!-- replied-to: {comment_id} -->"
+        ).strip()
+        add_pr_comment(config, workspace, repo_name, pr_id, reply, parent_id=comment_id)
+        return False
 
     committed = commit_all(repo_dir, f"feedback: address comment from @{author}")
     if not committed:

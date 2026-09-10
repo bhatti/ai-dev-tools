@@ -265,7 +265,8 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     auth = (username, token) if username and token else None
 
     base = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
-    url = f"{base}/pullrequests?state=MERGED&sort=-updated_on&pagelen=50"
+    # +values.participants adds approval data without removing any default fields
+    url = f"{base}/pullrequests?state=MERGED&sort=-updated_on&pagelen=50&fields=%2Bvalues.participants"
 
     raw_prs: list[dict] = []
     while url and len(raw_prs) < n_prs:

@@ -107,8 +107,19 @@ You are an AI agent responding to a PR review comment.
     status = (result.status_json or {}).get("status", "")
     if status == "SKIPPED":
         reason = (result.status_json or {}).get("reason", "unknown")
-        print(f"[respond-comments] comment {comment_id}: SKIPPED — {reason}", file=sys.stderr, flush=True)
-        raise RuntimeError(f"Claude could not address comment {comment_id}: {reason}")
+        print(f"[respond-comments] comment {comment_id}: SKIPPED — {reason}", flush=True)
+        # Post explanation with dedup marker so this comment isn't retried next poll iteration
+        skip_body = (
+            f"Note: this comment was reviewed but does not require code changes — {reason}\n\n"
+            f"<!-- replied-to: {comment_id} -->"
+        ).strip()
+        reply = _run([
+            "gh", "api", f"repos/{org}/{repo}/issues/{pr_number}/comments",
+            "-f", f"body={skip_body}",
+        ], check=False)
+        if reply.returncode != 0:
+            raise RuntimeError(f"Failed to post skip reply on PR #{pr_number}: {reply.stderr.strip()}")
+        return False
 
     committed = commit_all(repo_dir, f"feedback: address comment from @{user}")
     if not committed:

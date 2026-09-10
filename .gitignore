@@ -4,6 +4,11 @@ test-workspace/
 secrets/
 .env
 
+# Runtime-generated output — never commit
+reports/
+logs/
+*.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
