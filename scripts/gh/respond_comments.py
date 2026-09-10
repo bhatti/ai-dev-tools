@@ -175,11 +175,8 @@ def main(issue_id: str) -> None:
         comment_id = comment["id"]
         user = comment.get("user", "unknown")
         print(f"  Responding to comment #{comment_id} from @{user}", flush=True)
-        try:
-            if _respond_to_comment(config, issue_id, org, repo, pr_number, comment, repo_dir, branch):
-                addressed += 1
-        except Exception as e:
-            print(f"WARNING: failed to respond to comment #{comment_id}: {e}", file=sys.stderr)
+        if _respond_to_comment(config, issue_id, org, repo, pr_number, comment, repo_dir, branch):
+            addressed += 1
 
     print(f"[respond-comments] handled {len(actionable)} comment(s), committed changes for {addressed}", flush=True)
     if addressed > 0:

@@ -179,11 +179,8 @@ def main(issue_id: str) -> None:
         comment_id = comment.get("id")
         author = comment.get("author", {}).get("nickname", "unknown")
         print(f"  Responding to comment {comment_id} from @{author}", flush=True)
-        try:
-            if _respond_to_comment(config, issue_id, workspace, repo_name, pr_id, comment, repo_dir, branch):
-                addressed += 1
-        except Exception as e:
-            print(f"WARNING: failed to respond to comment {comment_id}: {e}", file=sys.stderr)
+        if _respond_to_comment(config, issue_id, workspace, repo_name, pr_id, comment, repo_dir, branch):
+            addressed += 1
 
     print(f"[respond-comments] handled {len(ai_bot_comments)} comment(s), committed changes for {addressed}", flush=True)
     if addressed > 0:

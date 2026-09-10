@@ -299,6 +299,31 @@ and what was lacking across all PRs:
 
 Rate each as Strong/Developing/Gap based on evidence from the PR data.
 
+## CRITICAL: Security skill recommendations
+
+When reporting on security review coverage:
+- Check whether the repo has a `.claude/skills/security-review/` skill (or similar) before
+  reporting on invocation rate — if no such skill exists, the rate is 0% by definition and
+  reporting it as a gap is misleading.
+- **Correct recommendation when security coverage is low**: advise the repo to **add or improve
+  a `.claude/skills/security-review/SKILL.md`** in the repo itself. You may mention
+  `/ygs-security-review` as a reference example they can copy from, but do not tell teams to
+  invoke a skill they don't have.
+- Never recommend invoking `/ygs-security-review` as an action item unless you confirmed it
+  exists in the repo's `.claude/skills/` directory.
+
+## REQUIRED: Positive Patterns
+
+Include a dedicated **Positive Patterns** section in the report that highlights exemplary behavior:
+- Human reviewers who demonstrated deep domain expertise (e.g., "Abbas Mashayekh caught an auth
+  bypass in PR #xxx before merge")
+- Reviewers who gave constructive, detailed feedback that prevented rework
+- PRs with exceptional test coverage or well-structured rollback plans
+- Teams or individuals who consistently catch the right issues early
+
+This section reinforces good behavior and gives the team recognition for what they are doing well.
+It should appear after the findings sections and before the Metrics Dashboard.
+
 ## REQUIRED OUTPUTS -- Must be written before emitting the final JSON line
 
 Write these files using relative paths from the repo root (the `reports/` symlink resolves to the workspace reports directory):

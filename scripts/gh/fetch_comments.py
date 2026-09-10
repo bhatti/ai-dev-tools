@@ -26,7 +26,16 @@ from scripts.common.pr_utils import REPLIED_TO_RE, is_bot_trigger
 from scripts.common.shell import run_cmd as _run
 
 
-_BOT_USERNAMES = {"github-actions[bot]", "ai-agent", "ai-bot"}
+_DEFAULT_BOT_USERNAMES = {"github-actions[bot]", "ai-agent", "ai-bot"}
+
+
+def _bot_usernames(config: dict) -> set[str]:
+    """Return lowercase set of bot usernames to exclude from actionable comments."""
+    names = set(_DEFAULT_BOT_USERNAMES)
+    configured = config.get("GH_BOT_USERNAME", "").strip()
+    if configured:
+        names.add(configured.lower())
+    return {u.lower() for u in names}
 
 
 def _fetch_all_comments(org: str, repo: str, pr_number: int) -> list:
@@ -76,7 +85,7 @@ def main(issue_id: str) -> None:
         processed_ids.add(c["id"])
 
     # Build set of comment IDs already replied to (scan bot replies for explicit marker)
-    bot_usernames_lower = {u.lower() for u in _BOT_USERNAMES}
+    bot_usernames_lower = _bot_usernames(config)
     already_replied_ids: set[int] = set()
     for c in all_comments:
         if c.get("user", "").lower() in bot_usernames_lower:
