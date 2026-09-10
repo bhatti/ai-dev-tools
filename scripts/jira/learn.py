@@ -64,7 +64,7 @@ def main(issue_id: str) -> None:
 
     workspace = pr.get("workspace") or config.get("BITBUCKET_WORKSPACE", "")
     repo_name = pr.get("repo") or config.get("BITBUCKET_REPO", "")
-    pr_id = pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1]
+    pr_id = (pr.get("number") or pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1])
     issue_dir = get_issue_dir(config, issue_id)
 
     comments = list_pr_comments(config, workspace, repo_name, pr_id)

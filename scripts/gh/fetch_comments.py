@@ -1,7 +1,7 @@
-"""Fetch new GitHub PR comments and filter to actionable ai-bot comments.
+"""Fetch new GitHub PR comments and filter to actionable bot comments.
 
 Phase 2 of poll-pr: reads poll_state.json (skip if terminal), fetches
-unprocessed PR issue + review comments, filters to ai-bot prefixed ones.
+unprocessed PR issue + review comments, filters to ones whose first word ends with "bot".
 
 Usage:
     python -m scripts.gh.fetch_comments --issue-id 42
@@ -22,13 +22,14 @@ import click
 
 from scripts.common.artifacts import read_json, write_json
 from scripts.common.config import load_config
+from scripts.common.pr_utils import REPLIED_TO_RE, is_bot_trigger
 from scripts.common.shell import run_cmd as _run
 
 
 _BOT_USERNAMES = {"github-actions[bot]", "ai-agent", "ai-bot"}
 
 
-def _fetch_new_comments(org: str, repo: str, pr_number: int, processed_ids: set) -> list:
+def _fetch_all_comments(org: str, repo: str, pr_number: int) -> list:
     comments = []
     for endpoint, ctype in [
         (f"repos/{org}/{repo}/issues/{pr_number}/comments", "issue"),
@@ -42,7 +43,7 @@ def _fetch_new_comments(org: str, repo: str, pr_number: int, processed_ids: set)
             print(f"WARNING: gh api {endpoint} failed: {result.stderr.strip()}", file=sys.stderr)
         else:
             comments.extend(json.loads(result.stdout or "[]"))
-    return [c for c in comments if c["id"] not in processed_ids]
+    return comments
 
 
 @click.command()
@@ -69,14 +70,25 @@ def main(issue_id: str) -> None:
     processed_data = read_json(config, issue_id, "processed_comments.json") or {"ids": []}
     processed_ids = set(processed_data["ids"])
 
-    all_new = _fetch_new_comments(org, repo, pr_number, processed_ids)
+    all_comments = _fetch_all_comments(org, repo, pr_number)
+    all_new = [c for c in all_comments if c["id"] not in processed_ids]
     for c in all_new:
         processed_ids.add(c["id"])
 
+    # Build set of comment IDs already replied to (scan bot replies for explicit marker)
+    bot_usernames_lower = {u.lower() for u in _BOT_USERNAMES}
+    already_replied_ids: set[int] = set()
+    for c in all_comments:
+        if c.get("user", "").lower() in bot_usernames_lower:
+            for m in REPLIED_TO_RE.finditer(c.get("body", "")):
+                already_replied_ids.add(int(m.group(1)))
+
+    # Filter: first word must end with "bot"
     actionable = [
         c for c in all_new
-        if c.get("body", "").strip().lower().startswith("ai-bot")
-        and c.get("user", "").lower() not in _BOT_USERNAMES
+        if is_bot_trigger(c.get("body", ""))
+        and c.get("user", "").lower() not in bot_usernames_lower
+        and c["id"] not in already_replied_ids
     ]
 
     write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})

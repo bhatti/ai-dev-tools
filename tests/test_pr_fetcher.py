@@ -130,6 +130,70 @@ class TestBuildPrContext:
         result = build_pr_context([])
         assert "no PRs available" in result
 
+    def test_access_denied_issue_shows_unknown_not_false(self):
+        """access_denied issues must show 'unknown' not 'false' so auditor doesn't count them as missing AC."""
+        prs = [{
+            "number": 10,
+            "title": "Restricted project PR",
+            "author": "dev",
+            "merged_at": "2024-01-15",
+            "branch": "feat/x",
+            "files_changed": 5,
+            "review_decision": "APPROVED",
+            "linked_issue": {
+                "key": "RESTRICTED-42",
+                "source": "jira",
+                "details": {
+                    "access_denied": True,
+                    "title": "",
+                    "body": "",
+                    "labels": [],
+                    "acceptance_criteria": "",
+                    "has_acceptance_criteria": None,
+                    "design_doc_links": [],
+                },
+            },
+            "human_comments": [],
+            "bot_comments": [],
+            "ci_comments": [],
+            "review_bot_comments": [],
+            "body": "",
+        }]
+        result = build_pr_context(prs)
+        assert "access denied" in result.lower()
+        assert "has_acceptance_criteria**: false" not in result
+
+    def test_has_ac_true_without_text(self):
+        """has_acceptance_criteria=True should render as true even if ac text is empty."""
+        prs = [{
+            "number": 11,
+            "title": "Feature with AC",
+            "author": "dev",
+            "merged_at": "2024-01-15",
+            "branch": "feat/y",
+            "files_changed": 2,
+            "review_decision": "",
+            "linked_issue": {
+                "key": "PROJ-1",
+                "source": "jira",
+                "details": {
+                    "title": "Some ticket",
+                    "body": "stuff",
+                    "labels": [],
+                    "acceptance_criteria": "",  # empty — edge case
+                    "has_acceptance_criteria": True,
+                    "design_doc_links": [],
+                },
+            },
+            "human_comments": [],
+            "bot_comments": [],
+            "ci_comments": [],
+            "review_bot_comments": [],
+            "body": "",
+        }]
+        result = build_pr_context(prs)
+        assert "has_acceptance_criteria**: true" in result
+
     def test_single_pr(self):
         prs = [{
             "number": 1,

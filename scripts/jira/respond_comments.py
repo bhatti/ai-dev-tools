@@ -79,6 +79,8 @@ def _respond_to_comment(
     author = comment.get("author", {}).get("nickname", "unknown")
     body = comment.get("content", {}).get("raw", "") or comment.get("body", "")
     comment_id = comment.get("id")
+    if not comment_id:
+        raise RuntimeError(f"comment is missing 'id' field — cannot process: {comment}")
 
     max_turns = int(config.get("MAX_TURNS_FEEDBACK", "10"))
     prompt = f"""\
@@ -130,7 +132,10 @@ You are an AI agent responding to BitBucket PR review feedback.
         push_branch(repo_dir, branch, force_with_lease=True)
 
     summary = (result.status_json or {}).get("summary", "")
-    reply = f"Addressed feedback from @{author}: {summary}".strip().rstrip(":")
+    reply = (
+        f"Addressed feedback from @{author}: {summary}\n\n"
+        f"<!-- replied-to: {comment_id} -->"
+    ).strip()
     add_pr_comment(config, workspace, repo_name, pr_id, reply, parent_id=comment_id)
     return True
 
@@ -157,7 +162,7 @@ def main(issue_id: str) -> None:
 
     workspace = pr.get("workspace") or config.get("BITBUCKET_WORKSPACE", "")
     repo_name = pr.get("repo") or config.get("BITBUCKET_REPO", "")
-    pr_id = pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1]
+    pr_id = (pr.get("number") or pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1])
     branch = pr["branch"]
 
     issue_dir = get_issue_dir(config, issue_id)

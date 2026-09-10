@@ -233,12 +233,23 @@ For every finding, classify it along two axes:
 
 State both classifications in each finding. Example: "gap_type: team_skill, impact: increases_risk"
 
-## CRITICAL: Acceptance criteria detection
+## CRITICAL: Acceptance criteria detection — no false positives
 
-The `has_acceptance_criteria` field uses semantic detection (checkbox lists, BDD Given/When/Then,
-numbered requirements with "must"/"should"/"shall", not just a literal "Acceptance Criteria" heading).
-When `has_acceptance_criteria` is false, verify by reading the issue description excerpt -- the issue
-may use different language for its requirements. Report the actual AC coverage accurately.
+The `has_acceptance_criteria` field in the pre-computed data has three possible values:
+- `true` — semantic detection found AC (checkboxes, BDD, numbered requirements, etc.)
+- `false` — issue was accessible but no testable requirements found in any form
+- `unknown (Jira access denied -- restricted project)` — the issue EXISTS but the audit bot could not read it
+
+**When `has_acceptance_criteria: false`**: verify by reading the `Issue description excerpt` — the issue
+may describe requirements using different language. Only flag as "AC missing" if you can confirm the
+description lacks any testable requirements.
+
+**When `has_acceptance_criteria: unknown (access denied)`**: you have NO DATA about this issue. Do NOT
+flag it as "AC missing". Do NOT include it in the AC coverage denominator. Treat it identically to
+"no linked issue" for metrics purposes.
+
+**Never report "X/N PRs missing AC" when many of those X are access-denied issues** — that is a false
+positive. Only count PRs where you can actually read the issue and confirm it lacks AC.
 
 ## CRITICAL: Include PR IDs everywhere
 
@@ -254,6 +265,13 @@ Beyond the 4 specialist dimensions, also check for:
 - **Brittle tests**: Tests using sleep/timing, excessive mocking, environment-dependent assertions
 - **Industry practice violations**: Missing rollback plans, rubber-stamp reviews on risky changes,
   no documentation updates for new features
+- **Knowledge base / second brain**: Check if the repo has `docs/adr/`, `adr/`, `design/decisions/`, or
+  similar. If not, and design debates are happening in PR comments, recommend establishing one. The goal
+  is a permanent, searchable decision log where each entry answers: "What did we consider? What did we
+  decide? Why?"
+- **Blast-radius review adequacy**: When assessing review quality, prioritize blast-radius over LOC.
+  A 2-line change to auth/ACL/config/flags can have higher risk than a 300-line refactor. Always note
+  the blast-radius reason when flagging zero-review changes.
 
 ## REQUIRED: Distinguish CI bots vs code-review bots
 

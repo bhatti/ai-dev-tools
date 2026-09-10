@@ -567,8 +567,16 @@ def _fetch_jira_issue(issue_ref: dict, config: dict) -> dict | None:
             auth=(email, token),
             timeout=20,
         )
-        resp.raise_for_status()
     except Exception:
+        return None
+    if resp.status_code in (401, 403):
+        # Restricted project — we have NO data, not "no AC"
+        return {
+            "access_denied": True, "title": "", "body": "", "labels": [],
+            "acceptance_criteria": "", "has_acceptance_criteria": None,
+            "design_doc_links": [],
+        }
+    if not resp.ok:
         return None
     data = resp.json()
     fields = data.get("fields", {})
@@ -696,12 +704,16 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
             details = linked.get("details")
             if details:
                 issue_line += f" — {details.get('title', '')}"
-                has_ac = details.get("has_acceptance_criteria", False)
+                has_ac = details.get("has_acceptance_criteria")  # None = access_denied
                 ac = details.get("acceptance_criteria", "")
-                if has_ac and ac:
+                if details.get("access_denied"):
+                    section.append(issue_line)
+                    section.append("  - **has_acceptance_criteria**: unknown (Jira access denied — restricted project)")
+                elif has_ac:
                     section.append(issue_line)
                     section.append(f"  - **has_acceptance_criteria**: true")
-                    section.append(f"  - **Acceptance criteria**: {ac[:500]}")
+                    if ac:
+                        section.append(f"  - **Acceptance criteria**: {ac[:500]}")
                 else:
                     section.append(issue_line)
                     section.append(f"  - **has_acceptance_criteria**: false")

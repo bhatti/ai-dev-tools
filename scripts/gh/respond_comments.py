@@ -123,7 +123,10 @@ You are an AI agent responding to a PR review comment.
     push_branch(repo_dir, branch, force_with_lease=True)
 
     summary = (result.status_json or {}).get("summary", "")
-    reply_body = f"Addressed feedback from @{user}: {summary}".strip().rstrip(":")
+    reply_body = (
+        f"Addressed feedback from @{user}: {summary}\n\n"
+        f"<!-- replied-to: {comment_id} -->"
+    ).strip()
     reply = _run([
         "gh", "api", f"repos/{org}/{repo}/issues/{pr_number}/comments",
         "-f", f"body={reply_body}",

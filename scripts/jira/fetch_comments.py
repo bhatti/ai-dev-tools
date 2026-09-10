@@ -1,7 +1,7 @@
-"""Fetch new BitBucket PR comments and filter to actionable ai-bot comments.
+"""Fetch new BitBucket PR comments and filter to actionable bot comments.
 
 Phase 2 of poll-pr: reads PR state from poll_state.json (skip if terminal),
-fetches unprocessed comments, filters to ai-bot prefixed ones.
+fetches unprocessed comments, filters to ones whose first word ends with "bot".
 
 Usage:
     python -m scripts.jira.fetch_comments --issue-id PROJ-42
@@ -22,6 +22,7 @@ import click
 from scripts.common.artifacts import read_json, write_json
 from scripts.common.bitbucket_api import list_pr_comments
 from scripts.common.config import load_config
+from scripts.common.pr_utils import REPLIED_TO_RE, is_bot_trigger
 
 
 @click.command()
@@ -43,7 +44,7 @@ def main(issue_id: str) -> None:
 
     workspace = pr.get("workspace") or config.get("BITBUCKET_WORKSPACE", "")
     repo_name = pr.get("repo") or config.get("BITBUCKET_REPO", "")
-    pr_id = pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1]
+    pr_id = (pr.get("number") or pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1])
 
     _raw_username = config.get("BITBUCKET_USERNAME", "")
     bot_username = config.get("BotNickname") or (
@@ -58,20 +59,27 @@ def main(issue_id: str) -> None:
     for c in all_new:
         processed_ids.add(c.get("id"))
 
-    # Build set of comment IDs the bot has already replied to (robust fallback:
-    # works even if processed_comments.json is lost between iterations).
-    already_replied_ids: set[int] = {
-        c["parent"]["id"]
-        for c in comments
-        if c.get("parent") and c.get("author", {}).get("nickname", "").lower() == bot_username.lower()
-    }
+    # Build set of comment IDs the bot has already replied to.
+    # Two methods so dedup is robust even if processed_comments.json is lost:
+    #   1. parent.id on threaded BB replies
+    #   2. explicit <!-- replied-to: {id} --> marker written into every bot reply
+    already_replied_ids: set[int] = set()
+    for c in comments:
+        if c.get("author", {}).get("nickname", "").lower() != bot_username.lower():
+            continue
+        if c.get("parent"):
+            already_replied_ids.add(c["parent"]["id"])
+        body = c.get("content", {}).get("raw", "") or c.get("body", "")
+        for m in REPLIED_TO_RE.finditer(body):
+            already_replied_ids.add(int(m.group(1)))
 
-    ai_bot_comments = [
-        c for c in all_new
-        if (c.get("content", {}).get("raw", "") or c.get("body", "")).strip().lower().startswith("ai-bot")
-        and c.get("author", {}).get("nickname", "").lower() != bot_username.lower()
-        and c.get("id") not in already_replied_ids
-    ]
+    # Filter: first word of comment must end with "bot" (covers "ai-bot", "claude-bot", etc.)
+    ai_bot_comments = []
+    for c in all_new:
+        body = c.get("content", {}).get("raw", "") or c.get("body", "")
+        author = c.get("author", {}).get("nickname", "").lower()
+        if is_bot_trigger(body) and author != bot_username.lower() and c.get("id") not in already_replied_ids:
+            ai_bot_comments.append(c)
 
     write_json(config, issue_id, "processed_comments.json", {"ids": list(processed_ids)})
     write_json(config, issue_id, "pending_comments.json", {"comments": ai_bot_comments})

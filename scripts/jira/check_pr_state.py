@@ -46,7 +46,7 @@ def main(issue_id: str) -> None:
 
     workspace = pr.get("workspace") or config.get("BITBUCKET_WORKSPACE", "")
     repo_name = pr.get("repo") or config.get("BITBUCKET_REPO", "")
-    pr_id = pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1]
+    pr_id = (pr.get("number") or pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1])
 
     state = get_pr_state(config, workspace, repo_name, pr_id)
     print(f"[check-pr-state] PR {pr_id} state={state}", flush=True)
