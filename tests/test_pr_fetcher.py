@@ -8,10 +8,15 @@ import pytest
 
 from scripts.analyze.pr_fetcher import (
     KNOWN_BOTS,
+    _fetch_single_bb_pr,
+    _fetch_single_gh_pr,
     build_pr_context,
     classify_comments,
     fetch_github_prs,
+    fetch_prs_by_numbers,
+    fetch_single_pr,
     link_pr_to_issue,
+    parse_pr_url,
 )
 
 
@@ -300,3 +305,222 @@ class TestFetchGithubPrs:
         config = {"GH_ORG": "org", "GH_REPO": "repo"}
         prs = fetch_github_prs(config)
         assert prs == []
+
+
+# ---------------------------------------------------------------------------
+# fetch_single_pr / _fetch_single_gh_pr / _fetch_single_bb_pr
+# ---------------------------------------------------------------------------
+
+class TestFetchSingleGhPr:
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_basic_fetch(self, mock_run, mock_review):
+        pr_json = json.dumps({
+            "number": 9,
+            "title": "AI: create data model",
+            "body": "Closes #1",
+            "author": {"login": "bhatti"},
+            "mergedAt": "2026-06-01T22:44:06Z",
+            "url": "https://github.com/bhatti/todo-sample/pull/9",
+            "headRefName": "ai/1-create-data-model",
+            "comments": [],
+            "reviews": [{"author": {"login": "bhatti"}, "state": "APPROVED", "body": ""}],
+            "reviewDecision": "APPROVED",
+            "labels": [],
+            "files": [
+                {"path": "internal/model/todo.go", "additions": 50, "deletions": 0},
+                {"path": "internal/model/todo_test.go", "additions": 30, "deletions": 0},
+            ],
+        })
+        mock_run.return_value = MagicMock(returncode=0, stdout=pr_json, stderr="")
+        config = {"GH_ORG": "bhatti", "GH_REPO": "todo-sample"}
+        pr = _fetch_single_gh_pr(config, 9)
+
+        assert pr is not None
+        assert pr["number"] == 9
+        assert pr["title"] == "AI: create data model"
+        assert pr["author"] == "bhatti"
+        assert pr["files_changed"] == 2
+        assert pr["additions"] == 80
+        assert "APPROVED" in pr["approvers"] or pr["review_decision"] == "APPROVED"
+        assert "substantive_human_comment_count" in pr
+        assert "rubber_stamp_approvers" in pr
+        assert "is_bot_authored" in pr
+
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_missing_config_returns_none(self, mock_run):
+        config = {}
+        pr = _fetch_single_gh_pr(config, 9)
+        assert pr is None
+        mock_run.assert_not_called()
+
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_api_error_returns_none(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not found")
+        config = {"GH_ORG": "bhatti", "GH_REPO": "todo-sample"}
+        pr = _fetch_single_gh_pr(config, 999)
+        assert pr is None
+
+
+class TestFetchSingleBbPr:
+    @patch("scripts.analyze.pr_fetcher._fetch_bb_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher._fetch_bb_diffstat", return_value=[
+        {"path": "src/login.py", "lines_added": 10, "lines_removed": 2},
+    ])
+    def test_basic_fetch(self, mock_diffstat, mock_comments):
+        import requests as _requests
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "id": 45974,
+            "title": "CRIBL-44279: Deleting already revoked tokens",
+            "description": "Fixes token deletion flow",
+            "author": {"display_name": "Goatbot", "nickname": "goatbot"},
+            "updated_on": "2026-08-24T15:41:01Z",
+            "links": {"html": {"href": "https://bitbucket.org/cribl/cribl/pull-requests/45974"}},
+            "source": {"branch": {"name": "goatbot/CRIBL-44279"}},
+            "participants": [
+                {"user": {"display_name": "Alice"}, "approved": True, "role": "REVIEWER"},
+                {"user": {"display_name": "Bob"}, "approved": False, "role": "REVIEWER"},
+            ],
+        }
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("requests.get", return_value=mock_resp):
+            config = {
+                "BITBUCKET_WORKSPACE": "cribl",
+                "BITBUCKET_REPO": "cribl",
+                "BITBUCKET_USERNAME": "user",
+                "BITBUCKET_TOKEN": "token",
+            }
+            pr = _fetch_single_bb_pr(config, 45974)
+
+        assert pr is not None
+        assert pr["number"] == 45974
+        assert pr["title"] == "CRIBL-44279: Deleting already revoked tokens"
+        assert pr["author"] == "Goatbot"
+        assert pr["is_bot_authored"] is True
+        assert pr["approvers"] == ["Alice"]
+        assert pr["review_decision"] == "APPROVED"
+        assert pr["files_changed"] == 1
+        assert pr["additions"] == 10
+        assert "substantive_human_comment_count" in pr
+        assert "rubber_stamp_approvers" in pr
+
+    def test_missing_config_returns_none(self):
+        config = {}
+        pr = _fetch_single_bb_pr(config, 45974)
+        assert pr is None
+
+
+class TestFetchSinglePrDispatcher:
+    def test_dispatches_to_bitbucket(self):
+        config = {
+            "DEFAULT_TRACKER": "jira",
+            "BITBUCKET_WORKSPACE": "ws",
+            "BITBUCKET_REPO": "repo",
+        }
+        with patch("scripts.analyze.pr_fetcher._fetch_single_bb_pr", return_value={"number": 1}) as mock_bb:
+            with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr") as mock_gh:
+                result = fetch_single_pr(config, 1)
+                mock_bb.assert_called_once_with(config, 1)
+                mock_gh.assert_not_called()
+                assert result == {"number": 1}
+
+    def test_dispatches_to_github(self):
+        config = {"DEFAULT_TRACKER": "github"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr", return_value={"number": 9}) as mock_gh:
+            with patch("scripts.analyze.pr_fetcher._fetch_single_bb_pr") as mock_bb:
+                result = fetch_single_pr(config, 9)
+                mock_gh.assert_called_once_with(config, 9)
+                mock_bb.assert_not_called()
+                assert result == {"number": 9}
+
+    def test_defaults_to_github_when_tracker_unset(self):
+        config = {}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr", return_value=None) as mock_gh:
+            result = fetch_single_pr(config, 1)
+            mock_gh.assert_called_once()
+            assert result is None
+
+
+# ---------------------------------------------------------------------------
+# parse_pr_url
+# ---------------------------------------------------------------------------
+
+class TestParsePrUrl:
+    def test_github_url(self):
+        tracker, num = parse_pr_url("https://github.com/bhatti/todo-sample/pull/9")
+        assert tracker == "github"
+        assert num == 9
+
+    def test_github_url_with_trailing_slash(self):
+        tracker, num = parse_pr_url("https://github.com/org/repo/pull/123/")
+        assert tracker == "github"
+        assert num == 123
+
+    def test_bitbucket_url(self):
+        tracker, num = parse_pr_url("https://bitbucket.org/cribl/cribl/pull-requests/45974")
+        assert tracker == "jira/bitbucket"
+        assert num == 45974
+
+    def test_invalid_url_raises(self):
+        with pytest.raises(ValueError, match="Unrecognized"):
+            parse_pr_url("https://gitlab.com/org/repo/merge_requests/1")
+
+    def test_not_a_url_raises(self):
+        with pytest.raises(ValueError):
+            parse_pr_url("not-a-url-at-all")
+
+
+# ---------------------------------------------------------------------------
+# fetch_prs_by_numbers
+# ---------------------------------------------------------------------------
+
+class TestFetchPrsByNumbers:
+    def test_fetches_multiple_gh_prs(self):
+        config = {"DEFAULT_TRACKER": "github", "GH_ORG": "org", "GH_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr") as mock:
+            mock.side_effect = [
+                {"number": 9, "title": "PR 9"},
+                {"number": 10, "title": "PR 10"},
+            ]
+            prs = fetch_prs_by_numbers(config, [9, 10])
+        assert len(prs) == 2
+        assert prs[0]["number"] == 9
+        assert prs[1]["number"] == 10
+
+    def test_skips_none_results(self):
+        config = {"DEFAULT_TRACKER": "github", "GH_ORG": "org", "GH_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr") as mock:
+            mock.side_effect = [{"number": 1, "title": "ok"}, None]
+            prs = fetch_prs_by_numbers(config, [1, 2])
+        assert len(prs) == 1
+        assert prs[0]["number"] == 1
+
+    def test_routes_to_bb_for_jira_tracker(self):
+        config = {"DEFAULT_TRACKER": "jira", "BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_bb_pr") as mock_bb:
+            with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr") as mock_gh:
+                mock_bb.return_value = {"number": 100}
+                prs = fetch_prs_by_numbers(config, [100])
+        mock_bb.assert_called_once_with(config, 100)
+        mock_gh.assert_not_called()
+        assert prs[0]["number"] == 100
+
+    def test_empty_list_returns_empty(self):
+        prs = fetch_prs_by_numbers({"DEFAULT_TRACKER": "github"}, [])
+        assert prs == []
+
+    def test_fetch_single_pr_delegates_to_fetch_prs_by_numbers(self):
+        config = {"DEFAULT_TRACKER": "github", "GH_ORG": "org", "GH_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr") as mock:
+            mock.return_value = {"number": 5, "title": "test"}
+            result = fetch_single_pr(config, 5)
+        assert result == {"number": 5, "title": "test"}
+        mock.assert_called_once_with(config, 5)
+
+    def test_fetch_single_pr_returns_none_on_error(self):
+        config = {"DEFAULT_TRACKER": "github", "GH_ORG": "org", "GH_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr", return_value=None):
+            result = fetch_single_pr(config, 99)
+        assert result is None

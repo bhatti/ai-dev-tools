@@ -92,6 +92,48 @@ def fetch_prs(config: dict, n_prs: int = 50, max_bytes: int = 10_000_000) -> lis
     return fetch_github_prs(config, n_prs)
 
 
+def fetch_single_pr(config: dict, pr_number: int) -> dict | None:
+    """Fetch a single PR by number. Backward-compat wrapper around fetch_prs_by_numbers."""
+    prs = fetch_prs_by_numbers(config, [pr_number])
+    return prs[0] if prs else None
+
+
+def parse_pr_url(url: str) -> tuple[str, int]:
+    """Parse a GitHub or Bitbucket PR URL and return (tracker_type, pr_number).
+
+    tracker_type is 'github' or 'jira/bitbucket'.
+    Raises ValueError for unrecognized URLs.
+    """
+    url = url.strip().rstrip("/")
+    # GitHub: https://github.com/org/repo/pull/123
+    m = re.search(r"github\.com/.+/pull/(\d+)", url)
+    if m:
+        return "github", int(m.group(1))
+    # Bitbucket: https://bitbucket.org/workspace/repo/pull-requests/123
+    m = re.search(r"bitbucket\.org/.+/pull-requests/(\d+)", url)
+    if m:
+        return "jira/bitbucket", int(m.group(1))
+    raise ValueError(f"Unrecognized PR URL format: {url!r}")
+
+
+def fetch_prs_by_numbers(config: dict, pr_numbers: list[int]) -> list[dict]:
+    """Fetch specific PRs by number. Returns normalized list (same schema as fetch_prs).
+
+    Dispatches to GitHub or Bitbucket based on DEFAULT_TRACKER in config.
+    Skips numbers where the API returns None (not found or error).
+    """
+    tracker = (config.get("DEFAULT_TRACKER") or "").lower().strip()
+    results: list[dict] = []
+    for num in pr_numbers:
+        if tracker in ("jira", "jira/bitbucket", "bitbucket"):
+            pr = _fetch_single_bb_pr(config, num)
+        else:
+            pr = _fetch_single_gh_pr(config, num)
+        if pr is not None:
+            results.append(pr)
+    return results
+
+
 # ---------------------------------------------------------------------------
 # GitHub
 # ---------------------------------------------------------------------------
@@ -272,6 +314,91 @@ def _fetch_gh_review_comments(org: str, repo: str, pr_number: int) -> list[dict]
     return comments
 
 
+def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
+    """Fetch a single GH PR by number, reusing the same helpers as fetch_github_prs."""
+    org = config.get("GH_ORG", "").strip()
+    repo = config.get("GH_REPO", "").strip()
+    if not org or not repo:
+        print("[pr-fetch] GH_ORG/GH_REPO not set — cannot fetch single GH PR", file=sys.stderr, flush=True)
+        return None
+
+    fields = "number,title,body,author,mergedAt,url,headRefName,comments,reviews,reviewDecision,labels,files"
+    cmd = ["gh", "pr", "view", str(pr_number), "-R", f"{org}/{repo}", "--json", fields]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"[pr-fetch] gh pr view failed: {e}", file=sys.stderr, flush=True)
+        return None
+    if result.returncode != 0:
+        print(f"[pr-fetch] gh pr view error: {result.stderr.strip()[:300]}", file=sys.stderr, flush=True)
+        return None
+    try:
+        rp = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        print(f"[pr-fetch] could not parse gh pr view output: {e}", file=sys.stderr, flush=True)
+        return None
+
+    all_comments: list[dict] = []
+    for c in rp.get("comments", []):
+        all_comments.append({
+            "author": c.get("author", {}).get("login", ""),
+            "body": c.get("body", ""),
+            "type": "comment",
+        })
+    for rv in rp.get("reviews", []):
+        body = rv.get("body", "").strip()
+        if body:
+            all_comments.append({
+                "author": rv.get("author", {}).get("login", ""),
+                "body": body,
+                "type": "review",
+            })
+    inline = _fetch_gh_review_comments(org, repo, pr_number)
+    all_comments.extend(inline)
+
+    classified = classify_comments(all_comments)
+    files_list = rp.get("files", []) or []
+    files_changed = len(files_list) if isinstance(files_list, list) else 0
+    additions = sum(f.get("additions", 0) for f in files_list if isinstance(f, dict))
+    deletions = sum(f.get("deletions", 0) for f in files_list if isinstance(f, dict))
+    file_paths = [f.get("path", "") for f in files_list if isinstance(f, dict)]
+
+    reviews_list = rp.get("reviews", [])
+    review_decision = _derive_review_decision(reviews_list, rp.get("reviewDecision", ""))
+    author = rp.get("author", {}).get("login", "")
+    gh_approvers = [
+        rv.get("author", {}).get("login", "")
+        for rv in reviews_list
+        if rv.get("state") == "APPROVED" and rv.get("author", {}).get("login")
+    ]
+    depth = _compute_review_depth(classified["human_comments"], gh_approvers)
+
+    return {
+        "number": rp.get("number", pr_number),
+        "title": rp.get("title", ""),
+        "author": author,
+        "merged_at": rp.get("mergedAt", ""),
+        "url": rp.get("url", ""),
+        "branch": rp.get("headRefName", ""),
+        "body": rp.get("body", ""),
+        "files_changed": files_changed,
+        "additions": additions,
+        "deletions": deletions,
+        "file_paths": file_paths[:50],
+        "all_comments": all_comments,
+        "bot_comments": classified["bot_comments"],
+        "ci_comments": classified["ci_comments"],
+        "review_bot_comments": classified["review_bot_comments"],
+        "human_comments": classified["human_comments"],
+        "approvers": gh_approvers,
+        "linked_issue": None,
+        "review_decision": review_decision,
+        "review_decision_protected": rp.get("reviewDecision", ""),
+        "is_bot_authored": _is_ai_authored(author),
+        **depth,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Bitbucket
 # ---------------------------------------------------------------------------
@@ -417,6 +544,77 @@ def _fetch_bb_diffstat(base_url: str, pr_id: int, auth: tuple | None) -> list[di
     except Exception:
         pass
     return files
+
+
+def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
+    """Fetch a single BB PR by ID, reusing the same helpers as fetch_bitbucket_prs."""
+    import requests as _requests
+
+    workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
+    repo = config.get("BITBUCKET_REPO", "").strip()
+    if not workspace or not repo:
+        print("[pr-fetch] BITBUCKET_WORKSPACE/REPO not set — cannot fetch single PR", file=sys.stderr, flush=True)
+        return None
+
+    username = config.get("BITBUCKET_USERNAME", "").strip()
+    token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", "")).strip()
+    auth = (username, token) if username and token else None
+
+    base = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
+    # Single-PR endpoint: %2Bparticipants (not %2Bvalues.participants which is for the list endpoint)
+    url = f"{base}/pullrequests/{pr_id}?fields=%2Bparticipants"
+    try:
+        resp = _requests.get(url, auth=auth, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[pr-fetch] Bitbucket single-PR API error: {e}", file=sys.stderr, flush=True)
+        return None
+    rp = resp.json()
+
+    all_comments = _fetch_bb_comments(base, pr_id, auth)
+    classified = classify_comments(all_comments)
+
+    diffstat = _fetch_bb_diffstat(base, pr_id, auth)
+    files_changed = len(diffstat)
+    additions = sum(d.get("lines_added", 0) for d in diffstat)
+    deletions = sum(d.get("lines_removed", 0) for d in diffstat)
+    file_paths = [d.get("path", "") for d in diffstat]
+
+    participants = rp.get("participants", [])
+    approvers = [
+        p.get("user", {}).get("display_name") or p.get("user", {}).get("nickname", "")
+        for p in participants
+        if p.get("approved") and p.get("role") != "AUTHOR"
+    ]
+    approvers = [a for a in approvers if a]
+    review_decision = "APPROVED" if approvers else ""
+
+    author = rp.get("author", {}).get("display_name", rp.get("author", {}).get("nickname", ""))
+    depth = _compute_review_depth(classified["human_comments"], approvers)
+
+    return {
+        "number": rp.get("id", pr_id),
+        "title": rp.get("title", ""),
+        "author": author,
+        "merged_at": rp.get("updated_on", ""),
+        "url": rp.get("links", {}).get("html", {}).get("href", ""),
+        "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
+        "body": rp.get("description", ""),
+        "files_changed": files_changed,
+        "additions": additions,
+        "deletions": deletions,
+        "file_paths": file_paths[:50],
+        "all_comments": all_comments,
+        "bot_comments": classified["bot_comments"],
+        "ci_comments": classified["ci_comments"],
+        "review_bot_comments": classified["review_bot_comments"],
+        "human_comments": classified["human_comments"],
+        "approvers": approvers,
+        "linked_issue": None,
+        "review_decision": review_decision,
+        "is_bot_authored": _is_ai_authored(author),
+        **depth,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ Slack mention → router → formicary submit → adhoc/run_skill → Slack thre
                        ↳ resume paused job (thread reply or Block Kit button click)
 ```
 
-In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `poll_pr` runs as the main container. `learn` is called automatically by `poll_pr` when the PR is merged/closed.
+In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `poll_pr` runs as the main container. `learn` is called automatically by `poll_pr` when the PR is merged/closed. The `learn` step produces a **combined post-merge report** — a PR health check (spec coverage, design decisions, security/SRE signals, review quality, CI churn) followed by implementation learnings extracted from PR comments. The report is written to `learnings.md` and posted as a comment to both the PR and the Jira/GitHub issue.
 
 ## Quick Start — Docker (one step at a time)
 
@@ -554,7 +554,7 @@ All steps read/write files under `/workspace/{issue-id}/`:
 | `branch.txt` | implement | create_pr |
 | `pr.json` | create_pr | poll_pr, learn |
 | `processed_comments.json` | poll_pr | poll_pr (comment dedup) |
-| `learnings.md` | learn | — |
+| `learnings.md` | learn | Posted as comment to PR + issue |
 | `logs/` | all steps | debugging |
 
 ---
@@ -576,6 +576,23 @@ Key variables:
 | `ANTHROPIC_BEDROCK_BASE_URL` | Yes* | `http://ai/bedrock` | Bedrock endpoint |
 
 *One of `ANTHROPIC_API_KEY` or Bedrock vars is required.
+
+**Testing env vars** (functional/integration tests):
+
+| Variable | Purpose |
+|----------|---------|
+| `BB_PR_URL` | Bitbucket PR URL for review/pr-comments tests (e.g. `https://bitbucket.org/org/repo/pull-requests/123`) |
+| `GH_PR_URL` | GitHub PR URL for gh-review tests (e.g. `https://github.com/org/repo/pull/9`) |
+| `PR_URLS` | Space/comma-separated PR URLs to audit specific PRs instead of last N (used by pr-audit workflows) |
+
+**PR audit Slack overrides** (embed in Slack message to override defaults at runtime):
+
+| Syntax | Effect |
+|--------|--------|
+| `audit last 30 prs` | Audit last 30 PRs |
+| `focus skills` / `--focus design` | Set audit focus dimension |
+| `https://github.com/org/repo/pull/123` | Audit specific PR(s) instead of last N |
+| `--model claude-opus-5` / `model: <id>` | Override AI model for this run |
 
 ---
 

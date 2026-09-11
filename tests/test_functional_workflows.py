@@ -59,7 +59,8 @@ ENV VARS
     FORMICARY_URL     Override full URL (default: https://{EC2_IP}.nip.io)
     FORMICARY_TOKEN   Bearer token — reads from ~/.zshrc (REQUIRED)
     FORMICARY_TLS_VERIFY  Set to "true" if you have a valid cert (default: false)
-    PR_URL            Pull request URL for review/pr-comments tests (REQUIRED for those tests)
+    BB_PR_URL         Bitbucket PR URL for review/pr-comments tests (e.g. https://bitbucket.org/org/repo/pull-requests/123)
+    GH_PR_URL         GitHub PR URL for gh-review tests (e.g. https://github.com/org/repo/pull/9)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ALL OUTPUT FILES GO TO reports/ DIRECTORY (inside the task ZIP artifact)
@@ -152,8 +153,10 @@ HAIKU_OVERRIDES = {
 }
 
 POLL_INTERVAL = 10   # seconds between status checks
-# PR_URL used for review/pr-comments tests — set via PR_URL env var
-PR_URL = os.environ.get("PR_URL", "")
+# BB_PR_URL: Bitbucket PR URL for jira-review/pr-comments tests (e.g. https://bitbucket.org/org/repo/pull-requests/123)
+BB_PR_URL = os.environ.get("BB_PR_URL", "")
+# GH_PR_URL: GitHub PR URL for gh-review tests (e.g. https://github.com/org/repo/pull/9)
+GH_PR_URL = os.environ.get("GH_PR_URL", "")
 # ISSUE_ID: Jira issue key for analyze tests (e.g. PROJ-123) — set via env var, no hardcoded defaults
 ISSUE_ID = os.environ.get("ISSUE_ID", "")
 # GitHub org/repo for gh-query/gh-analyze tests — loaded from ~/.zshrc via _load_zshrc()
@@ -232,11 +235,11 @@ ALL_TESTS: list[TestCase] = [
         name="review",
         # 15 turns: enough to fetch PR diff + write findings.json — validates end-to-end pipeline
         job_type="ai-jira-review",
-        params={"PRUrl": PR_URL, "MaxTurnsReview": "8", **HAIKU_OVERRIDES},
+        params={"PRUrl": BB_PR_URL, "MaxTurnsReview": "8", **HAIKU_OVERRIDES},
         task_type="review",
         expected_files=["findings.json", "reports/report.md", "reports/report.html", "reports/findings.json"],
         timeout=1200,
-        requires=["PR_URL"],
+        requires=["BB_PR_URL"],
         required_context_keys=["SKILL", "SKILL_LOADED", "YGS_SKILLS_COUNT",
                                 "YGS_SKILLS_INSTALLED", "YGS_SKILLS_REPO_COMMIT", "SKILLS_INVOKED"],
     ),
@@ -270,11 +273,11 @@ ALL_TESTS: list[TestCase] = [
     TestCase(
         name="pr-comments",
         job_type="ai-adhoc",
-        params={"Prompt": f"pr comments {PR_URL}", "Skill": "ygs-pr-comments", "MaxTurnsAdhoc": "20", **HAIKU_OVERRIDES},
+        params={"Prompt": f"pr comments {BB_PR_URL}", "Skill": "ygs-pr-comments", "MaxTurnsAdhoc": "20", **HAIKU_OVERRIDES},
         task_type="run",
         expected_files=["adhoc_result.json", "reports/report.md", "reports/report.html"],
         timeout=600,
-        requires=["PR_URL"],
+        requires=["BB_PR_URL"],
     ),
     # ask: general Q&A via ygs-ask — no Jira/GitHub data needed, pure reasoning.
     # PREREQUISITES: commit ygs-ask to you-got-skills, rebuild ai-dev-tools Docker
@@ -355,11 +358,11 @@ ALL_TESTS: list[TestCase] = [
     TestCase(
         name="review-post",
         job_type="ai-jira-review",
-        params={"PRUrl": PR_URL, "MaxTurnsReview": "8", **HAIKU_OVERRIDES},
+        params={"PRUrl": BB_PR_URL, "MaxTurnsReview": "8", **HAIKU_OVERRIDES},
         task_type="post",
         expected_files=["reports/report.md", "reports/report.html", "reports/findings.json", "reports/post_result.json", "reports/slack_message.txt"],
         timeout=1200,
-        requires=["PR_URL"],
+        requires=["BB_PR_URL"],
     ),
 ]
 
@@ -738,7 +741,7 @@ def main() -> None:
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
-        print("Run: source ~/.zshrc  (or export EC2_IP=<host> FORMICARY_TOKEN=<token> PR_URL=<url>)",
+        print("Run: source ~/.zshrc  (or export EC2_IP=<host> FORMICARY_TOKEN=<token> BB_PR_URL=<bb-url> GH_PR_URL=<gh-url>)",
               file=sys.stderr)
         sys.exit(1)
 
@@ -760,22 +763,23 @@ def main() -> None:
         for tc in selected:
             tc.timeout = args.timeout
 
-    # Re-read PR_URL after _load_zshrc() ran (module-level read happened before sourcing).
-    pr_url_live = os.environ.get("PR_URL", "")
+    # Re-read BB_PR_URL / GH_PR_URL after _load_zshrc() ran (module-level read happened before sourcing).
+    bb_pr_url_live = os.environ.get("BB_PR_URL", "")
+    gh_pr_url_live = os.environ.get("GH_PR_URL", "")
     for tc in selected:
-        if not pr_url_live:
-            break
-        if tc.id() in ("review", "review-post"):
-            tc.params = {**tc.params, "PRUrl": pr_url_live}
-        elif tc.id() == "pr-comments":
-            tc.params = {**tc.params, "Prompt": f"pr comments {pr_url_live}"}
+        if tc.id() in ("review", "review-post") and bb_pr_url_live:
+            tc.params = {**tc.params, "PRUrl": bb_pr_url_live}
+        elif tc.id() == "pr-comments" and bb_pr_url_live:
+            tc.params = {**tc.params, "Prompt": f"pr comments {bb_pr_url_live}"}
 
     print(f"\nFormicary: {FORMICARY_URL}")
     print(f"Running {len(selected)} test(s) with parallelism={args.parallel}: "
           f"{', '.join(tc.id() for tc in selected)}")
     print(f"Model override: {HAIKU}")
-    if pr_url_live:
-        print(f"PR_URL: {pr_url_live}")
+    if bb_pr_url_live:
+        print(f"BB_PR_URL: {bb_pr_url_live}")
+    if gh_pr_url_live:
+        print(f"GH_PR_URL: {gh_pr_url_live}")
     print()
 
     # Pre-flight: verify Docker + ant k8s cluster are healthy before submitting jobs.

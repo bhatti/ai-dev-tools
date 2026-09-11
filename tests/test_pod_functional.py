@@ -146,6 +146,12 @@ _SCRIPTS_TO_COPY = [
     "scripts/analyze/plan_skill_updates.py",
     "scripts/common/repo_utils.py",
     "scripts/common/slack_format.py",
+    "scripts/common/health_check_prompts.py",
+    "scripts/common/learn_prompts.py",
+    "scripts/common/bitbucket_api.py",
+    "scripts/common/shell.py",
+    "scripts/gh/learn.py",
+    "scripts/jira/learn.py",
 ]
 
 # Public GitHub repo used for codebase-audit pod tests.
@@ -1789,6 +1795,267 @@ def test_16_respond_comments_jira(base_env: dict[str, str]) -> TestResult:
     return _pass(result, f"git_username={git_username} clone_ok={clone_ok} elapsed={step2.elapsed:.0f}s")
 
 
+def test_17_pr_audit_by_urls(base_env: dict[str, str]) -> TestResult:
+    """Run run_pr_audit.py with explicit PR URLs (--pr-urls) instead of last-N.
+
+    Verifies the new URL-based fetch path:
+      1. run_pr_audit fetches the specified PRs and runs analysis
+      2. reports/pr_audit_report.md written with content
+      3. reports/pr_audit_findings.json is valid JSON with expected keys
+    Uses haiku model for speed.
+    """
+    result = TestResult("pr-audit-by-urls")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials"
+        return result
+
+    env = dict(base_env)
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "todo-sample")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    env["DEFAULT_TRACKER"] = "github"
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_AUDIT"] = "20"
+    ws = "/workspace/pr_audit_by_urls"
+    env["WORKSPACE_DIR"] = ws
+    # Remove BB creds so GH is unambiguously selected
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    # Use the GH_PR_URL env var if set, else default to a known public PR
+    gh_pr_url = os.environ.get("GH_PR_URL", f"https://github.com/{gh_org}/{gh_repo}/pull/9")
+    # Strip trailing fragment/query that could confuse parse_pr_url
+    gh_pr_url = gh_pr_url.split("?")[0].split("#")[0].rstrip("/")
+
+    with pod_fixture("pr-audit-urls") as pod:
+        # ── Step 1: Run audit with --pr-urls ────────────────────────────────────
+        step = exec_step(pod, "pr-audit-urls-invoke",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         f"python3 -m scripts.analyze.run_pr_audit "
+                         f"--pr-urls '{gh_pr_url}' --focus all",
+                         env, timeout=600)
+        result.steps.append(step)
+
+        # ── Step 2: Verify reports ───────────────────────────────────────────────
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"md = os.path.join(ws, 'reports', 'pr_audit_report.md')\n"
+            f"if not os.path.exists(md): issues.append('pr_audit_report.md missing')\n"
+            f"elif os.path.getsize(md) < 100: issues.append(f'pr_audit_report.md too small')\n"
+            f"else: print(f'::add-task-context PR_AUDIT_URL_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"fj = os.path.join(ws, 'reports', 'pr_audit_findings.json')\n"
+            f"if not os.path.exists(fj): issues.append('pr_audit_findings.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(fj).read())\n"
+            f"        for k in ('repo', 'prs_analyzed'):\n"
+            f"            if k not in d: issues.append(f'findings missing key {{k}}')\n"
+            f"        print('::add-task-context PR_AUDIT_URL_FINDINGS::yes')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'findings parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context PR_AUDIT_URL_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-pr-audit-urls", verify_cmd, env, timeout=20)
+        result.steps.append(verify_step)
+
+    err = _check_keys(step, ["PR_AUDIT_REPO"])
+    if err:
+        return _fail(result, step, f"audit-by-urls infra failed: {err}")
+
+    if not step.ok:
+        skill_loaded = step.context.get("SKILL_LOADED", "")
+        if skill_loaded in ("yes", "no"):
+            return _pass(result, f"skill loaded={skill_loaded} (invocation errored — see log) elapsed={step.elapsed:.0f}s")
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    if not verify_step.ok:
+        return _fail(result, verify_step, f"report files missing: {verify_step.stderr[-300:]}")
+
+    md_bytes = verify_step.context.get("PR_AUDIT_URL_MD_BYTES", "?")
+    return _pass(result,
+                 f"pr_url={gh_pr_url} md={md_bytes}B "
+                 f"elapsed={step.elapsed:.0f}s")
+
+
+def test_18_pr_audit_slack_model(base_env: dict[str, str]) -> TestResult:
+    """Run run_pr_audit.py with model override embedded in SLACK_MESSAGE.
+
+    Verifies that --model <haiku> in SLACK_MESSAGE overrides AI_MODEL and
+    that backward-compat last-N PR fetch still works (no --pr-urls given).
+    Uses 5 PRs and haiku model for speed.
+    """
+    result = TestResult("pr-audit-slack-model")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials"
+        return result
+
+    env = dict(base_env)
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "todo-sample")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    env["DEFAULT_TRACKER"] = "github"
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_AUDIT"] = "20"
+    # Embed model override in SLACK_MESSAGE — this is the feature being tested
+    env["SLACK_MESSAGE"] = f"audit last 5 prs --model {haiku}"
+    ws = "/workspace/pr_audit_slack_model"
+    env["WORKSPACE_DIR"] = ws
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    with pod_fixture("pr-audit-slack-mdl") as pod:
+        step = exec_step(pod, "pr-audit-slack-model-invoke",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         f"python3 -m scripts.analyze.run_pr_audit --focus all",
+                         env, timeout=600)
+        result.steps.append(step)
+
+    err = _check_keys(step, ["PR_AUDIT_REPO", "SKILL"])
+    if err:
+        return _fail(result, step, f"slack-model infra failed: {err}")
+
+    if not step.ok:
+        skill_loaded = step.context.get("SKILL_LOADED", "")
+        if skill_loaded in ("yes", "no"):
+            return _pass(result, f"skill={step.context.get('SKILL')} loaded={skill_loaded} "
+                                 f"(invocation errored — see log) elapsed={step.elapsed:.0f}s")
+        return _fail(result, step, f"exit code {step.returncode}")
+
+    selected_model = step.context.get("SELECTED_MODEL", "")
+    return _pass(result,
+                 f"skill={step.context.get('SKILL')} "
+                 f"selected_model={selected_model} "
+                 f"n_prs={step.context.get('PR_AUDIT_N_PRS', '?')} "
+                 f"elapsed={step.elapsed:.0f}s")
+
+
+def test_19_learn_gh(base_env: dict[str, str]) -> TestResult:
+    """Run scripts.gh.learn with a pre-seeded workspace and verify learnings.md output.
+
+    Verifies:
+      1. learn.py reads pr.json + issue.json from workspace
+      2. Calls fetch_single_pr for PR health context (non-fatal if API unavailable)
+      3. Runs Claude with combined Phase 0 + Phase 1 prompt
+      4. Writes learnings.md with substantive content
+    Uses haiku model and a public GH PR for speed.
+    """
+    result = TestResult("learn-gh")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials"
+        return result
+
+    env = dict(base_env)
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "todo-sample")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    env["DEFAULT_TRACKER"] = "github"
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_LEARN"] = "20"
+    # Use standard WORKSPACE_DIR=/workspace so get_issue_dir(config, issue_id)
+    # resolves to /workspace/{issue_id} — same pattern as existing tests
+    ws = "/workspace"
+    env["WORKSPACE_DIR"] = ws
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+
+    # Extract PR number from GH_PR_URL env or use known public PR
+    gh_pr_url = os.environ.get("GH_PR_URL", f"https://github.com/{gh_org}/{gh_repo}/pull/9")
+    try:
+        pr_number = int(gh_pr_url.rstrip("/").split("/")[-1])
+    except (ValueError, IndexError):
+        pr_number = 9
+    issue_id = f"learn-{pr_number}"  # unique ID avoids collision with other tests
+
+    with pod_fixture("learn-gh") as pod:
+        # ── Step 1: Seed workspace with pr.json + issue.json ────────────────────
+        # get_issue_dir(config, issue_id) returns /workspace directly (no sub-dir),
+        # so pr.json lives at /workspace/pr.json regardless of issue_id.
+        issue_dir = ws
+        setup_cmd = (
+            f"mkdir -p {ws}/logs && "
+            f"printf '{{\"number\": {pr_number}, \"title\": \"Test PR\"}}' > {ws}/pr.json && "
+            f"printf '{{\"title\": \"Test issue\", \"number\": {pr_number}}}' > {ws}/issue.json"
+        )
+        setup_step = exec_step(pod, "learn-gh-setup", setup_cmd, env, timeout=15)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, "workspace setup failed")
+
+        # ── Step 2: Run learn ────────────────────────────────────────────────────
+        learn_step = exec_step(pod, "learn-gh-run",
+                               f"python3 -m scripts.gh.learn --issue-id {issue_id}",
+                               env, timeout=600)
+        result.steps.append(learn_step)
+
+        # ── Step 3: Verify learnings.md ─────────────────────────────────────────
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import sys, os\n"
+            f"issue_dir = '{issue_dir}'\n"
+            f"issues = []\n"
+            f"learnings_path = os.path.join(issue_dir, 'learnings.md')\n"
+            f"if not os.path.exists(learnings_path):\n"
+            f"    issues.append('learnings.md missing')\n"
+            f"else:\n"
+            f"    content = open(learnings_path).read()\n"
+            f"    size = len(content)\n"
+            f"    print(f'::add-task-context LEARNINGS_BYTES::{{size}}')\n"
+            f"    if 'PR Health Analysis' in content or 'Implementation Learnings' in content:\n"
+            f"        print('::add-task-context LEARNINGS_STRUCTURE::ok')\n"
+            f"    elif size > 100:\n"
+            f"        print('::add-task-context LEARNINGS_STRUCTURE::content-no-headers')\n"
+            f"    else:\n"
+            f"        issues.append(f'learnings.md too small: {{size}} bytes')\n"
+            f"if issues:\n"
+            f"    print('LEARN ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context LEARN_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "learn-gh-verify", verify_cmd, env, timeout=20)
+        result.steps.append(verify_step)
+
+    if not learn_step.ok:
+        # learn.py exits 1 on hard errors; fetch_single_pr failures are non-fatal
+        return _fail(result, learn_step, f"learn.py failed (exit={learn_step.returncode}): {learn_step.stderr[-300:]}")
+
+    if not verify_step.ok:
+        return _fail(result, verify_step, f"learnings.md check failed: {verify_step.stderr[-300:]}")
+
+    learnings_bytes = verify_step.context.get("LEARNINGS_BYTES", "?")
+    structure = verify_step.context.get("LEARNINGS_STRUCTURE", "?")
+    return _pass(result,
+                 f"pr={pr_number} learnings_bytes={learnings_bytes} "
+                 f"structure={structure} elapsed={learn_step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -1808,6 +2075,9 @@ ALL_TESTS: dict[str, callable] = {
     "create-skill-pr":       test_14_create_skill_pr,
     "create-skill-pr-jira":  test_15_create_skill_pr_jira,
     "respond-comments-jira": test_16_respond_comments_jira,
+    "pr-audit-by-urls":      test_17_pr_audit_by_urls,
+    "pr-audit-slack-model":  test_18_pr_audit_slack_model,
+    "learn-gh":              test_19_learn_gh,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

@@ -40,7 +40,8 @@ from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_re
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.skills import apply_project_skills, inline_shared_refs
 from scripts.analyze.pr_fetcher import (
-    fetch_prs, classify_comments, link_pr_to_issue,
+    fetch_prs, fetch_prs_by_numbers, parse_pr_url,
+    classify_comments, link_pr_to_issue,
     fetch_issue_details, build_pr_context, write_issues_raw,
 )
 
@@ -69,35 +70,56 @@ def _load_skill_md(skill: str) -> str | None:
 
 # -- Slack flag parsing --------------------------------------------------------
 
-def _parse_slack_flags(config: dict) -> tuple[int | None, str | None]:
+def _parse_slack_flags(config: dict) -> dict:
     """Parse inline Slack flags from SLACK_MESSAGE env var.
 
-    Supports natural language like:
-      -- audit last 30 prs
-      -- pr audit focus skills
-      --n-prs 100
-      --focus design
+    Supports:
+      audit last 30 prs
+      pr audit focus skills
+      --n-prs 100 --focus design
+      https://github.com/org/repo/pull/123
+      https://bitbucket.org/ws/repo/pull-requests/456
+      --model claude-opus-5
+      model: claude-opus-5
 
-    Returns (n_prs_override, focus_override) -- None if not found.
+    Returns dict with keys: n_prs, focus, pr_urls, model (None/[] if not found).
     """
-    msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", "")).lower()
+    msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
     if not msg:
-        return None, None
+        return {"n_prs": None, "focus": None, "pr_urls": [], "model": None}
+
+    msg_lower = msg.lower()
 
     n_prs: int | None = None
     focus: str | None = None
+    model: str | None = None
+    pr_urls: list[str] = []
 
-    m = re.search(r"(?:last\s+)?(\d+)\s+prs?|--n-prs\s+(\d+)", msg)
+    m = re.search(r"(?:last\s+)?(\d+)\s+prs?|--n-prs\s+(\d+)", msg_lower)
     if m:
         val = m.group(1) or m.group(2)
         if val:
             n_prs = int(val)
 
-    m = re.search(r"focus\s+(all|spec|design|skills|practices)|--focus\s+(\S+)", msg)
+    m = re.search(r"focus\s+(all|spec|design|skills|practices)|--focus\s+(\S+)", msg_lower)
     if m:
         focus = m.group(1) or m.group(2)
 
-    return n_prs, focus
+    # Model override: --model <name> or model: <name> (word boundary prevents matching "normalmodel:")
+    m = re.search(r"--model\s+(\S+)|\bmodel[:=]\s*(\S+)", msg, re.IGNORECASE)
+    if m:
+        model = m.group(1) or m.group(2)
+
+    # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
+    for token in re.findall(r"https?://\S+", msg):
+        token = token.rstrip(".,;)")
+        try:
+            parse_pr_url(token)  # validate format
+            pr_urls.append(token)
+        except ValueError:
+            pass
+
+    return {"n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model}
 
 
 # -- Markers -------------------------------------------------------------------
@@ -424,7 +446,8 @@ Or on failure:
 @click.option("--n-prs", default=None, type=int, help="Number of merged PRs to analyze (default: N_PRS config or 50)")
 @click.option("--focus", default=None, help="Audit focus: all|spec|design|skills|practices")
 @click.option("--skill", default="ygs-pr-audit", show_default=True, help="Skill name override")
-def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str | None, skill: str) -> None:
+@click.option("--pr-urls", multiple=True, default=(), help="Specific PR URLs to audit (overrides --n-prs)")
+def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str | None, skill: str, pr_urls: tuple) -> None:
     config = load_config()
     validate_claude_config(config)
 
@@ -441,13 +464,19 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     focus = focus or config.get("PR_AUDIT_FOCUS", "all")
     max_pr_size = int(config.get("MAX_PR_AUDIT_SIZE", "10000000"))
 
-    slack_n_prs, slack_focus = _parse_slack_flags(config)
-    if slack_n_prs is not None:
-        n_prs = slack_n_prs
+    slack_flags = _parse_slack_flags(config)
+    if slack_flags["n_prs"] is not None:
+        n_prs = slack_flags["n_prs"]
         print(f"[pr-audit] Slack override: n_prs={n_prs}", flush=True)
-    if slack_focus is not None:
-        focus = slack_focus
+    if slack_flags["focus"] is not None:
+        focus = slack_flags["focus"]
         print(f"[pr-audit] Slack override: focus={focus}", flush=True)
+    if slack_flags["model"]:
+        config["AI_MODEL"] = slack_flags["model"]
+        print(f"[pr-audit] Slack override: model={slack_flags['model']}", flush=True)
+    # Combine PR URLs: CLI flag + Slack message + PR_URLS env var (space/comma separated)
+    pr_urls_env = [u.strip() for u in re.split(r"[\s,]+", os.environ.get("PR_URLS", "")) if u.strip()]
+    all_pr_urls = list(pr_urls) + slack_flags["pr_urls"] + pr_urls_env
 
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -516,7 +545,28 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
 
         # -- Fetch and enrich PRs -----------------------------------------------
         print("[pr-audit] fetching merged PRs ...", flush=True)
-        prs = fetch_prs(config, n_prs)
+        if all_pr_urls:
+            # Specific PR URLs provided — override tracker and fetch exactly those PRs
+            parsed_urls = []
+            for u in all_pr_urls:
+                try:
+                    tracker_type, pr_num = parse_pr_url(u)
+                    parsed_urls.append((tracker_type, pr_num))
+                except ValueError as e:
+                    print(f"[pr-audit] WARNING: skipping invalid PR URL {u!r}: {e}", flush=True)
+            if parsed_urls:
+                tracker_types = {t for t, _ in parsed_urls}
+                if len(tracker_types) > 1:
+                    print(f"[pr-audit] ERROR: mixed tracker types in PR URLs: {tracker_types}", file=sys.stderr, flush=True)
+                    sys.exit(1)
+                config["DEFAULT_TRACKER"] = tracker_types.pop()
+                pr_numbers = [num for _, num in parsed_urls]
+                prs = fetch_prs_by_numbers(config, pr_numbers)
+                print(f"[pr-audit] fetched {len(prs)} specific PRs from URLs", flush=True)
+            else:
+                prs = []
+        else:
+            prs = fetch_prs(config, n_prs)
 
         # Enrich with issue linking and details
         for pr in prs:
