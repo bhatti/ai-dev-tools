@@ -267,7 +267,7 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
         print(f"::add-task-context REPO_SKILLS_COUNT::{applied}", flush=True)
 
     # Prefer repo-specific review skill over the default ygs skill
-    _review_skill_candidates = ["review-pr", "goatbot-pr-review", skill]
+    _review_skill_candidates = ["review-pr", skill]
     skill_md = None
     actual_skill = skill
     for candidate in _review_skill_candidates:

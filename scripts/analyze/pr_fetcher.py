@@ -20,6 +20,20 @@ KNOWN_BOTS = {
 }
 _KNOWN_BOTS_LOWER = frozenset(b.lower() for b in KNOWN_BOTS)
 
+# Rubber-stamp phrases: short approvals with no substantive feedback
+_RUBBER_STAMP_RE = re.compile(
+    r'^(?:lgtm|looks?\s+good(?:\s+to\s+me)?|l\.?g\.?t\.?m\.?|approved?|ship\s+it|'
+    r'nice(?:\s+work)?|good\s+(?:stuff|job|work|one)|'
+    r'\+1|👍|💯|🚀|✅|:[\+]?1:|:thumbsup:|:ok(?:_hand)?:|:fire:|:white_check_mark:|'
+    r'sounds?\s+good|all\s+good|great(?:\s+work)?|excellent|perfect|awesome|wonderful|'
+    r'merge(?:\s+it)?|go(?:\s+for\s+it)?|no\s+(?:issues?|comments?|concerns?|objections?))?'
+    r'(?:\s*[!.]*)?$',
+    re.IGNORECASE,
+)
+
+# AI coding-agent author patterns that don't end in "bot" but are known automation
+_AI_AGENT_AUTHOR_RE = re.compile(r'copilot|claude[-_]agent|ai[-_]agent', re.IGNORECASE)
+
 # CI bots: build runners, test runners, status reporters — NOT code reviewers
 _CI_BOT_USERNAMES: frozenset[str] = frozenset({
     "github-actions[bot]", "circleci", "jenkins", "travis-ci",
@@ -163,10 +177,19 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         reviews_list = rp.get("reviews", [])
         review_decision = _derive_review_decision(reviews_list, rp.get("reviewDecision", ""))
 
+        author = rp.get("author", {}).get("login", "")
+        # Approvers: GitHub doesn't expose a simple list, derive from reviews
+        gh_approvers = [
+            rv.get("author", {}).get("login", "")
+            for rv in reviews_list
+            if rv.get("state") == "APPROVED" and rv.get("author", {}).get("login")
+        ]
+        depth = _compute_review_depth(classified["human_comments"], gh_approvers)
+
         pr = {
             "number": pr_number,
             "title": rp.get("title", ""),
-            "author": rp.get("author", {}).get("login", ""),
+            "author": author,
             "merged_at": rp.get("mergedAt", ""),
             "url": rp.get("url", ""),
             "branch": rp.get("headRefName", ""),
@@ -180,9 +203,12 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "ci_comments": classified["ci_comments"],
             "review_bot_comments": classified["review_bot_comments"],
             "human_comments": classified["human_comments"],
+            "approvers": gh_approvers,
             "linked_issue": None,
             "review_decision": review_decision,
             "review_decision_protected": rp.get("reviewDecision", ""),
+            "is_bot_authored": _is_ai_authored(author),
+            **depth,
         }
         prs.append(pr)
 
@@ -311,10 +337,13 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         approvers = [a for a in approvers if a]
         review_decision = "APPROVED" if approvers else ""
 
+        author = rp.get("author", {}).get("display_name", rp.get("author", {}).get("nickname", ""))
+        depth = _compute_review_depth(classified["human_comments"], approvers)
+
         pr = {
             "number": pr_id,
             "title": rp.get("title", ""),
-            "author": rp.get("author", {}).get("display_name", rp.get("author", {}).get("nickname", "")),
+            "author": author,
             "merged_at": rp.get("updated_on", ""),
             "url": rp.get("links", {}).get("html", {}).get("href", ""),
             "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
@@ -331,6 +360,8 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "approvers": approvers,
             "linked_issue": None,
             "review_decision": review_decision,
+            "is_bot_authored": _is_ai_authored(author),
+            **depth,
         }
         prs.append(pr)
 
@@ -464,6 +495,63 @@ def _is_bot(author: str) -> bool:
     if lower.endswith("[bot]") or lower.endswith("bot"):
         return True
     return False
+
+
+def _is_ai_authored(author: str) -> bool:
+    """Return True if the PR author is an AI/bot agent.
+
+    Primary signal: username ends with 'bot' (dependabot, any-bot, etc.).
+    Secondary: known AI coding agents that don't follow that convention.
+    """
+    if not author:
+        return False
+    lower = author.lower()
+    if lower.endswith("bot") or lower.endswith("[bot]"):
+        return True
+    return bool(_AI_AGENT_AUTHOR_RE.search(lower))
+
+
+def _is_rubber_stamp_comment(body: str) -> bool:
+    """Return True if the comment body is a rubber-stamp with no substantive feedback.
+
+    Catches: silent approval, LGTM, +1, looks good, emoji-only, and short generic praise.
+    """
+    stripped = body.strip()
+    if not stripped:
+        return True
+    # Emoji / unicode-only (no ASCII words)
+    if re.match(r'^[\s\U0001F000-\U0001FFFF☀-➿⬀-⯿!-/]+$', stripped):
+        return True
+    # Short (under 60 chars) phrase that matches known rubber-stamp patterns
+    return len(stripped) < 60 and bool(_RUBBER_STAMP_RE.fullmatch(stripped))
+
+
+def _compute_review_depth(human_comments: list[dict], approvers: list[str]) -> dict:
+    """Return review depth metrics for a PR.
+
+    Returns:
+        substantive_human_comment_count: human comments that contain real feedback
+        rubber_stamp_approvers: approvers who left no substantive comments
+        has_substantive_review: True if ≥1 human left a non-rubber-stamp comment
+    """
+    # Build set of humans who left at least one substantive comment
+    substantive_commenters: set[str] = set()
+    substantive_count = 0
+    for c in human_comments:
+        if not _is_rubber_stamp_comment(c.get("body", "")):
+            substantive_count += 1
+            author = c.get("author", "")
+            if author:
+                substantive_commenters.add(author)
+
+    # Approvers who left zero substantive comments on this PR
+    rubber_stamp = [a for a in approvers if a not in substantive_commenters]
+
+    return {
+        "substantive_human_comment_count": substantive_count,
+        "rubber_stamp_approvers": rubber_stamp,
+        "has_substantive_review": substantive_count > 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +810,13 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         if additions or deletions:
             section.append(f"- **Lines of code**: +{additions} / -{deletions}")
         section.append(f"- **Review decision**: {pr.get('review_decision', 'none')}")
+        if pr.get("is_bot_authored"):
+            section.append("- **Author type**: AI/bot-authored PR")
+        subst = pr.get("substantive_human_comment_count", 0)
+        section.append(f"- **Substantive human comments**: {subst}")
+        rubber = pr.get("rubber_stamp_approvers", [])
+        if rubber:
+            section.append(f"- **Rubber-stamp approvers** (approved, 0 substantive comments): {', '.join(rubber)}")
 
         file_paths = pr.get("file_paths", [])
         if file_paths:

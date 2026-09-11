@@ -272,6 +272,18 @@ Beyond the 4 specialist dimensions, also check for:
 - **Blast-radius review adequacy**: When assessing review quality, prioritize blast-radius over LOC.
   A 2-line change to auth/ACL/config/flags can have higher risk than a 300-line refactor. Always note
   the blast-radius reason when flagging zero-review changes.
+- **Rubber-stamp detection**: Each PR includes pre-computed `Substantive human comments` count and
+  `Rubber-stamp approvers` list. Use these directly instead of manually scanning comment text.
+  Rubber-stamp = approver who left zero substantive comments (silent approval, LGTM, +1, looks good,
+  ship it, emoji-only, or other single-phrase approvals with no technical content).
+  Rubber-stamp on HIGH blast-radius (auth/billing/query-engine/infra/config) = HIGH finding.
+  Rubber-stamp on LOW blast-radius = informational only. Always distinguish from "no human review" —
+  rubber-stamp means PRESENT but shallow; no review means ABSENT entirely.
+- **Bot-authored PRs**: Each PR includes a pre-computed `Author type: AI/bot-authored PR` flag.
+  Bot-authored PRs require ≥1 substantive human comment from a reviewer who can verify correctness.
+  Silent approval or LGTM on a bot-authored PR is insufficient — bots optimize for stated spec and
+  miss emergent interactions. Flag bot-authored PRs with 0 substantive comments as MEDIUM risk;
+  flag bot-authored PRs touching high-blast-radius files with 0 substantive comments as HIGH.
 - **Recommendations must NOT cite arbitrary LOC thresholds or repo-specific directory paths.**
   Write recommendations in terms of risk categories (e.g., "PRs touching auth, feature flags,
   or infra should require ≥1 human reviewer") not specific numbers and paths ("PRs with >400 LOC

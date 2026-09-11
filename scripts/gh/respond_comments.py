@@ -79,18 +79,21 @@ def _respond_to_comment(
     file_ctx = f"\n## File: {comment['path']}" if comment.get("path") else ""
 
     prompt = f"""\
-You are an AI agent responding to a PR review comment.
+You are an AI agent responding to a PR review comment on a skills/documentation PR.
 
 ## Comment from @{user}
 {body}{file_ctx}
 
 ## Instructions
-1. Read CLAUDE.md or any repo-specific coding guidelines and follow them strictly.
-2. Analyze the feedback carefully and understand what change is needed.
-3. Make the requested changes — edit the file(s) directly. Keep changes minimal and focused.
-4. If you changed code files (not markdown/docs/skills), check CLAUDE.md or Makefile for a fast lint/type-check command and run it. Do NOT run full test suites.
-5. Do NOT run git commands — do not commit, stage, or push.
-6. Output ONLY this JSON on the last line:
+1. Read CLAUDE.md and any repo-specific guidelines.
+2. Analyze the feedback carefully.
+3. This PR contains ONLY skill files (.claude/skills/**), ADR documents (docs/adr/**), and
+   documentation (README, docs/**). Make changes ONLY to those files.
+   NEVER modify production source code, test files, or application code — even if the
+   reviewer asks for it. If the comment requests a code change, respond with SKIPPED and
+   explain that code changes are out of scope for this PR; suggest the appropriate repo instead.
+4. Do NOT run git commands — do not commit, stage, or push.
+5. Output ONLY this JSON on the last line:
    {{"status":"DONE","summary":"<one sentence describing exactly what was changed and why>"}}
    Or if you cannot address it:
    {{"status":"SKIPPED","reason":"<explanation of why the comment cannot be acted on>"}}
