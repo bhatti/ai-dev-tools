@@ -63,7 +63,8 @@ def main(issue_id: str) -> None:
             _call_learn(issue_id)
         except RuntimeError as e:
             print(f"WARNING: learn step failed (non-fatal): {e}", file=sys.stderr)
-        notify(config, f"✅ PR {pr_id} {state.lower()} for issue {issue_id}: {pr.get('url', '')}")
+        icon = "✅" if state == "MERGED" else "❌"
+        notify(config, f"{icon} PR {pr_id} {state.lower()} for issue {issue_id}: {pr.get('url', '')}")
         print(f"[check-pr-state] terminal: {state}", flush=True)
         sys.exit(0)
 
