@@ -14,4 +14,8 @@ Was a rollback plan or feature flag mentioned? Were observability additions made
 4. **Review Quality**: Check `rubber_stamp_approvers` and `substantive_human_comment_count`. \
 Only flag rubber-stamp for HIGH blast-radius changes (auth/billing/config/infra).
 5. **CI Health**: Count "Build #" in the CI bot comments. Flag if ≥5 iterations.
+6. **Sloppiness**: Lightweight grep-visible signals only — no tool invocation. \
+Flag if: LOC delta >300 with no new tests; diff introduces functions visibly >50 lines with no decomposition; \
+2+ trivial delegator or wrapper-of-wrapper patterns added; same guard block copy-pasted to 3+ new sites. \
+Omit this dimension entirely if none of these signals are present.
 """

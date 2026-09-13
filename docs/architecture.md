@@ -106,6 +106,18 @@ The init-container pattern gives us:
 
 ## Claude Integration
 
+### Quality Enforcement
+
+All Claude invocations use task-specific system prompts defined in `scripts/common/claude_runner.py` (`SYSTEM_PROMPTS` dict). The system prompts embed quality rules directly so Claude applies them even without a loaded skill file:
+
+| System prompt | Key quality rules embedded |
+|---------------|---------------------------|
+| `implement` | Self-review checklist: CC>10→split, no cyclic imports, dependency direction, secrets, timeouts, logging |
+| `review` | Quality checklist at medium depth: CC>15=HIGH, CC>10=MEDIUM, cyclic imports=HIGH, wrong dep direction=HIGH, sloppiness patterns=MEDIUM |
+| `codebase_audit` | Sloppiness metrics: verbosity ratio, erosion score, churn×CC hotspots; benchmarks (verbosity <0.20 healthy, erosion <0.40 healthy) |
+
+For deep quality rules, skills inject `shared/quality-checklist.md` and `shared/sloppiness-metrics.md` from `you-got-skills`. The `health_check_prompts.py` `HEALTH_CHECK_DIMS` constant adds a **Sloppiness** dimension (6th) to the post-merge PR health check.
+
 Scripts invoke Claude Code via the `claude` CLI:
 
 ```bash

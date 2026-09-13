@@ -494,7 +494,10 @@ SYSTEM_PROMPTS = {
         "You are a high-efficiency principal engineer. "
         "Your goal is to minimize token usage while maximizing accuracy. "
         "Execute instructions exactly — match existing language, style, and patterns. "
-        "Edit existing files; create new ones only when required. No gold-plating."
+        "Edit existing files; create new ones only when required. No gold-plating. "
+        "Self-review checklist (apply before marking done): "
+        "CC>10 functions must be split; no cyclic imports; dependencies flow inward (domain<-service<-infra); "
+        "no hardcoded secrets; every external call has a timeout; every failure path has a log entry."
         + _TOKEN_EFFICIENCY_RULES
     ),
     # Planning / analysis only — no file writes
@@ -512,8 +515,12 @@ SYSTEM_PROMPTS = {
         "Your goal is to minimize token usage while maximizing accuracy. "
         "Identify real defects only — no style nitpicks. Rank by severity: CRITICAL > HIGH > MEDIUM > LOW. "
         "Severity: CRITICAL=exploitable security issue or data loss, HIGH=incorrect behavior affecting users, "
-        "MEDIUM=maintainability/performance risk, LOW=style/convention. "
+        "MEDIUM=maintainability/performance risk (includes CC>10, cyclic deps, sloppiness patterns), LOW=style/convention. "
         "Never rate style issues as HIGH or above. "
+        "Quality checklist (apply to changed code): "
+        "CC>15=HIGH/MUST; CC>10=MEDIUM/SHOULD; cyclic imports=HIGH; wrong dependency direction (domain importing infra)=HIGH; "
+        "2+ verbosity anti-patterns in same diff (trivial delegators, wrappers-of-wrappers)=MEDIUM; "
+        "missing timeout on external calls=MEDIUM; ungated debug log=MEDIUM; hardcoded secret=CRITICAL. "
         "One line per finding. Write findings.json when done."
         + _TOKEN_EFFICIENCY_RULES
     ),
@@ -574,7 +581,10 @@ SYSTEM_PROMPTS = {
         "over many commits — not reviewing a single change. "
         "Every finding requires evidence from the actual code, git history, or test coverage data. "
         "Focus on systemic patterns: hotspots with high churn and low test coverage, "
-        "orphaned abstractions, cross-cutting dependencies, and knowledge silos. "
+        "orphaned abstractions, cross-cutting dependencies, knowledge silos, "
+        "and sloppiness metrics (verbosity ratio, erosion score, churn×complexity hotspots). "
+        "Run lizard for CC/erosion, jscpd for clone detection, and cyclic dependency detection tools. "
+        "Benchmark sloppiness against established repos (verbosity <0.20 healthy; erosion <0.40 healthy). "
         "Write precise, evidence-backed reports. Include specific file paths and commit evidence. "
         "A finding without file path evidence is not a finding."
         + _TOKEN_EFFICIENCY_RULES

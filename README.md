@@ -30,7 +30,7 @@ Slack mention → router → formicary submit → adhoc/run_skill → Slack thre
                        ↳ resume paused job (thread reply or Block Kit button click)
 ```
 
-In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `poll_pr` runs as the main container. `learn` is called automatically by `poll_pr` when the PR is merged/closed. The `learn` step produces a **combined post-merge report** — a PR health check (spec coverage, design decisions, security/SRE signals, review quality, CI churn) followed by implementation learnings extracted from PR comments. The report is written to `learnings.md` and posted as a comment to both the PR and the Jira/GitHub issue.
+In Kubernetes, `plan/implement/create_pr` run as init containers (sequential, must succeed); `poll_pr` runs as the main container. `learn` is called automatically by `poll_pr` when the PR is merged/closed. The `learn` step produces a **combined post-merge report** — a PR health check (spec coverage, design decisions, security/SRE signals, review quality, CI churn, sloppiness signals) followed by implementation learnings extracted from PR comments. The report is written to `learnings.md` and posted as a comment to both the PR and the Jira/GitHub issue.
 
 ## Quick Start — Docker (one step at a time)
 
