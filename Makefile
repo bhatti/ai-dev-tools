@@ -34,7 +34,7 @@ docker-build:    ## Build multi-arch image (linux/amd64,linux/arm64) and push. U
 	    --push --provenance=false .
 
 docker-push:     ## Re-push already-built image tags (no rebuild)
-	docker push $(IMAGE):$(VERSION)
+	#docker push $(IMAGE):$(VERSION)
 	docker push $(IMAGE):latest
 
 build: docker-build  ## Alias for docker-build

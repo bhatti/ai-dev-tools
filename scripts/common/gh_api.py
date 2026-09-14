@@ -63,6 +63,16 @@ def fetch_issues_by_numbers(config: dict, numbers: list[str]) -> list[dict]:
     return issues
 
 
+def fetch_issue_full(config: dict, issue_number: str) -> dict | None:
+    """Fetch a GitHub issue with body, comments, and linked PRs.
+
+    Delegates to issue_fetcher.fetch_gh_issue_full — kept here as a convenience
+    so callers that already import gh_api don't need a second import.
+    """
+    from scripts.common.issue_fetcher import fetch_gh_issue_full
+    return fetch_gh_issue_full(config, issue_number)
+
+
 def resolve_github_issues(
     config: dict,
     query: str | None = None,

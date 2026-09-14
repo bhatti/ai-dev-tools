@@ -50,9 +50,11 @@ def _format_issue(issue: dict) -> str:
     url = issue.get("url", "")
     assignees = issue.get("assignees") or []
     assignee = assignees[0].get("login", "Unassigned") if assignees else "Unassigned"
-    labels = [l["name"] for l in (issue.get("labels") or [])]
+    labels = [lbl["name"] for lbl in (issue.get("labels") or [])]
     label_str = f" [{', '.join(labels)}]" if labels else ""
-    return f"• <{url}|#{number}>{label_str} {title} — _{assignee}_"
+    linked_prs = issue.get("linked_prs") or []
+    link_tag = f"  [{len(linked_prs)} linked PRs]" if linked_prs else ""
+    return f"• <{url}|#{number}>{label_str} {title} — _{assignee}_{link_tag}"
 
 
 def _write_query_output(config: dict, query: str, issues: list) -> None:

@@ -78,6 +78,24 @@ def resolve_jira_issues(
     return []
 
 
+def extract_adf_text(node: "dict | str | None", depth: int = 0) -> str:
+    """Recursively extract plain text from Atlassian Document Format (ADF).
+
+    Consolidates _extract_plain_text (query_issues) and _extract_text_from_doc
+    (analyze_issues) into a single canonical implementation.
+    """
+    if node is None or depth > 10:
+        return ""
+    if isinstance(node, str):
+        return node.strip()
+    if not isinstance(node, dict):
+        return ""
+    if node.get("type") == "text":
+        return node.get("text", "")
+    parts = [extract_adf_text(child, depth + 1) for child in node.get("content", [])]
+    return " ".join(p for p in parts if p)
+
+
 def _auth_headers(config: dict) -> dict[str, str]:
     email = config["JIRA_EMAIL"]
     token = config["JIRA_API_TOKEN"]

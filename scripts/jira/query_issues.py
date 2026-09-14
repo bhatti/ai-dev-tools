@@ -25,7 +25,7 @@ import click
 import requests
 
 from scripts.common.config import load_config, get_workspace_dir
-from scripts.common.jira_api import _auth_headers, _base, resolve_jira_issues, search_issues
+from scripts.common.jira_api import _auth_headers, _base, extract_adf_text, resolve_jira_issues, search_issues
 from scripts.common.report_renderer import render_simple_html
 from scripts.standup.slack_client import build_issue_blocks, notify
 
@@ -70,27 +70,6 @@ def _build_jql(config: dict, query: str, issue_type: str | None = None) -> str:
     return " AND ".join(parts[:-1]) + " " + parts[-1]
 
 
-def _extract_plain_text(body) -> str:
-    """Extract plain text from Jira ADF or string description."""
-    if not body:
-        return ""
-    if isinstance(body, str):
-        return body.strip()
-    if isinstance(body, dict):
-        # Atlassian Document Format — recursively collect text nodes
-        parts = []
-        def _collect(node, depth=0):
-            if depth > 8:
-                return
-            if node.get("type") == "text":
-                parts.append(node.get("text", ""))
-            for child in node.get("content", []):
-                _collect(child, depth + 1)
-        _collect(body)
-        return " ".join(p for p in parts if p).strip()
-    return ""
-
-
 def _format_issue(issue: dict, base_url: str) -> str:
     key = issue.get("key", "?")
     fields = issue.get("fields", {})
@@ -102,15 +81,17 @@ def _format_issue(issue: dict, base_url: str) -> str:
     priority_obj = fields.get("priority") or {}
     priority = priority_obj.get("name") or "None"
     created = (fields.get("created") or "")[:10]  # YYYY-MM-DD
-    desc_raw = _extract_plain_text(fields.get("description"))
+    desc_raw = extract_adf_text(fields.get("description"))
     desc = (desc_raw[:120] + "…") if len(desc_raw) > 120 else desc_raw
     url = f"{base_url.rstrip('/')}/browse/{key}"
 
+    link_count = len(fields.get("issuelinks") or [])
     type_tag = f"[{issuetype}] " if issuetype else ""
     meta = f"_{assignee}_ · {status} · priority: {priority}"
     if created:
         meta += f" · {created}"
-    line = f"• <{url}|{key}> {type_tag}{summary} — {meta}"
+    link_tag = f"  [{link_count} linked]" if link_count else ""
+    line = f"• <{url}|{key}> {type_tag}{summary} — {meta}{link_tag}"
     if desc:
         line += f"\n  _{desc}_"
     return line

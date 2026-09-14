@@ -116,6 +116,9 @@ _SCRIPTS_TO_COPY = [
     "scripts/gh/analyze_issues.py",
     "scripts/gh/query_issues.py",
     "scripts/common/issue_analysis.py",
+    "scripts/common/issue_fetcher.py",
+    "scripts/common/jira_api.py",
+    "scripts/common/gh_api.py",
     "scripts/common/skill_resolver.py",
     "scripts/common/git_archaeology.py",
     "scripts/common/git_utils.py",
@@ -514,6 +517,7 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
     ws = "/workspace/jira_analyze"
     env["WORKSPACE_DIR"] = ws
 
+    verify_step = None
     with pod_fixture("jira-analyze") as pod:
         step = exec_step(pod, "jira-analyze",
                          f"mkdir -p {ws}/reports {ws}/logs && "
@@ -522,13 +526,28 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
                          env, timeout=300)
         result.steps.append(step)
 
+        if step.ok and step.has_results:
+            # Verify reports/report.md was written with substantial content — runs in same pod
+            verify_cmd = (
+                f"python3 -c \""
+                f"import os, sys; "
+                f"md='{ws}/reports/report.md'; "
+                f"sz=os.path.getsize(md) if os.path.exists(md) else 0; "
+                f"print(f'::add-task-context REPORT_MD_BYTES::{{sz}}'); "
+                f"sys.exit(0 if sz > 300 else 1)"
+                f"\""
+            )
+            verify_step = exec_step(pod, "verify-jira-report", verify_cmd, env, timeout=30)
+            result.steps.append(verify_step)
+
     if not step.ok:
         return _fail(result, step, f"exit code {step.returncode}")
     if not step.has_results:
         return _pass(result, f"no issues found for {ISSUE_ID} (exit 2)")
 
     err = _check_keys(step, ["SELECTED_TRACKER", "ISSUE_COUNT", "ANALYSIS_TYPE",
-                              "GIT_ARCHAEOLOGY"]) or \
+                              "GIT_ARCHAEOLOGY", "ISSUE_LINKS_COUNT", "PR_LINKS_COUNT",
+                              "ATTACHMENTS_COUNT"]) or \
           _check_values(step, {"SELECTED_TRACKER": "jira"})
     if err:
         return _fail(result, step, err)
@@ -541,9 +560,20 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
                          f"GIT_ARCHAEOLOGY=no but BITBUCKET_REPO={env['BITBUCKET_REPO']} "
                          f"and SSH_PRIVATE_KEY is set — clone should have succeeded\n"
                          f"stdout tail: {step.stdout[-600:]}")
+
+    if verify_step and not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"reports/report.md missing or too small (want >300 bytes, "
+                     f"got {verify_step.context.get('REPORT_MD_BYTES', 0)} bytes)")
+
+    report_sz = verify_step.context.get("REPORT_MD_BYTES", "?") if verify_step else "?"
     return _pass(result, f"ANALYSIS_TYPE={step.context.get('ANALYSIS_TYPE')} "
                          f"GIT_ARCHAEOLOGY={git_arch} "
                          f"ISSUE_COUNT={step.context.get('ISSUE_COUNT')} "
+                         f"ISSUE_LINKS_COUNT={step.context.get('ISSUE_LINKS_COUNT')} "
+                         f"PR_LINKS_COUNT={step.context.get('PR_LINKS_COUNT')} "
+                         f"ATTACHMENTS_COUNT={step.context.get('ATTACHMENTS_COUNT')} "
+                         f"report.md={report_sz}B "
                          f"elapsed={step.elapsed:.0f}s")
 
 
@@ -678,13 +708,27 @@ def test_06_gh_analyze(base_env: dict[str, str]) -> TestResult:
     env["GH_ORG"] = GH_ORG
     env["GH_REPO"] = GH_REPO
 
+    verify_step = None
     with pod_fixture("gh-analyze") as pod:
         step = exec_step(pod, "gh-analyze",
                          f"mkdir -p {ws}/reports {ws}/logs && "
                          "python3 -m scripts.gh.analyze_issues "
-                         "--query 'bug' --prompt 'summarize open bugs' --max 3",
+                         "--issues '27' --prompt 'analyze issue 27' --max 3",
                          env, timeout=300)
         result.steps.append(step)
+
+        if step.ok and step.has_results:
+            verify_cmd = (
+                f"python3 -c \""
+                f"import os, sys; "
+                f"md='{ws}/reports/report.md'; "
+                f"sz=os.path.getsize(md) if os.path.exists(md) else 0; "
+                f"print(f'::add-task-context REPORT_MD_BYTES::{{sz}}'); "
+                f"sys.exit(0 if sz > 300 else 1)"
+                f"\""
+            )
+            verify_step = exec_step(pod, "verify-gh-report", verify_cmd, env, timeout=30)
+            result.steps.append(verify_step)
 
     if not step.ok:
         return _fail(result, step, f"exit code {step.returncode}")
@@ -692,12 +736,23 @@ def test_06_gh_analyze(base_env: dict[str, str]) -> TestResult:
         return _pass(result, "no matching issues (exit 2) — GitHub reachable")
 
     err = _check_keys(step, ["SELECTED_TRACKER", "ISSUE_COUNT", "ANALYSIS_TYPE",
-                              "GIT_ARCHAEOLOGY"]) or \
+                              "GIT_ARCHAEOLOGY", "PR_LINKS_COUNT"]) or \
           _check_values(step, {"SELECTED_TRACKER": "github"})
-    return _fail(result, step, err) if err else \
-           _pass(result, f"ANALYSIS_TYPE={step.context.get('ANALYSIS_TYPE')} "
+    if err:
+        return _fail(result, step, err)
+
+    if verify_step and not verify_step.ok:
+        return _fail(result, verify_step,
+                     f"reports/report.md missing or too small (want >300 bytes, "
+                     f"got {verify_step.context.get('REPORT_MD_BYTES', 0)} bytes)")
+
+    report_sz = verify_step.context.get("REPORT_MD_BYTES", "?") if verify_step else "?"
+    return _pass(result, f"ANALYSIS_TYPE={step.context.get('ANALYSIS_TYPE')} "
                          f"GIT_ARCHAEOLOGY={step.context.get('GIT_ARCHAEOLOGY')} "
+                         f"CLONE_METHOD={step.context.get('CLONE_METHOD', 'N/A')} "
+                         f"PR_LINKS_COUNT={step.context.get('PR_LINKS_COUNT')} "
                          f"ISSUE_COUNT={step.context.get('ISSUE_COUNT')} "
+                         f"report.md={report_sz}B "
                          f"elapsed={step.elapsed:.0f}s")
 
 
@@ -2056,6 +2111,116 @@ def test_19_learn_gh(base_env: dict[str, str]) -> TestResult:
                  f"structure={structure} elapsed={learn_step.elapsed:.0f}s")
 
 
+def test_20_adhoc_ask(base_env: dict[str, str]) -> TestResult:
+    """Run run_skill.py with ygs-ask on a simple question. Verifies:
+      1. Exit 0
+      2. adhoc_report.md written with content (Claude answer)
+      3. reports/report.html generated from markdown
+      4. adhoc_result.json is valid JSON with status=DONE
+      5. SKILL, SKILL_LOADED, SELECTED_MODEL context markers emitted
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor ANTHROPIC_API_KEY set.
+    """
+    result = TestResult("adhoc-ask")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/adhoc_ask"
+    env["WORKSPACE_DIR"] = ws
+    # Use Haiku for speed — this is a simple factual question
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_ADHOC"] = "20"
+    # No Slack token needed — we verify file output, not Slack delivery
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("adhoc-ask") as pod:
+        # Step 1 — run adhoc skill
+        step = exec_step(pod, "adhoc-ask",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         "python3 -m scripts.adhoc.run_skill "
+                         "--skill ygs-ask "
+                         "--prompt 'What are the first 5 Fibonacci numbers? List them as bullets.'",
+                         env, timeout=300)
+        result.steps.append(step)
+
+        if not step.ok:
+            return _fail(result, step, f"run_skill exit code {step.returncode}")
+
+        err = _check_keys(step, ["SKILL", "SKILL_LOADED", "SELECTED_MODEL"])
+        if err:
+            return _fail(result, step, f"context markers missing: {err}")
+
+        # Verify ygs-ask SKILL.md was found (not fallback)
+        if step.context.get("SKILL_LOADED") != "yes":
+            return _fail(result, step, "SKILL_LOADED=no — ygs-ask SKILL.md not installed")
+
+        # Step 2 — verify output files
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"# Accept report content from adhoc_report.md OR reports/report.md —\n"
+            f"# ygs-ask SKILL.md writes to reports/report.md; fallback writes adhoc_report.md.\n"
+            f"report_candidates = [\n"
+            f"    os.path.join(ws, 'adhoc_report.md'),\n"
+            f"    os.path.join(ws, 'reports', 'report.md'),\n"
+            f"]\n"
+            f"report_found = None\n"
+            f"for md in report_candidates:\n"
+            f"    if os.path.exists(md):\n"
+            f"        sz = os.path.getsize(md)\n"
+            f"        if sz >= 50:\n"
+            f"            report_found = md\n"
+            f"            print(f'::add-task-context REPORT_MD_BYTES::{{sz}}')\n"
+            f"            print(f'::add-task-context REPORT_MD_FILE::{{os.path.basename(md)}}')\n"
+            f"            break\n"
+            f"if not report_found:\n"
+            f"    issues.append('no report file with content (checked adhoc_report.md and reports/report.md)')\n"
+            f"# reports/report.html must exist\n"
+            f"html = os.path.join(ws, 'reports', 'report.html')\n"
+            f"if not os.path.exists(html): issues.append('reports/report.html missing')\n"
+            f"else: print(f'::add-task-context REPORT_HTML_BYTES::{{os.path.getsize(html)}}')\n"
+            f"# adhoc_result.json must be valid JSON with status=DONE\n"
+            f"rj = os.path.join(ws, 'adhoc_result.json')\n"
+            f"if not os.path.exists(rj):\n"
+            f"    issues.append('adhoc_result.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(rj).read())\n"
+            f"        if d.get('status') != 'DONE': issues.append(f'adhoc_result.json status={{d.get(\"status\")}}')\n"
+            f"        else: print('::add-task-context ADHOC_STATUS::DONE')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'adhoc_result.json parse error: {{e}}')\n"
+            f"if issues:\n"
+            f"    print('FILE ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context FILES_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-adhoc", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"file verification failed: {verify_step.stderr[-300:]}")
+
+    report_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    report_file = verify_step.context.get("REPORT_MD_FILE", "?")
+    html_bytes = verify_step.context.get("REPORT_HTML_BYTES", "?")
+    model = step.context.get("SELECTED_MODEL", "?")
+    return _pass(result,
+                 f"SKILL_LOADED=yes report={report_file}({report_bytes}B) html={html_bytes}B "
+                 f"MODEL={model} elapsed={step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -2078,6 +2243,7 @@ ALL_TESTS: dict[str, callable] = {
     "pr-audit-by-urls":      test_17_pr_audit_by_urls,
     "pr-audit-slack-model":  test_18_pr_audit_slack_model,
     "learn-gh":              test_19_learn_gh,
+    "adhoc-ask":             test_20_adhoc_ask,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

@@ -174,11 +174,16 @@ _TRACKER_SKILLS = {"ygs-risk-scan", "ygs-standup", "ygs-pr-queue"}
 # These short descriptions steer Claude when no detailed skill file is found.
 _SKILL_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "ygs-ask": (
-        "Answer the user's question directly using your knowledge and, when relevant, "
-        "Jira/GitHub API calls via Bash to fetch project-specific data. "
-        "You do NOT need a local codebase or any source files — answer from knowledge. "
-        "If the question is general (not project-specific), respond immediately from knowledge. "
-        "Keep the answer concise and Slack-formatted."
+        "Answer the user's question directly and comprehensively using your knowledge and, "
+        "when relevant, Jira/GitHub API calls via Bash to fetch project-specific data. "
+        "You do NOT need a local codebase or any source files for general questions — "
+        "answer from knowledge immediately.\n\n"
+        "IMPORTANT — write the full answer to TWO files in the working directory:\n"
+        "1. `adhoc_report.md` — Slack mrkdwn format: `*Section*` headers, `• ` bullets, "
+        "`` `code` `` for commands/values. Include ALL relevant details; do not truncate.\n"
+        "2. `reports/report.md` — plain markdown copy of the same answer.\n\n"
+        "After writing both files, output ONLY the JSON status line as the last line of stdout "
+        "(already specified in the prompt)."
     ),
     "ygs-pr-comments": (
         "Fetch and display all existing review comments on the PR whose URL is in $SKILL_PROMPT. "
@@ -586,7 +591,8 @@ def main(skill: str, prompt_text: str) -> None:
     # For tracker skills, check if Claude wrote a report file (risk_report.md, etc.)
     # and use it as the output if result.output is only the JSON status line.
     output_text = result.output.strip()
-    report_candidates = ["standup_brief.md", "risk_report.md", "adhoc_report.md", "pr_queue_report.md"]
+    report_candidates = ["standup_brief.md", "risk_report.md", "adhoc_report.md", "pr_queue_report.md",
+                         "reports/report.md"]
     for candidate in report_candidates:
         report_path = workspace / candidate
         if report_path.exists():
@@ -631,14 +637,31 @@ def main(skill: str, prompt_text: str) -> None:
                 print(f"[adhoc] WARNING: could not write reports/: {_re}", flush=True)
 
     output_to_post = _strip_for_slack(output_text)
-    if len(output_to_post) > _MAX_SLACK_CHARS:
-        output_to_post = output_to_post[:_MAX_SLACK_CHARS] + "\n…\n_(Full report in Formicary job artifacts)_"
 
+    # Build Block Kit blocks from full content — each section block holds up to 2900 chars.
+    # Slack hard-limits messages to 50 blocks; reserve 2 for the truncation notice + divider.
+    _SLACK_BLOCK_LIMIT = 50
     blocks = build_mrkdwn_blocks(output_to_post) if output_to_post else None
+    if blocks and len(blocks) > _SLACK_BLOCK_LIMIT:
+        blocks = blocks[: _SLACK_BLOCK_LIMIT - 2] + [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn",
+                         "text": "…\n_(Response truncated — full report in Formicary job artifacts)_"},
+            },
+            {"type": "divider"},
+        ]
+
+    # Fallback text for Slack notifications (capped at _MAX_SLACK_CHARS)
+    slack_fallback = output_to_post
+    if len(slack_fallback) > _MAX_SLACK_CHARS:
+        slack_fallback = slack_fallback[:_MAX_SLACK_CHARS] + "\n…\n_(Full report in Formicary job artifacts)_"
 
     try:
-        if output_to_post or blocks:
-            slack_notify(config, output_to_post or f"✅ `/{skill}` complete.", blocks=blocks)
+        if blocks:
+            slack_notify(config, slack_fallback or f"✅ `/{skill}` complete.", blocks=blocks)
+        elif slack_fallback:
+            slack_notify(config, slack_fallback)
         else:
             summary = status_data.get("summary", "")
             slack_notify(config, f"✅ `/{skill}` complete. {summary}")
