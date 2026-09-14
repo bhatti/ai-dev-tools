@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.analyze.run_pr_audit import _parse_slack_flags, _PR_AUDIT_PROMPT_TEMPLATE
+from scripts.analyze.run_pr_audit import (
+    _parse_slack_flags,
+    _PR_AUDIT_PROMPT_TEMPLATE,
+    _resolve_effective_tracker,
+    _resolve_branch,
+)
 
 
 class TestParseSlackFlags:
@@ -113,6 +118,122 @@ class TestParseSlackFlags:
         assert result["n_prs"] == 20
         assert result["team_members"] == "alice"
         assert result["gh_milestone"] == "sprint-3"
+
+    def test_tracker_flag_github(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --tracker github"})
+        assert result["tracker"] == "github"
+
+    def test_tracker_flag_jira(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --tracker jira"})
+        assert result["tracker"] == "jira"
+
+    def test_tracker_absent_returns_none(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 123"})
+        assert result["tracker"] is None
+
+    def test_empty_message_tracker_key_present(self):
+        result = _parse_slack_flags({})
+        assert "tracker" in result
+        assert result["tracker"] is None
+
+
+class TestResolveEffectiveTracker:
+    """_resolve_effective_tracker priority: --tracker > PR URL > DEFAULT_TRACKER."""
+
+    def test_explicit_tracker_wins_over_url_and_default(self):
+        flags = {"tracker": "jira", "pr_urls": ["https://github.com/org/repo/pull/1"]}
+        assert _resolve_effective_tracker({"DEFAULT_TRACKER": "github"}, flags) == "jira"
+
+    def test_pr_url_wins_over_default(self):
+        flags = {"tracker": None, "pr_urls": ["https://github.com/org/repo/pull/1"]}
+        assert _resolve_effective_tracker({"DEFAULT_TRACKER": "jira"}, flags) == "github"
+
+    def test_default_tracker_used_when_no_flag_no_url(self):
+        flags = {"tracker": None, "pr_urls": []}
+        assert _resolve_effective_tracker({"DEFAULT_TRACKER": "jira"}, flags) == "jira"
+
+    def test_empty_config_returns_empty_string(self):
+        flags = {"tracker": None, "pr_urls": []}
+        assert _resolve_effective_tracker({}, flags) == ""
+
+    def test_bitbucket_url_derives_jira_tracker(self):
+        flags = {"tracker": None, "pr_urls": ["https://bitbucket.org/ws/repo/pull-requests/42"]}
+        result = _resolve_effective_tracker({"DEFAULT_TRACKER": "github"}, flags)
+        assert result in ("jira", "jira/bitbucket", "bitbucket")
+
+
+class TestResolveBranch:
+    """_resolve_branch picks the right branch env var for the effective tracker."""
+
+    def test_github_tracker_uses_gh_branch(self):
+        config = {"GH_REPO_BRANCH": "feature-x", "BB_REPO_BRANCH": "develop"}
+        assert _resolve_branch(config, "github") == "feature-x"
+
+    def test_jira_tracker_uses_bb_branch(self):
+        config = {"GH_REPO_BRANCH": "main", "BB_REPO_BRANCH": "develop"}
+        assert _resolve_branch(config, "jira") == "develop"
+
+    def test_bitbucket_tracker_uses_bb_branch(self):
+        config = {"GH_REPO_BRANCH": "main", "BB_REPO_BRANCH": "release"}
+        assert _resolve_branch(config, "bitbucket") == "release"
+
+    def test_missing_branch_defaults_to_main(self):
+        assert _resolve_branch({}, "github") == "main"
+        assert _resolve_branch({}, "jira") == "main"
+
+    def test_has_bitbucket_creds_but_tracker_github_uses_gh_branch(self):
+        config = {
+            "BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "repo",
+            "GH_REPO_BRANCH": "gh-branch", "BB_REPO_BRANCH": "bb-branch",
+        }
+        assert _resolve_branch(config, "github") == "gh-branch"
+
+
+class TestGhTrackerBoardWarning:
+    """--board with a GitHub-tracker job should warn and NOT set PR_AUDIT_JIRA_BOARDS."""
+
+    def _run_main_stub(self, config_overrides: dict, env_overrides: dict) -> tuple[dict, list[str]]:
+        """Run just the board-flag processing branch of main() in isolation."""
+        import io as _io
+        from unittest.mock import patch as _patch
+        import scripts.analyze.run_pr_audit as m
+
+        captured = []
+
+        def fake_print(*args, **kwargs):
+            captured.append(" ".join(str(a) for a in args))
+
+        config = {"DEFAULT_TRACKER": "github", **config_overrides}
+        env = {**env_overrides}
+
+        with _patch("builtins.print", side_effect=fake_print), \
+             _patch.dict(os.environ, env, clear=False):
+            flags = m._parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 123"})
+            board_val = flags["jira_boards"]
+            if board_val == "__default__":
+                board_val = config.get("JIRA_BOARDS", "") or ""
+            if board_val:
+                tracker = config.get("DEFAULT_TRACKER", "").lower()
+                if tracker == "github":
+                    fake_print(
+                        "[pr-audit] WARNING: --board scopes by Jira/Bitbucket active-sprint assignees "
+                        "and has no effect for GitHub-tracker jobs; use --milestone to scope by milestone"
+                    )
+                else:
+                    os.environ["PR_AUDIT_JIRA_BOARDS"] = board_val
+                    config["PR_AUDIT_JIRA_BOARDS"] = board_val
+
+        return config, captured
+
+    def test_board_with_gh_tracker_warns_and_does_not_set_env(self):
+        config, output = self._run_main_stub({"DEFAULT_TRACKER": "github"}, {})
+        assert "PR_AUDIT_JIRA_BOARDS" not in config
+        assert any("WARNING" in line and "--milestone" in line for line in output)
+
+    def test_board_with_jira_tracker_sets_env(self):
+        import scripts.analyze.run_pr_audit as m
+        flags = m._parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 456"})
+        assert flags["jira_boards"] == "456"
 
 
 class TestPromptTemplate:

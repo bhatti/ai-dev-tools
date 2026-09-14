@@ -233,6 +233,12 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             for rv in reviews_list
             if rv.get("state") == "APPROVED" and rv.get("author", {}).get("login")
         ]
+        # All reviewers: anyone who submitted any review (approved, requested changes, or commented)
+        gh_reviewers = list({
+            rv.get("author", {}).get("login", "")
+            for rv in reviews_list
+            if rv.get("author", {}).get("login")
+        } - {author})
         depth = _compute_review_depth(classified["human_comments"], gh_approvers)
 
         pr = {
@@ -254,6 +260,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "review_bot_comments": classified["review_bot_comments"],
             "human_comments": classified["human_comments"],
             "approvers": gh_approvers,
+            "reviewers": gh_reviewers,
             "linked_issue": None,
             "review_decision": review_decision,
             "review_decision_protected": rp.get("reviewDecision", ""),
@@ -475,7 +482,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         deletions = sum(d.get("lines_removed", 0) for d in diffstat)
         file_paths = [d.get("path", "") for d in diffstat]
 
-        # Extract approvals from the participants list (present in merged PR data)
+        # Extract approvals and assigned reviewers from participants (present in merged PR data)
         participants = rp.get("participants", [])
         approvers = [
             p.get("user", {}).get("display_name") or p.get("user", {}).get("nickname", "")
@@ -483,6 +490,13 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             if p.get("approved") and p.get("role") != "AUTHOR"
         ]
         approvers = [a for a in approvers if a]
+        # All assigned reviewers (role=REVIEWER, regardless of approval/comment status)
+        assigned_reviewers = [
+            p.get("user", {}).get("display_name") or p.get("user", {}).get("nickname", "")
+            for p in participants
+            if p.get("role") == "REVIEWER"
+        ]
+        assigned_reviewers = [r for r in assigned_reviewers if r]
         review_decision = "APPROVED" if approvers else ""
 
         author = rp.get("author", {}).get("display_name", rp.get("author", {}).get("nickname", ""))
@@ -507,6 +521,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "review_bot_comments": classified["review_bot_comments"],
             "human_comments": classified["human_comments"],
             "approvers": approvers,
+            "reviewers": assigned_reviewers,
             "linked_issue": None,
             "review_decision": review_decision,
             "is_bot_authored": _is_ai_authored(author),
@@ -676,14 +691,15 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
         if author in members:
             filtered.append(pr)
             continue
-        # Check reviewers: human commenters + approvers
-        reviewers = {
+        # Check all involvement: human commenters + approvers + assigned reviewers
+        involved = {
             c.get("author", "").lower()
             for c in pr.get("human_comments", [])
             if c.get("author")
         }
-        reviewers.update(a.lower() for a in pr.get("approvers", []) if a)
-        if reviewers & members:
+        involved.update(a.lower() for a in pr.get("approvers", []) if a)
+        involved.update(r.lower() for r in pr.get("reviewers", []) if r)
+        if involved & members:
             filtered.append(pr)
 
     if len(filtered) != len(prs):

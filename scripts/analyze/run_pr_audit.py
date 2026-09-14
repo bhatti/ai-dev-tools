@@ -68,6 +68,45 @@ def _load_skill_md(skill: str) -> str | None:
     return None
 
 
+# -- Tracker resolution --------------------------------------------------------
+
+def _resolve_effective_tracker(config: dict, slack_flags: dict) -> str:
+    """Return the effective tracker using strict priority order.
+
+    Priority (highest → lowest):
+      1. Explicit ``--tracker <value>`` flag in the Slack message / prompt.
+      2. Tracker derived from the first PR URL in the message (github.com → github,
+         atlassian.net/bitbucket.org → jira).
+      3. ``DEFAULT_TRACKER`` from job config / environment.
+
+    This ensures any prompt can override the job-level default, so e.g.
+    ``@bot pr-audit --tracker jira --board 123`` works even when the submitted
+    job definition has ``DEFAULT_TRACKER=github``.
+    """
+    # 1. Explicit --tracker flag wins
+    if slack_flags.get("tracker"):
+        return slack_flags["tracker"].lower()
+    # 2. Derived from first PR URL in the message
+    if slack_flags.get("pr_urls"):
+        try:
+            tracker_type, _ = parse_pr_url(slack_flags["pr_urls"][0])
+            return tracker_type
+        except ValueError:
+            pass
+    # 3. Fall back to job-level default
+    return (config.get("DEFAULT_TRACKER") or "").lower()
+
+
+def _resolve_branch(config: dict, effective_tracker: str) -> str:
+    """Return the default branch for the effective tracker."""
+    has_bitbucket = bool(config.get("BITBUCKET_WORKSPACE") and config.get("BITBUCKET_REPO"))
+    if effective_tracker in ("jira", "bitbucket", "jira/bitbucket") or (
+        has_bitbucket and effective_tracker != "github"
+    ):
+        return config.get("BB_REPO_BRANCH", "main")
+    return config.get("GH_REPO_BRANCH", "main")
+
+
 # -- Slack flag parsing --------------------------------------------------------
 
 def _parse_slack_flags(config: dict) -> dict:
@@ -93,7 +132,8 @@ def _parse_slack_flags(config: dict) -> dict:
     msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
     if not msg:
         return {"n_prs": None, "focus": None, "pr_urls": [], "model": None,
-                "team_members": None, "jira_boards": None, "gh_milestone": None}
+                "team_members": None, "jira_boards": None, "gh_milestone": None,
+                "tracker": None}
 
     msg_lower = msg.lower()
 
@@ -142,17 +182,25 @@ def _parse_slack_flags(config: dict) -> dict:
     if m:
         gh_milestone = m.group(1).strip()
 
+    # Tracker override: --tracker github|jira|bitbucket
+    # This lets any prompt explicitly set the tracker regardless of DEFAULT_TRACKER.
+    tracker: str | None = None
+    m = re.search(r"--tracker\s+(github|jira(?:/bitbucket)?|bitbucket)", msg, re.IGNORECASE)
+    if m:
+        tracker = m.group(1).lower()
+
     # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
     for token in re.findall(r"https?://\S+", msg):
         token = token.rstrip(".,;)")
         try:
-            parse_pr_url(token)  # validate format
+            parse_pr_url(token)  # validate format; also implies tracker
             pr_urls.append(token)
         except ValueError:
             pass
 
     return {"n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
-            "team_members": team_members, "jira_boards": jira_boards, "gh_milestone": gh_milestone}
+            "team_members": team_members, "jira_boards": jira_boards,
+            "gh_milestone": gh_milestone, "tracker": tracker}
 
 
 # -- Markers -------------------------------------------------------------------
@@ -497,20 +545,24 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     config = load_config()
     validate_claude_config(config)
 
-    # Branch resolution: CLI flag > tracker-specific branch env var.
-    if not branch:
-        tracker = (config.get("DEFAULT_TRACKER") or "").lower()
-        has_bitbucket = bool(config.get("BITBUCKET_WORKSPACE") and config.get("BITBUCKET_REPO"))
-        if tracker in ("jira", "bitbucket", "jira/bitbucket") or (has_bitbucket and tracker != "github"):
-            branch = config.get("BB_REPO_BRANCH", "main")
-        else:
-            branch = config.get("GH_REPO_BRANCH", "main")
-
     n_prs = n_prs or int(config.get("N_PRS", "50"))
     focus = focus or config.get("PR_AUDIT_FOCUS", "all")
     max_pr_size = int(config.get("MAX_PR_AUDIT_SIZE", "10000000"))
 
+    # Parse Slack flags first so tracker and branch resolution use prompt values.
     slack_flags = _parse_slack_flags(config)
+
+    # Resolve effective tracker: --tracker flag > PR URL detection > DEFAULT_TRACKER config.
+    effective_tracker = _resolve_effective_tracker(config, slack_flags)
+    if effective_tracker:
+        config["DEFAULT_TRACKER"] = effective_tracker
+        if slack_flags.get("tracker"):
+            print(f"[pr-audit] Slack override: tracker={effective_tracker}", flush=True)
+
+    # Branch resolution uses the effective tracker so --tracker overrides it too.
+    if not branch:
+        branch = _resolve_branch(config, effective_tracker)
+
     if slack_flags["n_prs"] is not None:
         n_prs = slack_flags["n_prs"]
         print(f"[pr-audit] Slack override: n_prs={n_prs}", flush=True)
@@ -532,9 +584,16 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             if not board_val:
                 print("[pr-audit] --board used but JIRA_BOARDS org config not set", flush=True)
         if board_val:
-            os.environ["PR_AUDIT_JIRA_BOARDS"] = board_val
-            config["PR_AUDIT_JIRA_BOARDS"] = board_val
-            print(f"[pr-audit] Slack override: jira_boards={board_val}", flush=True)
+            if effective_tracker == "github":
+                print(
+                    "[pr-audit] WARNING: --board scopes by Jira/Bitbucket active-sprint assignees "
+                    "and has no effect for GitHub-tracker jobs; use --milestone to scope by milestone",
+                    flush=True,
+                )
+            else:
+                os.environ["PR_AUDIT_JIRA_BOARDS"] = board_val
+                config["PR_AUDIT_JIRA_BOARDS"] = board_val
+                print(f"[pr-audit] Slack override: jira_boards={board_val}", flush=True)
     if slack_flags["gh_milestone"]:
         os.environ["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
         config["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
@@ -624,7 +683,13 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 if len(tracker_types) > 1:
                     print(f"[pr-audit] ERROR: mixed tracker types in PR URLs: {tracker_types}", file=sys.stderr, flush=True)
                     sys.exit(1)
-                config["DEFAULT_TRACKER"] = tracker_types.pop()
+                # Only override DEFAULT_TRACKER when the user did not explicitly pass
+                # --tracker — an explicit flag has highest priority and must not be
+                # overwritten by URL-derived tracker detection.
+                if not slack_flags.get("tracker"):
+                    config["DEFAULT_TRACKER"] = tracker_types.pop()
+                else:
+                    tracker_types.discard(config["DEFAULT_TRACKER"])  # consume without reassigning
                 pr_numbers = [num for _, num in parsed_urls]
                 prs = fetch_prs_by_numbers(config, pr_numbers)
                 print(f"[pr-audit] fetched {len(prs)} specific PRs from URLs", flush=True)

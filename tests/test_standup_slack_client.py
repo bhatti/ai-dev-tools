@@ -539,3 +539,80 @@ def test_post_report_render_exception_is_nonfatal(mock_post, mock_render, config
     ok = post_report(config_with_slack, "text", "# md",
                      title="Report", filename="report.html")
     assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# post_report — artifact_path kwarg and fallback link
+# ---------------------------------------------------------------------------
+
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_fallback_uses_artifact_path(mock_post, mock_render, mock_upload):
+    """When upload fails, fallback link uses the explicit artifact_path, not filename."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000020.000001"}
+    )
+    config = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "#test",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "JOB_ID": "job-abc-123",
+    }
+
+    post_report(config, "text", "# md",
+                title="PR Audit", filename="pr_audit_report.html",
+                artifact_path="reports/pr_audit_report.html")
+
+    # The second post call should be the fallback message containing the artifact path.
+    assert mock_post.call_count == 2
+    fallback_payload = mock_post.call_args_list[1].kwargs["json"]
+    fallback_text = fallback_payload.get("text", "")
+    assert "by-job/job-abc-123/download" in fallback_text
+    assert "file=reports/pr_audit_report.html" in fallback_text
+    assert "pr_audit_report.html" in fallback_text
+
+
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_fallback_defaults_to_reports_filename(mock_post, mock_render, mock_upload):
+    """When artifact_path is omitted, fallback link defaults to reports/<filename>."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000021.000001"}
+    )
+    config = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "#test",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "JOB_ID": "job-xyz-456",
+    }
+
+    post_report(config, "text", "# md",
+                title="Standup", filename="standup_report.html")
+
+    assert mock_post.call_count == 2
+    fallback_payload = mock_post.call_args_list[1].kwargs["json"]
+    fallback_text = fallback_payload.get("text", "")
+    assert "file=reports/standup_report.html" in fallback_text
+
+
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_no_fallback_when_no_job_id(mock_post, mock_render, mock_upload):
+    """Fallback link is skipped when JOB_ID is absent."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000022.000001"}
+    )
+    config = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "#test",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        # JOB_ID intentionally absent
+    }
+
+    post_report(config, "text", "# md", title="Report", filename="report.html")
+
+    # Only 1 post call (the main text message) — no fallback
+    assert mock_post.call_count == 1

@@ -72,7 +72,11 @@ def main() -> None:
 
     artifact_link = ""
     if formicary_url and job_id:
-        artifact_link = f"\n<{formicary_url}/dashboard/jobs/requests/{job_id}|View full report & artifacts>"
+        html_url = (
+            f"{formicary_url}/dashboard/artifacts/by-job/{job_id}/download"
+            "?file=reports/pr_audit_report.html"
+        )
+        artifact_link = f"\n<{html_url}|View full HTML report>"
 
     header = (
         f":mag: *PR Audit* -- {repo or 'repo'}"
@@ -89,7 +93,8 @@ def main() -> None:
     thread_ts = config.get("SLACK_THREAD_TS") or None
     slack_ok = post_report(config, slack_text, report_text,
                            title=title, filename="pr_audit_report.html",
-                           thread_ts=thread_ts)
+                           thread_ts=thread_ts,
+                           artifact_path="reports/pr_audit_report.html")
 
     result = {
         "status": "OK" if slack_ok else "SLACK_FAILED",

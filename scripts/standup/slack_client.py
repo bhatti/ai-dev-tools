@@ -148,7 +148,16 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
         return False
     data = resp.json()
     if not data.get("ok"):
-        print(f"[slack] getUploadURLExternal error: {data.get('error', 'unknown')}", file=sys.stderr, flush=True)
+        err = data.get("error", "unknown")
+        if err == "missing_scope":
+            print(
+                "[slack] file upload failed: Slack bot token missing 'files:write' scope. "
+                "Add it at api.slack.com/apps → OAuth & Permissions → Bot Token Scopes → files:write, "
+                "then reinstall the app to your workspace.",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            print(f"[slack] getUploadURLExternal error: {err}", file=sys.stderr, flush=True)
         return False
     upload_url = data["upload_url"]
     file_id = data["file_id"]
@@ -451,22 +460,30 @@ def post_message(config: dict, text: str, channel: str | None = None,
 def post_report(config: dict, slack_text: str, md_text: str,
                 title: str, filename: str,
                 thread_ts: str | None = None,
-                channel: str | None = None) -> bool:
+                channel: str | None = None,
+                artifact_path: str | None = None) -> bool:
     """Post a mrkdwn report to Slack and upload an HTML version in the same thread.
 
     The HTML upload is non-fatal — if it fails the function still returns True as long
-    as the text message was posted successfully.
+    as the text message was posted successfully.  When upload fails and FORMICARY_PUBLIC_URL
+    + JOB_ID are set, posts a direct download link as a fallback threaded message.
 
     Args:
-        slack_text: Pre-formatted mrkdwn text (from format_for_slack).
-        md_text:    Original markdown source used to render the HTML.
-        title:      HTML page <title> and <h1>.
-        filename:   Slack display name for the uploaded file (e.g. "audit_report.html").
-        thread_ts:  Existing thread to reply into. When None, the text message creates a
-                    new top-level post and the HTML is threaded to that new message's ts.
+        slack_text:    Pre-formatted mrkdwn text (from format_for_slack).
+        md_text:       Original markdown source used to render the HTML.
+        title:         HTML page <title> and <h1>.
+        filename:      Slack display name for the uploaded file (e.g. "audit_report.html").
+        thread_ts:     Existing thread to reply into.  When None, the text message creates a
+                       new top-level post and the HTML is threaded to that new message's ts.
+        artifact_path: Path of the file inside the artifact zip
+                       (e.g. "reports/pr_audit_report.html").  Defaults to
+                       ``reports/<filename>`` which matches the standard job artifact layout.
+                       Set this explicitly when the display name differs from the zip path.
     """
     from scripts.common.report_renderer import render_simple_html
     import tempfile, os
+
+    zip_path = artifact_path or f"reports/{filename}"
 
     msg_ts = _post_message_ts(config, slack_text, channel=channel, thread_ts=thread_ts)
     if not msg_ts:
@@ -495,14 +512,18 @@ def post_report(config: dict, slack_text: str, md_text: str,
     except Exception as e:
         print(f"[slack] HTML render/upload error for '{filename}' (non-fatal): {e}", flush=True)
 
-    # Fallback: post artifact link as a threaded message when upload failed
+    # Fallback: post a direct HTML download link when upload fails.
+    # Uses the job-based artifact endpoint (stable at post time — artifact SHA256 is
+    # not known until after the pod exits, but job_id is available immediately).
     if not upload_ok:
         public_url = (config.get("FORMICARY_PUBLIC_URL") or "").rstrip("/")
         job_id = config.get("JOB_ID") or ""
         if public_url and job_id:
-            fallback_text = (
-                f"📎 Full report: <{public_url}/dashboard/jobs/requests/{job_id}|View in Formicary>"
+            html_link = (
+                f"{public_url}/dashboard/artifacts/by-job/{job_id}/download"
+                f"?file={zip_path}"
             )
+            fallback_text = f"📎 Full report: <{html_link}|{filename}>"
             _post_message_ts(config, fallback_text, channel=channel,
                              thread_ts=upload_thread_ts)
 
