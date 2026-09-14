@@ -121,7 +121,7 @@ def get_standup_messages(config: dict, lookback_hours: int = 26) -> list[dict]:
 
 
 def upload_file(config: dict, file_path: str, filename: str, channel: str | None = None,
-                initial_comment: str = "") -> bool:
+                initial_comment: str = "", thread_ts: str = "") -> bool:
     """Upload a file to Slack using the v2 upload API (getUploadURLExternal flow).
 
     Requires the files:write scope.
@@ -177,6 +177,8 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
     }
     if initial_comment:
         complete_payload["initial_comment"] = initial_comment
+    if thread_ts:
+        complete_payload["thread_ts"] = thread_ts
 
     complete_resp = requests.post(
         "https://slack.com/api/files.completeUploadExternal",
@@ -398,28 +400,19 @@ def build_gh_issue_blocks(title: str, issues: list) -> list:
     return blocks
 
 
-def post_message(config: dict, text: str, channel: str | None = None,
-                 thread_ts: str | None = None,
-                 blocks: list | None = None) -> bool:
-    """Post a message to Slack. Returns True on success, False (no exception) on failure.
-
-    If thread_ts is provided (or SLACK_THREAD_TS is set in config), the message
-    is posted as a thread reply instead of to the channel root.
-
-    If blocks is provided, it is sent as the Block Kit payload alongside text (used as
-    the fallback for notifications). When blocks is None, the message is plain mrkdwn.
-    """
+def _post_message_ts(config: dict, text: str, channel: str | None = None,
+                     thread_ts: str | None = None,
+                     blocks: list | None = None) -> str | None:
+    """Send chat.postMessage and return the message ts on success, None on failure."""
     token = config.get("SLACK_BOT_TOKEN", "")
     if not token:
-        print("[slack] SLACK_BOT_TOKEN not set — cannot post brief", flush=True)
-        return False
+        print("[slack] SLACK_BOT_TOKEN not set — cannot post message", flush=True)
+        return None
 
     ch = channel or config.get("SLACK_CHANNEL", "")
     if not ch:
         print("[slack] no channel set — skipping post_message", flush=True)
-        return False
-    # Slack's chat.postMessage accepts channel IDs (C0ABC123) and names (general) directly.
-    # Do NOT prepend '#' — channel IDs with '#' are invalid and cause channel_not_found.
+        return None
     ch = ch.lstrip("#")
 
     payload: dict = {"channel": ch, "text": text, "unfurl_links": False, "mrkdwn": True}
@@ -437,13 +430,69 @@ def post_message(config: dict, text: str, channel: str | None = None,
     )
     if not resp.ok:
         print(f"[slack] post_message HTTP {resp.status_code}", file=sys.stderr, flush=True)
-        return False
+        return None
     data = resp.json()
     if not data.get("ok"):
         print(f"[slack] post_message error: {data.get('error', 'unknown')}", file=sys.stderr, flush=True)
-        return False
+        return None
     dest = f"{ch} (thread)" if ts else ch
-    print(f"[slack] brief posted to {dest}", flush=True)
+    print(f"[slack] message posted to {dest}", flush=True)
+    return data.get("ts", "")
+
+
+def post_message(config: dict, text: str, channel: str | None = None,
+                 thread_ts: str | None = None,
+                 blocks: list | None = None) -> bool:
+    """Post a message to Slack. Returns True on success, False (no exception) on failure."""
+    return _post_message_ts(config, text, channel=channel,
+                            thread_ts=thread_ts, blocks=blocks) is not None
+
+
+def post_report(config: dict, slack_text: str, md_text: str,
+                title: str, filename: str,
+                thread_ts: str | None = None,
+                channel: str | None = None) -> bool:
+    """Post a mrkdwn report to Slack and upload an HTML version in the same thread.
+
+    The HTML upload is non-fatal — if it fails the function still returns True as long
+    as the text message was posted successfully.
+
+    Args:
+        slack_text: Pre-formatted mrkdwn text (from format_for_slack).
+        md_text:    Original markdown source used to render the HTML.
+        title:      HTML page <title> and <h1>.
+        filename:   Slack display name for the uploaded file (e.g. "audit_report.html").
+        thread_ts:  Existing thread to reply into. When None, the text message creates a
+                    new top-level post and the HTML is threaded to that new message's ts.
+    """
+    from scripts.common.report_renderer import render_simple_html
+    import tempfile, os
+
+    msg_ts = _post_message_ts(config, slack_text, channel=channel, thread_ts=thread_ts)
+    if not msg_ts:
+        return False
+
+    # Thread the HTML to whichever ts is the conversation anchor:
+    # - if replying into an existing thread, use the original thread_ts
+    # - if posting to channel root, use the ts of the message just posted
+    upload_thread_ts = thread_ts or msg_ts
+
+    try:
+        html = render_simple_html(title, md_text)
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w",
+                                        encoding="utf-8") as fh:
+            fh.write(html)
+            tmp_path = fh.name
+        try:
+            upload_ok = upload_file(config, tmp_path, filename,
+                                    channel=channel, thread_ts=upload_thread_ts)
+            if not upload_ok:
+                print(f"[slack] HTML upload failed for '{filename}' (non-fatal)", flush=True)
+        finally:
+            os.unlink(tmp_path)
+    except Exception as e:
+        print(f"[slack] HTML render/upload error for '{filename}' (non-fatal): {e}", flush=True)
+
     return True
 
 

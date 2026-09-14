@@ -28,7 +28,7 @@ from datetime import date
 import re
 
 from scripts.common.config import load_config, get_workspace_dir
-from scripts.standup.slack_client import post_message
+from scripts.standup.slack_client import post_report
 
 
 _SLACK_TEXT_LIMIT = 39_000  # Slack chat.postMessage text field cap is 40,000
@@ -127,7 +127,9 @@ def main() -> None:
     slack_text = _format_for_slack(full_message)
     (reports_dir / "slack_message.txt").write_text(slack_text)
     thread_ts = config.get("SLACK_THREAD_TS") or None
-    slack_ok = post_message(config, slack_text, thread_ts=thread_ts)
+    slack_ok = post_report(config, slack_text, report_text,
+                           title="Daily Standup", filename="standup_report.html",
+                           thread_ts=thread_ts)
 
     post_result = {
         "status": "DONE",

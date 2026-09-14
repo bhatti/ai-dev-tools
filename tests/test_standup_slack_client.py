@@ -7,7 +7,8 @@ import pytest
 import scripts.standup.slack_client as _sc
 from scripts.standup.slack_client import (
     build_issue_blocks, build_mrkdwn_blocks, build_pr_blocks,
-    get_standup_messages, notify, post_message, resolve_channel_id, upload_file,
+    get_standup_messages, notify, post_message, post_report,
+    resolve_channel_id, upload_file,
 )
 
 
@@ -111,7 +112,9 @@ def test_post_message_no_token(config_no_slack):
 
 @patch("scripts.standup.slack_client.requests.post")
 def test_post_message_success(mock_post, config_with_slack):
-    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000001.000100"}
+    )
     ok = post_message(config_with_slack, "📋 *Standup Brief*")
     assert ok is True
     assert mock_post.call_args.kwargs["json"]["channel"] == "standup"
@@ -122,6 +125,14 @@ def test_post_message_slack_error(mock_post, config_with_slack):
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": False, "error": "channel_not_found"})
     ok = post_message(config_with_slack, "hello")
     assert ok is False
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_message_success_missing_ts_still_returns_true(mock_post, config_with_slack):
+    """post_message returns True even when response lacks ts (shouldn't happen, but defensive)."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+    ok = post_message(config_with_slack, "hello")
+    assert ok is True
 
 
 # ---------------------------------------------------------------------------
@@ -397,3 +408,134 @@ def test_build_pr_blocks_shows_priority_and_labels():
     assert "🟠" in all_text
     assert "`2609-release`" in all_fields
     assert "`backend`" in all_fields
+
+
+# ---------------------------------------------------------------------------
+# upload_file with thread_ts
+# ---------------------------------------------------------------------------
+
+@patch("scripts.standup.slack_client.requests.get")
+@patch("scripts.standup.slack_client.requests.put")
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_file_thread_ts_forwarded(mock_post, mock_put, mock_get, config_with_slack, tmp_workspace):
+    """thread_ts is included in the completeUploadExternal payload."""
+    html_file = tmp_workspace / "report.html"
+    html_file.write_text("<html/>")
+
+    mock_get.return_value = MagicMock(ok=True, json=lambda: {
+        "ok": True,
+        "channels": [{"id": "C123", "name": "standup"}],
+        "response_metadata": {"next_cursor": ""},
+    })
+    mock_post.side_effect = [
+        MagicMock(ok=True, json=lambda: {"ok": True, "upload_url": "https://upload.example/v1", "file_id": "F999"}),
+        MagicMock(ok=True, json=lambda: {"ok": True}),
+    ]
+    mock_put.return_value = MagicMock(ok=True)
+
+    ok = upload_file(config_with_slack, str(html_file), "audit_report.html",
+                     thread_ts="1700000001.000100")
+    assert ok is True
+    complete_payload = mock_post.call_args_list[1].kwargs["json"]
+    assert complete_payload.get("thread_ts") == "1700000001.000100"
+
+
+@patch("scripts.standup.slack_client.requests.get")
+@patch("scripts.standup.slack_client.requests.put")
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_file_no_thread_ts(mock_post, mock_put, mock_get, config_with_slack, tmp_workspace):
+    """thread_ts is omitted from completeUploadExternal when not provided."""
+    html_file = tmp_workspace / "report.html"
+    html_file.write_text("<html/>")
+
+    mock_get.return_value = MagicMock(ok=True, json=lambda: {
+        "ok": True,
+        "channels": [{"id": "C123", "name": "standup"}],
+        "response_metadata": {"next_cursor": ""},
+    })
+    mock_post.side_effect = [
+        MagicMock(ok=True, json=lambda: {"ok": True, "upload_url": "https://upload.example/v1", "file_id": "F000"}),
+        MagicMock(ok=True, json=lambda: {"ok": True}),
+    ]
+    mock_put.return_value = MagicMock(ok=True)
+
+    ok = upload_file(config_with_slack, str(html_file), "audit_report.html")
+    assert ok is True
+    complete_payload = mock_post.call_args_list[1].kwargs["json"]
+    assert "thread_ts" not in complete_payload
+
+
+# ---------------------------------------------------------------------------
+# post_report
+# ---------------------------------------------------------------------------
+
+@patch("scripts.standup.slack_client.upload_file", return_value=True)
+@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_success(mock_post, mock_render, mock_upload, config_with_slack):
+    """post_report posts text, renders HTML, uploads file, returns True."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000005.000200"}
+    )
+
+    ok = post_report(config_with_slack, "slack text", "# md text",
+                     title="My Report", filename="report.html")
+    assert ok is True
+    mock_render.assert_called_once_with("My Report", "# md text")
+    assert mock_upload.call_count == 1
+    # HTML must be threaded to the new message's ts (no existing thread)
+    _, upload_kwargs = mock_upload.call_args
+    assert upload_kwargs.get("thread_ts") == "1700000005.000200"
+
+
+@patch("scripts.standup.slack_client.upload_file", return_value=True)
+@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_existing_thread_ts(mock_post, mock_render, mock_upload, config_with_slack):
+    """When an existing thread_ts is passed, the upload threads to that ts."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000009.000001"}
+    )
+
+    ok = post_report(config_with_slack, "slack text", "# md",
+                     title="Report", filename="report.html",
+                     thread_ts="1700000001.000001")
+    assert ok is True
+    _, upload_kwargs = mock_upload.call_args
+    assert upload_kwargs.get("thread_ts") == "1700000001.000001"
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_text_fails_returns_false(mock_post, config_with_slack):
+    """post_report returns False when the text post fails."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": False, "error": "channel_not_found"})
+    ok = post_report(config_with_slack, "text", "# md",
+                     title="Report", filename="report.html")
+    assert ok is False
+
+
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_upload_fails_is_nonfatal(mock_post, mock_render, mock_upload, config_with_slack):
+    """Upload failure is non-fatal — post_report still returns True."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000010.000001"}
+    )
+
+    ok = post_report(config_with_slack, "text", "# md",
+                     title="Report", filename="report.html")
+    assert ok is True  # text posted OK → True despite upload failure
+
+
+@patch("scripts.common.report_renderer.render_simple_html", side_effect=RuntimeError("render error"))
+@patch("scripts.standup.slack_client.requests.post")
+def test_post_report_render_exception_is_nonfatal(mock_post, mock_render, config_with_slack):
+    """HTML render exception is non-fatal — post_report still returns True."""
+    mock_post.return_value = MagicMock(
+        ok=True, json=lambda: {"ok": True, "ts": "1700000011.000001"}
+    )
+
+    ok = post_report(config_with_slack, "text", "# md",
+                     title="Report", filename="report.html")
+    assert ok is True

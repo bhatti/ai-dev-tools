@@ -32,7 +32,7 @@ SYNTH_RESULT = {
 }
 
 
-@patch("scripts.standup.post.post_message", return_value=True)
+@patch("scripts.standup.post.post_report", return_value=True)
 def test_main_writes_report_and_posts(mock_post, tmp_workspace, monkeypatch):
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
 
@@ -59,7 +59,7 @@ def test_main_writes_report_and_posts(mock_post, tmp_workspace, monkeypatch):
     assert "Alice" in mock_post.call_args.args[1]
 
 
-@patch("scripts.standup.post.post_message", return_value=False)
+@patch("scripts.standup.post.post_report", return_value=False)
 def test_main_still_succeeds_when_slack_fails(mock_post, tmp_workspace, monkeypatch):
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
 
@@ -85,7 +85,7 @@ def test_main_exits_1_when_no_brief(tmp_workspace, monkeypatch):
     assert exc_info.value.code == 1
 
 
-@patch("scripts.standup.post.post_message", return_value=True)
+@patch("scripts.standup.post.post_report", return_value=True)
 def test_main_no_risk_report(mock_post, tmp_workspace, monkeypatch):
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
 
@@ -102,7 +102,7 @@ def test_main_no_risk_report(mock_post, tmp_workspace, monkeypatch):
     assert "Full Risk Report" not in report
 
 
-@patch("scripts.standup.post.post_message", return_value=True)
+@patch("scripts.standup.post.post_report", return_value=True)
 def test_slack_text_is_plain_text(mock_post, tmp_workspace, monkeypatch):
     """Slack brief must have no markdown bold/italic syntax."""
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))

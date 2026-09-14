@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.slack_format import format_for_slack, SLACK_TEXT_LIMIT
-from scripts.standup.slack_client import post_message
+from scripts.common.slack_format import format_for_slack
+from scripts.standup.slack_client import post_report
 
 
 def main() -> None:
@@ -83,10 +83,13 @@ def main() -> None:
         + "\n\n"
     )
 
-    # --- Format and post ---
+    # --- Format and post with HTML attachment ---
+    title = f"PR Audit — {repo or 'repo'}" + (f" @ {branch}" if branch else "")
     slack_text = format_for_slack(header + report_text)
-    thread_ts = config.get("SLACK_THREAD_TS", "")
-    slack_ok = post_message(config, slack_text, thread_ts=thread_ts)
+    thread_ts = config.get("SLACK_THREAD_TS") or None
+    slack_ok = post_report(config, slack_text, report_text,
+                           title=title, filename="pr_audit_report.html",
+                           thread_ts=thread_ts)
 
     result = {
         "status": "OK" if slack_ok else "SLACK_FAILED",
