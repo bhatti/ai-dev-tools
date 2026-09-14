@@ -79,13 +79,17 @@ class TestParseSlackFlags:
         result = _parse_slack_flags({"SLACK_MESSAGE": "audit team:alice,bob"})
         assert result["team_members"] == "alice,bob"
 
+    def test_board_flag_with_id(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 123"})
+        assert result["jira_boards"] == "123"
+
+    def test_board_flag_no_id_returns_default_sentinel(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board"})
+        assert result["jira_boards"] == "__default__"
+
     def test_board_colon_syntax(self):
         result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit board:123"})
         assert result["jira_boards"] == "123"
-
-    def test_board_slash_syntax(self):
-        result = _parse_slack_flags({"SLACK_MESSAGE": "board/456"})
-        assert result["jira_boards"] == "456"
 
     def test_board_url_path(self):
         result = _parse_slack_flags({"SLACK_MESSAGE": "https://company.atlassian.net/jira/software/c/projects/PROJ/boards/789"})

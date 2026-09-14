@@ -2221,6 +2221,68 @@ def test_20_adhoc_ask(base_env: dict[str, str]) -> TestResult:
                  f"MODEL={model} elapsed={step.elapsed:.0f}s")
 
 
+def test_21_pr_audit_slack_routing(base_env: dict[str, str]) -> TestResult:
+    """Verify that filter flags in SLACK_MESSAGE are parsed correctly in the pod.
+
+    This tests the critical routing fix: --board / --team / --milestone flags
+    passed as trailing Slack text (RepoUrl) must reach run_pr_audit via SLACK_MESSAGE,
+    not be treated as git repo URLs.  Uses a pure Python check — no Claude call needed.
+    """
+    result = TestResult("pr-audit-slack-routing")
+    env = dict(base_env)
+    ws = "/workspace/pr_audit_routing"
+    env["WORKSPACE_DIR"] = ws
+
+    with pod_fixture("pr-audit-routing") as pod:
+        verify_cmd = (
+            "python3 - <<'PYEOF'\n"
+            "import sys, os, re\n"
+            "sys.path.insert(0, '/app')\n"
+            "from scripts.analyze.run_pr_audit import _parse_slack_flags\n"
+            "issues = []\n"
+            "\n"
+            "# --board 123 → jira_boards='123'\n"
+            "r = _parse_slack_flags({'SLACK_MESSAGE': 'pr-audit --board 123'})\n"
+            "if r['jira_boards'] != '123': issues.append(f'--board 123 got jira_boards={r[\"jira_boards\"]!r}')\n"
+            "\n"
+            "# --board (no ID) → sentinel '__default__'\n"
+            "r = _parse_slack_flags({'SLACK_MESSAGE': 'pr-audit --board'})\n"
+            "if r['jira_boards'] != '__default__': issues.append(f'bare --board got {r[\"jira_boards\"]!r}, expected __default__')\n"
+            "\n"
+            "# --team alice,bob → team_members\n"
+            "r = _parse_slack_flags({'SLACK_MESSAGE': '--team alice,bob'})\n"
+            "if r['team_members'] != 'alice,bob': issues.append(f'--team got {r[\"team_members\"]!r}')\n"
+            "\n"
+            "# --milestone v2.5 → gh_milestone\n"
+            "r = _parse_slack_flags({'SLACK_MESSAGE': '--milestone v2.5'})\n"
+            "if r['gh_milestone'] != 'v2.5': issues.append(f'--milestone got {r[\"gh_milestone\"]!r}')\n"
+            "\n"
+            "# Jira board URL → jira_boards\n"
+            "r = _parse_slack_flags({'SLACK_MESSAGE': 'https://example.atlassian.net/jira/software/c/projects/PROJ/boards/456'})\n"
+            "if r['jira_boards'] != '456': issues.append(f'board URL got {r[\"jira_boards\"]!r}')\n"
+            "\n"
+            "# board: legacy syntax still works\n"
+            "r = _parse_slack_flags({'SLACK_MESSAGE': 'pr-audit board:789'})\n"
+            "if r['jira_boards'] != '789': issues.append(f'board:id got {r[\"jira_boards\"]!r}')\n"
+            "\n"
+            "if issues:\n"
+            "    print('ROUTING ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+            "print('::add-task-context PR_AUDIT_ROUTING_OK::yes')\n"
+            "print('All routing checks passed')\n"
+            "PYEOF"
+        )
+        step = exec_step(pod, "pr-audit-routing-check", verify_cmd, env, timeout=30)
+        result.steps.append(step)
+
+    if not step.ok:
+        return _fail(result, step, f"routing check failed: {step.stderr[-500:]}")
+    routing_ok = step.context.get("PR_AUDIT_ROUTING_OK", "")
+    if routing_ok != "yes":
+        return _fail(result, step, "PR_AUDIT_ROUTING_OK marker not emitted")
+    return _pass(result, "all SLACK_MESSAGE routing checks passed")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -2244,6 +2306,7 @@ ALL_TESTS: dict[str, callable] = {
     "pr-audit-slack-model":  test_18_pr_audit_slack_model,
     "learn-gh":              test_19_learn_gh,
     "adhoc-ask":             test_20_adhoc_ask,
+    "pr-audit-slack-routing": test_21_pr_audit_slack_routing,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

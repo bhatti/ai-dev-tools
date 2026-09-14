@@ -83,7 +83,8 @@ def _parse_slack_flags(config: dict) -> dict:
       model: claude-opus-5
       --team alice,bob               (filter by GitHub logins or Jira display names)
       team:alice,bob
-      board:<id>                     (filter by Jira board ID — numeric)
+      --board <id>                   (filter by Jira board ID — numeric; resolves active sprint)
+      --board                        (bare --board uses JIRA_BOARDS org config)
       https://company.atlassian.net/jira/software/c/projects/X/boards/<id>
       --milestone v2.5               (filter by GitHub milestone)
 
@@ -124,12 +125,17 @@ def _parse_slack_flags(config: dict) -> dict:
     if m:
         team_members = m.group(1).strip()
 
-    # Jira board ID: bare board:<id>  OR  from Jira board URL .../boards/<id>
-    m = re.search(r"\bboard[:/]\s*(\d+)", msg, re.IGNORECASE)
-    if not m:
-        m = re.search(r"boards/(\d+)", msg)
+    # Jira board ID: --board [<id>] | board:<id> | Jira board URL .../boards/<id>
+    # Bare --board (no ID) signals "use JIRA_BOARDS org config" → sentinel "__default__"
+    m = re.search(r"--board(?:\s+(\d+))?(?=\s|$)", msg, re.IGNORECASE)
     if m:
-        jira_boards = m.group(1)
+        jira_boards = m.group(1) if m.group(1) else "__default__"
+    else:
+        m = re.search(r"\bboard:\s*(\d+)", msg, re.IGNORECASE)
+        if not m:
+            m = re.search(r"boards/(\d+)", msg)
+        if m:
+            jira_boards = m.group(1)
 
     # GitHub milestone: --milestone <name>
     m = re.search(r"--milestone\s+(\S+)", msg, re.IGNORECASE)
@@ -519,9 +525,16 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         config["PR_AUDIT_TEAM_MEMBERS"] = slack_flags["team_members"]
         print(f"[pr-audit] Slack override: team={slack_flags['team_members']}", flush=True)
     if slack_flags["jira_boards"]:
-        os.environ["PR_AUDIT_JIRA_BOARDS"] = slack_flags["jira_boards"]
-        config["PR_AUDIT_JIRA_BOARDS"] = slack_flags["jira_boards"]
-        print(f"[pr-audit] Slack override: jira_boards={slack_flags['jira_boards']}", flush=True)
+        board_val = slack_flags["jira_boards"]
+        if board_val == "__default__":
+            # --board with no ID → fall back to JIRA_BOARDS org config (same key standup uses)
+            board_val = config.get("JIRA_BOARDS", "")
+            if not board_val:
+                print("[pr-audit] --board used but JIRA_BOARDS org config not set", flush=True)
+        if board_val:
+            os.environ["PR_AUDIT_JIRA_BOARDS"] = board_val
+            config["PR_AUDIT_JIRA_BOARDS"] = board_val
+            print(f"[pr-audit] Slack override: jira_boards={board_val}", flush=True)
     if slack_flags["gh_milestone"]:
         os.environ["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
         config["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
