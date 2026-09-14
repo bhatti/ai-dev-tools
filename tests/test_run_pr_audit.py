@@ -69,6 +69,47 @@ class TestParseSlackFlags:
         result = _parse_slack_flags({"SLACK_MESSAGE": "audit https://example.com/something"})
         assert result["pr_urls"] == []
 
+    # --- team / board / milestone filtering ---
+
+    def test_team_flag_dash_dash(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr audit --team alice,bob"})
+        assert result["team_members"] == "alice,bob"
+
+    def test_team_colon_syntax(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "audit team:alice,bob"})
+        assert result["team_members"] == "alice,bob"
+
+    def test_board_colon_syntax(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit board:123"})
+        assert result["jira_boards"] == "123"
+
+    def test_board_slash_syntax(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "board/456"})
+        assert result["jira_boards"] == "456"
+
+    def test_board_url_path(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "https://company.atlassian.net/jira/software/c/projects/PROJ/boards/789"})
+        assert result["jira_boards"] == "789"
+
+    def test_milestone_flag(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "audit --milestone v2.5"})
+        assert result["gh_milestone"] == "v2.5"
+
+    def test_empty_message_new_keys_present(self):
+        result = _parse_slack_flags({})
+        assert "team_members" in result
+        assert "jira_boards" in result
+        assert "gh_milestone" in result
+        assert result["team_members"] is None
+        assert result["jira_boards"] is None
+        assert result["gh_milestone"] is None
+
+    def test_combined_team_and_milestone(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "audit last 20 prs --team alice --milestone sprint-3"})
+        assert result["n_prs"] == 20
+        assert result["team_members"] == "alice"
+        assert result["gh_milestone"] == "sprint-3"
+
 
 class TestPromptTemplate:
     def test_template_renders(self):

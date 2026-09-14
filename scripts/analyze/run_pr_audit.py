@@ -81,12 +81,18 @@ def _parse_slack_flags(config: dict) -> dict:
       https://bitbucket.org/ws/repo/pull-requests/456
       --model claude-opus-5
       model: claude-opus-5
+      --team alice,bob               (filter by GitHub logins or Jira display names)
+      team:alice,bob
+      board:<id>                     (filter by Jira board ID — numeric)
+      https://company.atlassian.net/jira/software/c/projects/X/boards/<id>
+      --milestone v2.5               (filter by GitHub milestone)
 
-    Returns dict with keys: n_prs, focus, pr_urls, model (None/[] if not found).
+    Returns dict with keys: n_prs, focus, pr_urls, model, team_members, jira_boards, gh_milestone.
     """
     msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
     if not msg:
-        return {"n_prs": None, "focus": None, "pr_urls": [], "model": None}
+        return {"n_prs": None, "focus": None, "pr_urls": [], "model": None,
+                "team_members": None, "jira_boards": None, "gh_milestone": None}
 
     msg_lower = msg.lower()
 
@@ -94,6 +100,9 @@ def _parse_slack_flags(config: dict) -> dict:
     focus: str | None = None
     model: str | None = None
     pr_urls: list[str] = []
+    team_members: str | None = None
+    jira_boards: str | None = None
+    gh_milestone: str | None = None
 
     m = re.search(r"(?:last\s+)?(\d+)\s+prs?|--n-prs\s+(\d+)", msg_lower)
     if m:
@@ -110,6 +119,23 @@ def _parse_slack_flags(config: dict) -> dict:
     if m:
         model = m.group(1) or m.group(2)
 
+    # Team filter: --team alice,bob  OR  team:alice,bob
+    m = re.search(r"(?:--team|team:)\s*([\w,@\-\.]+)", msg, re.IGNORECASE)
+    if m:
+        team_members = m.group(1).strip()
+
+    # Jira board ID: bare board:<id>  OR  from Jira board URL .../boards/<id>
+    m = re.search(r"\bboard[:/]\s*(\d+)", msg, re.IGNORECASE)
+    if not m:
+        m = re.search(r"boards/(\d+)", msg)
+    if m:
+        jira_boards = m.group(1)
+
+    # GitHub milestone: --milestone <name>
+    m = re.search(r"--milestone\s+(\S+)", msg, re.IGNORECASE)
+    if m:
+        gh_milestone = m.group(1).strip()
+
     # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
     for token in re.findall(r"https?://\S+", msg):
         token = token.rstrip(".,;)")
@@ -119,7 +145,8 @@ def _parse_slack_flags(config: dict) -> dict:
         except ValueError:
             pass
 
-    return {"n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model}
+    return {"n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
+            "team_members": team_members, "jira_boards": jira_boards, "gh_milestone": gh_milestone}
 
 
 # -- Markers -------------------------------------------------------------------
@@ -487,6 +514,18 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     if slack_flags["model"]:
         config["AI_MODEL"] = slack_flags["model"]
         print(f"[pr-audit] Slack override: model={slack_flags['model']}", flush=True)
+    if slack_flags["team_members"]:
+        os.environ["PR_AUDIT_TEAM_MEMBERS"] = slack_flags["team_members"]
+        config["PR_AUDIT_TEAM_MEMBERS"] = slack_flags["team_members"]
+        print(f"[pr-audit] Slack override: team={slack_flags['team_members']}", flush=True)
+    if slack_flags["jira_boards"]:
+        os.environ["PR_AUDIT_JIRA_BOARDS"] = slack_flags["jira_boards"]
+        config["PR_AUDIT_JIRA_BOARDS"] = slack_flags["jira_boards"]
+        print(f"[pr-audit] Slack override: jira_boards={slack_flags['jira_boards']}", flush=True)
+    if slack_flags["gh_milestone"]:
+        os.environ["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
+        config["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
+        print(f"[pr-audit] Slack override: milestone={slack_flags['gh_milestone']}", flush=True)
     # Combine PR URLs: CLI flag + Slack message + PR_URLS env var (space/comma separated)
     pr_urls_env = [u.strip() for u in re.split(r"[\s,]+", os.environ.get("PR_URLS", "")) if u.strip()]
     all_pr_urls = list(pr_urls) + slack_flags["pr_urls"] + pr_urls_env

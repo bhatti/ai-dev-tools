@@ -1624,7 +1624,7 @@ def test_15_create_skill_pr_jira(base_env: dict[str, str]) -> TestResult:
     bb_token = base_env.get("BITBUCKET_TOKEN", "")
     bb_workspace = base_env.get("BITBUCKET_WORKSPACE", os.environ.get("BITBUCKET_WORKSPACE", ""))
     bb_repo = base_env.get("BITBUCKET_REPO", os.environ.get("BITBUCKET_REPO", ""))
-    bb_username = base_env.get("BITBUCKET_USERNAME", os.environ.get("BITBUCKET_USERNAME", "sbhatti@cribl.io"))
+    bb_username = base_env.get("BITBUCKET_USERNAME", os.environ.get("BITBUCKET_USERNAME", "user@example.com"))
 
     if not bb_token or not bb_workspace or not bb_repo:
         result.passed = True
@@ -1805,7 +1805,7 @@ def test_16_respond_comments_jira(base_env: dict[str, str]) -> TestResult:
         "python3 -c \""
         "import os; "
         "from scripts.common.git_utils import get_bitbucket_git_username; "
-        "config = {'BITBUCKET_TOKEN': os.environ['BITBUCKET_TOKEN'], 'BITBUCKET_USERNAME': 'sbhatti@cribl.io'}; "
+        "config = {'BITBUCKET_TOKEN': os.environ['BITBUCKET_TOKEN'], 'BITBUCKET_USERNAME': 'user@example.com'}; "
         "u = get_bitbucket_git_username(config); "
         "print(f'git_username={u}'); "
         "assert u == 'x-token-auth', f'Expected x-token-auth, got {u}'; "
@@ -1818,7 +1818,7 @@ def test_16_respond_comments_jira(base_env: dict[str, str]) -> TestResult:
         "python3 -c \""
         "import os, shutil; "
         "from scripts.common.git_utils import clone_repo, detect_bitbucket_url, get_bitbucket_git_username; "
-        "config = {'BITBUCKET_TOKEN': os.environ['BITBUCKET_TOKEN'], 'BITBUCKET_USERNAME': 'sbhatti@cribl.io'}; "
+        "config = {'BITBUCKET_TOKEN': os.environ['BITBUCKET_TOKEN'], 'BITBUCKET_USERNAME': 'user@example.com'}; "
         "username = get_bitbucket_git_username(config); "
         "token = config['BITBUCKET_TOKEN']; "
         "url = detect_bitbucket_url(os.environ['BITBUCKET_WORKSPACE'], os.environ['BITBUCKET_REPO'], use_ssh=False); "

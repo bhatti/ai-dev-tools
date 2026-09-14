@@ -10,6 +10,7 @@ from scripts.analyze.pr_fetcher import (
     KNOWN_BOTS,
     _fetch_single_bb_pr,
     _fetch_single_gh_pr,
+    _filter_by_team,
     build_pr_context,
     classify_comments,
     fetch_github_prs,
@@ -291,6 +292,7 @@ class TestFetchGithubPrs:
         assert prs[0]["author"] == "alice"
         assert prs[0]["files_changed"] == 2
         assert prs[0]["review_decision"] == "APPROVED"
+        assert prs[0]["state"] == "merged"
 
     @patch("scripts.analyze.pr_fetcher.subprocess.run")
     def test_missing_config(self, mock_run):
@@ -346,6 +348,7 @@ class TestFetchSingleGhPr:
         assert "substantive_human_comment_count" in pr
         assert "rubber_stamp_approvers" in pr
         assert "is_bot_authored" in pr
+        assert pr["state"] == "merged"
 
     @patch("scripts.analyze.pr_fetcher.subprocess.run")
     def test_missing_config_returns_none(self, mock_run):
@@ -371,13 +374,14 @@ class TestFetchSingleBbPr:
         import requests as _requests
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "id": 45974,
-            "title": "CRIBL-44279: Deleting already revoked tokens",
+            "id": 101,
+            "title": "PROJ-1234: Fix token deletion flow",
             "description": "Fixes token deletion flow",
-            "author": {"display_name": "Goatbot", "nickname": "goatbot"},
+            "state": "MERGED",
+            "author": {"display_name": "deploybot", "nickname": "deploybot"},
             "updated_on": "2026-08-24T15:41:01Z",
-            "links": {"html": {"href": "https://bitbucket.org/cribl/cribl/pull-requests/45974"}},
-            "source": {"branch": {"name": "goatbot/CRIBL-44279"}},
+            "links": {"html": {"href": "https://bitbucket.org/myworkspace/myrepo/pull-requests/101"}},
+            "source": {"branch": {"name": "deploybot/PROJ-1234"}},
             "participants": [
                 {"user": {"display_name": "Alice"}, "approved": True, "role": "REVIEWER"},
                 {"user": {"display_name": "Bob"}, "approved": False, "role": "REVIEWER"},
@@ -387,17 +391,17 @@ class TestFetchSingleBbPr:
 
         with patch("requests.get", return_value=mock_resp):
             config = {
-                "BITBUCKET_WORKSPACE": "cribl",
-                "BITBUCKET_REPO": "cribl",
+                "BITBUCKET_WORKSPACE": "myworkspace",
+                "BITBUCKET_REPO": "myrepo",
                 "BITBUCKET_USERNAME": "user",
                 "BITBUCKET_TOKEN": "token",
             }
-            pr = _fetch_single_bb_pr(config, 45974)
+            pr = _fetch_single_bb_pr(config, 101)
 
         assert pr is not None
-        assert pr["number"] == 45974
-        assert pr["title"] == "CRIBL-44279: Deleting already revoked tokens"
-        assert pr["author"] == "Goatbot"
+        assert pr["number"] == 101
+        assert pr["title"] == "PROJ-1234: Fix token deletion flow"
+        assert pr["author"] == "deploybot"
         assert pr["is_bot_authored"] is True
         assert pr["approvers"] == ["Alice"]
         assert pr["review_decision"] == "APPROVED"
@@ -405,6 +409,8 @@ class TestFetchSingleBbPr:
         assert pr["additions"] == 10
         assert "substantive_human_comment_count" in pr
         assert "rubber_stamp_approvers" in pr
+        assert pr["state"] == "merged"
+        assert pr["merged_at"] == "2026-08-24T15:41:01Z"
 
     def test_missing_config_returns_none(self):
         config = {}
@@ -444,6 +450,71 @@ class TestFetchSinglePrDispatcher:
 
 
 # ---------------------------------------------------------------------------
+# _filter_by_team
+# ---------------------------------------------------------------------------
+
+class TestFilterByTeam:
+    def _make_pr(self, author, reviewers=None, approvers=None):
+        return {
+            "author": author,
+            "human_comments": [{"author": r} for r in (reviewers or [])],
+            "approvers": approvers or [],
+        }
+
+    def test_empty_team_str_returns_all(self):
+        prs = [self._make_pr("alice"), self._make_pr("bob")]
+        assert _filter_by_team(prs, "") == prs
+
+    def test_whitespace_team_str_returns_all(self):
+        prs = [self._make_pr("alice")]
+        assert _filter_by_team(prs, "   ") == prs
+
+    def test_author_match(self):
+        prs = [self._make_pr("alice"), self._make_pr("charlie")]
+        result = _filter_by_team(prs, "alice")
+        assert len(result) == 1
+        assert result[0]["author"] == "alice"
+
+    def test_reviewer_match_via_human_comments(self):
+        prs = [
+            self._make_pr("charlie", reviewers=["alice"]),
+            self._make_pr("dave"),
+        ]
+        result = _filter_by_team(prs, "alice")
+        assert len(result) == 1
+        assert result[0]["author"] == "charlie"
+
+    def test_approver_match(self):
+        prs = [
+            self._make_pr("charlie", approvers=["alice"]),
+            self._make_pr("dave"),
+        ]
+        result = _filter_by_team(prs, "alice")
+        assert len(result) == 1
+
+    def test_no_match_excludes_pr(self):
+        prs = [self._make_pr("charlie"), self._make_pr("dave")]
+        result = _filter_by_team(prs, "alice")
+        assert result == []
+
+    def test_case_insensitive(self):
+        prs = [self._make_pr("Alice")]
+        result = _filter_by_team(prs, "alice")
+        assert len(result) == 1
+
+    def test_multiple_members(self):
+        prs = [self._make_pr("alice"), self._make_pr("bob"), self._make_pr("charlie")]
+        result = _filter_by_team(prs, "alice,bob")
+        assert len(result) == 2
+
+    def test_tracker_label_logged(self, capsys):
+        prs = [self._make_pr("alice"), self._make_pr("bob")]
+        _filter_by_team(prs, "alice", tracker="bitbucket")
+        captured = capsys.readouterr()
+        assert "bitbucket" in captured.out
+
+
+# ---------------------------------------------------------------------------
 # parse_pr_url
 # ---------------------------------------------------------------------------
 
@@ -459,9 +530,9 @@ class TestParsePrUrl:
         assert num == 123
 
     def test_bitbucket_url(self):
-        tracker, num = parse_pr_url("https://bitbucket.org/cribl/cribl/pull-requests/45974")
+        tracker, num = parse_pr_url("https://bitbucket.org/myworkspace/myrepo/pull-requests/101")
         assert tracker == "jira/bitbucket"
-        assert num == 45974
+        assert num == 101
 
     def test_invalid_url_raises(self):
         with pytest.raises(ValueError, match="Unrecognized"):

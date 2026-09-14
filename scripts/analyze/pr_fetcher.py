@@ -142,6 +142,9 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
     """Fetch last N merged PRs via ``gh pr list --state merged``.
 
     Enriches each PR with inline review comments via the GitHub API.
+    Supports optional filtering:
+      PR_AUDIT_GH_MILESTONE — scope to a GitHub milestone (sprint equivalent)
+      PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep logins
     """
     org = config.get("GH_ORG", "").strip()
     repo = config.get("GH_REPO", "").strip()
@@ -160,6 +163,10 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         "--limit", str(n_prs),
         "--json", fields,
     ]
+    milestone = config.get("PR_AUDIT_GH_MILESTONE", "").strip()
+    if milestone:
+        cmd += ["--milestone", milestone]
+        print(f"[pr-fetch] filtering by milestone: {milestone}", flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -232,6 +239,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "number": pr_number,
             "title": rp.get("title", ""),
             "author": author,
+            "state": "merged",  # bulk fetch always uses --state merged
             "merged_at": rp.get("mergedAt", ""),
             "url": rp.get("url", ""),
             "branch": rp.get("headRefName", ""),
@@ -257,6 +265,9 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
     # A.1: save inline review comments to artifact
     if reviews_raw:
         _write_raw("pr_reviews_raw.json", reviews_raw)
+
+    # Post-filter by team members if configured
+    prs = _filter_by_team(prs, config.get("PR_AUDIT_TEAM_MEMBERS", ""), tracker="github")
 
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from GitHub ({org}/{repo})", flush=True)
     return prs
@@ -322,7 +333,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         print("[pr-fetch] GH_ORG/GH_REPO not set — cannot fetch single GH PR", file=sys.stderr, flush=True)
         return None
 
-    fields = "number,title,body,author,mergedAt,url,headRefName,comments,reviews,reviewDecision,labels,files"
+    fields = "number,title,body,author,mergedAt,state,url,headRefName,comments,reviews,reviewDecision,labels,files"
     cmd = ["gh", "pr", "view", str(pr_number), "-R", f"{org}/{repo}", "--json", fields]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -373,10 +384,15 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
     ]
     depth = _compute_review_depth(classified["human_comments"], gh_approvers)
 
+    gh_state = rp.get("state", "OPEN").upper()
+    is_merged = bool(rp.get("mergedAt")) or gh_state == "MERGED"
+    state = "merged" if is_merged else ("closed" if gh_state == "CLOSED" else "open")
+
     return {
         "number": rp.get("number", pr_number),
         "title": rp.get("title", ""),
         "author": author,
+        "state": state,
         "merged_at": rp.get("mergedAt", ""),
         "url": rp.get("url", ""),
         "branch": rp.get("headRefName", ""),
@@ -404,7 +420,12 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
-    """Fetch last N merged PRs via Bitbucket REST API."""
+    """Fetch last N merged PRs via Bitbucket REST API.
+
+    Supports optional filtering:
+      PR_AUDIT_JIRA_BOARDS — resolve active-sprint assignees from Jira board(s) and use as team filter
+      PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep display names (overrides board-derived team)
+    """
     import requests as _requests
 
     workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
@@ -471,6 +492,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "number": pr_id,
             "title": rp.get("title", ""),
             "author": author,
+            "state": "merged",  # bulk fetch always uses state=MERGED
             "merged_at": rp.get("updated_on", ""),
             "url": rp.get("links", {}).get("html", {}).get("href", ""),
             "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
@@ -495,6 +517,16 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     # A.1: save per-PR comments to artifact
     if reviews_raw:
         _write_raw("pr_reviews_raw.json", reviews_raw)
+
+    # Derive team from Jira board if configured, then post-filter
+    team_str = config.get("PR_AUDIT_TEAM_MEMBERS", "").strip()
+    board_str = config.get("PR_AUDIT_JIRA_BOARDS", "").strip()
+    if not team_str and board_str:
+        board_team = _resolve_board_team(board_str, config)
+        if board_team:
+            team_str = ",".join(sorted(board_team))
+            print(f"[pr-fetch] board-derived team ({len(board_team)} members): {team_str[:120]}", flush=True)
+    prs = _filter_by_team(prs, team_str, tracker="bitbucket")
 
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
     return prs
@@ -592,11 +624,16 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
     author = rp.get("author", {}).get("display_name", rp.get("author", {}).get("nickname", ""))
     depth = _compute_review_depth(classified["human_comments"], approvers)
 
+    bb_state = rp.get("state", "OPEN").upper()
+    is_merged = bb_state == "MERGED"
+    state = "merged" if is_merged else ("closed" if bb_state in ("DECLINED", "SUPERSEDED") else "open")
+
     return {
         "number": rp.get("id", pr_id),
         "title": rp.get("title", ""),
         "author": author,
-        "merged_at": rp.get("updated_on", ""),
+        "state": state,
+        "merged_at": rp.get("updated_on", "") if is_merged else "",
         "url": rp.get("links", {}).get("html", {}).get("href", ""),
         "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
         "body": rp.get("description", ""),
@@ -615,6 +652,114 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
         "is_bot_authored": _is_ai_authored(author),
         **depth,
     }
+
+
+# ---------------------------------------------------------------------------
+# Team filtering helpers
+# ---------------------------------------------------------------------------
+
+def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> list[dict]:
+    """Post-filter PRs to those authored or reviewed by team members.
+
+    team_str: comma-separated GitHub logins (tracker=github) or Jira display names (tracker=bitbucket).
+    Returns all prs unmodified when team_str is empty.
+    """
+    if not team_str.strip():
+        return prs
+    members = {m.strip().lower() for m in team_str.split(",") if m.strip()}
+    if not members:
+        return prs
+
+    filtered = []
+    for pr in prs:
+        author = (pr.get("author") or "").lower()
+        if author in members:
+            filtered.append(pr)
+            continue
+        # Check reviewers: human commenters + approvers
+        reviewers = {
+            c.get("author", "").lower()
+            for c in pr.get("human_comments", [])
+            if c.get("author")
+        }
+        reviewers.update(a.lower() for a in pr.get("approvers", []) if a)
+        if reviewers & members:
+            filtered.append(pr)
+
+    if len(filtered) != len(prs):
+        print(
+            f"[pr-fetch] team filter ({tracker}): {len(prs)} → {len(filtered)} PRs "
+            f"(members: {', '.join(sorted(members)[:5])}{'...' if len(members) > 5 else ''})",
+            flush=True,
+        )
+    return filtered
+
+
+def _resolve_board_team(board_ids_str: str, config: dict) -> set[str]:
+    """Resolve active-sprint assignees for the given Jira board IDs.
+
+    Calls the Jira agile API to find the active sprint for each board,
+    then fetches sprint issues and collects assignee display names.
+    Returns an empty set on any error (non-fatal).
+    """
+    import requests as _requests
+
+    jira_url = config.get("JIRA_BASE_URL", "").rstrip("/")
+    email = config.get("JIRA_EMAIL", "")
+    token = config.get("JIRA_API_TOKEN", "")
+    if not all([jira_url, email, token]):
+        print("[pr-fetch] JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN not set — cannot resolve board team", file=sys.stderr, flush=True)
+        return set()
+
+    auth = (email, token)
+    board_ids = [b.strip() for b in board_ids_str.split(",") if b.strip()]
+    members: set[str] = set()
+
+    for board_id in board_ids:
+        try:
+            # Fetch active sprint for this board
+            resp = _requests.get(
+                f"{jira_url}/rest/agile/1.0/board/{board_id}/sprint",
+                params={"state": "active"},
+                auth=auth,
+                timeout=20,
+            )
+            if not resp.ok:
+                print(f"[pr-fetch] Jira board/{board_id}/sprint error: {resp.status_code}", file=sys.stderr, flush=True)
+                continue
+            sprints = resp.json().get("values", [])
+            if not sprints:
+                print(f"[pr-fetch] no active sprint for board {board_id}", flush=True)
+                continue
+            sprint_id = sprints[0]["id"]
+
+            # Fetch sprint issues
+            start_at = 0
+            page_size = 100
+            while True:
+                issue_resp = _requests.get(
+                    f"{jira_url}/rest/agile/1.0/sprint/{sprint_id}/issue",
+                    params={"startAt": start_at, "maxResults": page_size, "fields": "assignee"},
+                    auth=auth,
+                    timeout=30,
+                )
+                if not issue_resp.ok:
+                    break
+                data = issue_resp.json()
+                for issue in data.get("issues", []):
+                    assignee = (issue.get("fields", {}).get("assignee") or {})
+                    name = assignee.get("displayName") or assignee.get("name", "")
+                    if name:
+                        members.add(name)
+                total = data.get("total", 0)
+                start_at += len(data.get("issues", []))
+                if start_at >= total:
+                    break
+            print(f"[pr-fetch] board {board_id}: {len(members)} team members from active sprint", flush=True)
+        except Exception as e:
+            print(f"[pr-fetch] WARNING: board team resolution failed for {board_id}: {e}", file=sys.stderr, flush=True)
+
+    return members
 
 
 # ---------------------------------------------------------------------------
@@ -993,14 +1138,17 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         return "(no PRs available)"
 
     per_pr_budget = max(max_chars // max(len(prs), 1), 500)
-    lines: list[str] = [f"## Merged PRs ({len(prs)} total)\n"]
+    lines: list[str] = [f"## PRs ({len(prs)} total)\n"]
     total = 0
 
     for pr in prs:
         section: list[str] = []
+        pr_state = pr.get("state", "merged")
         section.append(f"### PR #{pr['number']}: {pr['title']}")
         section.append(f"- **Author**: {pr.get('author', '?')}")
-        section.append(f"- **Merged**: {pr.get('merged_at', '?')}")
+        section.append(f"- **State**: {pr_state}")
+        if pr_state == "merged":
+            section.append(f"- **Merged**: {pr.get('merged_at', '?')}")
         section.append(f"- **Branch**: {pr.get('branch', '?')}")
         section.append(f"- **Files changed**: {pr.get('files_changed', '?')}")
         additions = pr.get("additions", 0)

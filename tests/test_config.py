@@ -284,3 +284,25 @@ def test_camelcase_canonical_wins(monkeypatch):
     monkeypatch.setenv("JiraUrl", "https://alias.atlassian.net")
     config = load_config()
     assert config["JIRA_BASE_URL"] == "https://canonical.atlassian.net"
+
+
+def test_camelcase_pr_audit_aliases(monkeypatch):
+    """PrAuditTeamMembers / PrAuditJiraBoards / PrAuditGhMilestone resolve correctly."""
+    monkeypatch.delenv("PR_AUDIT_TEAM_MEMBERS", raising=False)
+    monkeypatch.delenv("PR_AUDIT_JIRA_BOARDS", raising=False)
+    monkeypatch.delenv("PR_AUDIT_GH_MILESTONE", raising=False)
+    monkeypatch.setenv("PrAuditTeamMembers", "alice,bob")
+    monkeypatch.setenv("PrAuditJiraBoards", "123,456")
+    monkeypatch.setenv("PrAuditGhMilestone", "v2.5")
+    config = load_config()
+    assert config["PR_AUDIT_TEAM_MEMBERS"] == "alice,bob"
+    assert config["PR_AUDIT_JIRA_BOARDS"] == "123,456"
+    assert config["PR_AUDIT_GH_MILESTONE"] == "v2.5"
+
+
+def test_pr_audit_defaults_are_empty_strings():
+    """New PR audit keys have empty-string defaults (non-fatal when unset)."""
+    config = load_config()
+    assert config.get("PR_AUDIT_TEAM_MEMBERS", "MISSING") != "MISSING"
+    assert config.get("PR_AUDIT_JIRA_BOARDS", "MISSING") != "MISSING"
+    assert config.get("PR_AUDIT_GH_MILESTONE", "MISSING") != "MISSING"

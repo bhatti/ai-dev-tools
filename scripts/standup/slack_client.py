@@ -477,6 +477,7 @@ def post_report(config: dict, slack_text: str, md_text: str,
     # - if posting to channel root, use the ts of the message just posted
     upload_thread_ts = thread_ts or msg_ts
 
+    upload_ok = False
     try:
         html = render_simple_html(title, md_text)
         with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w",
@@ -487,11 +488,23 @@ def post_report(config: dict, slack_text: str, md_text: str,
             upload_ok = upload_file(config, tmp_path, filename,
                                     channel=channel, thread_ts=upload_thread_ts)
             if not upload_ok:
-                print(f"[slack] HTML upload failed for '{filename}' (non-fatal)", flush=True)
+                print(f"[slack] WARNING: HTML upload failed for '{filename}' — "
+                      f"check bot has files:write scope and is in the channel", flush=True)
         finally:
             os.unlink(tmp_path)
     except Exception as e:
         print(f"[slack] HTML render/upload error for '{filename}' (non-fatal): {e}", flush=True)
+
+    # Fallback: post artifact link as a threaded message when upload failed
+    if not upload_ok:
+        public_url = (config.get("FORMICARY_PUBLIC_URL") or "").rstrip("/")
+        job_id = config.get("JOB_ID") or ""
+        if public_url and job_id:
+            fallback_text = (
+                f"📎 Full report: <{public_url}/dashboard/jobs/requests/{job_id}|View in Formicary>"
+            )
+            _post_message_ts(config, fallback_text, channel=channel,
+                             thread_ts=upload_thread_ts)
 
     return True
 

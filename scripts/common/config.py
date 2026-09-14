@@ -87,6 +87,9 @@ DEFAULTS: dict[str, str] = {
     "PR_AUDIT_FOCUS":                 "all",
     "MAX_PR_AUDIT_SIZE":              "10000000",
     "MAX_DEEP_REVIEWS":               "2",
+    "PR_AUDIT_TEAM_MEMBERS":          "",
+    "PR_AUDIT_JIRA_BOARDS":           "",
+    "PR_AUDIT_GH_MILESTONE":          "",
     "YGS_SKILLS_REPO":                "",
 }
 
@@ -163,6 +166,9 @@ _ALIASES: list[tuple[str, str]] = [
     ("PrAuditFocus",                "PR_AUDIT_FOCUS"),
     ("MaxPrAuditSize",              "MAX_PR_AUDIT_SIZE"),
     ("MaxDeepReviews",              "MAX_DEEP_REVIEWS"),
+    ("PrAuditTeamMembers",          "PR_AUDIT_TEAM_MEMBERS"),
+    ("PrAuditJiraBoards",           "PR_AUDIT_JIRA_BOARDS"),
+    ("PrAuditGhMilestone",          "PR_AUDIT_GH_MILESTONE"),
     ("YgsSkillsRepo",               "YGS_SKILLS_REPO"),
 ]
 

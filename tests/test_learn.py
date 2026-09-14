@@ -75,8 +75,8 @@ class TestPostBbComment:
         from scripts.jira.learn import _post_bb_comment
         with patch("scripts.jira.learn.add_pr_comment") as mock_add:
             config = {"BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t"}
-            _post_bb_comment(config, "cribl", "cribl", 45974, "report text")
-            mock_add.assert_called_once_with(config, "cribl", "cribl", 45974, "report text")
+            _post_bb_comment(config, "myworkspace", "myrepo", 101, "report text")
+            mock_add.assert_called_once_with(config, "myworkspace", "myrepo", 101, "report text")
 
     def test_skips_when_workspace_missing(self):
         from scripts.jira.learn import _post_bb_comment

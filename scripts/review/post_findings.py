@@ -24,6 +24,7 @@ import click
 import requests
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.standup.slack_client import upload_file as _slack_upload_file
 
 _SEVERITY_EMOJI = {
     "CRITICAL": "🔴",
@@ -223,6 +224,21 @@ def main(findings_path: str) -> None:
     print(f"[post_findings] wrote {md_path} ({len(md_text)} chars)", flush=True)
     print(f"[post_findings] wrote {html_path} ({len(html_text)} chars)", flush=True)
 
+    # Upload HTML to Slack if credentials are available (non-fatal)
+    token = config.get("SLACK_BOT_TOKEN", "")
+    channel = config.get("SLACK_CHANNEL", "").lstrip("#")
+    thread_ts = config.get("SLACK_THREAD_TS", "") or None
+    if token and channel:
+        try:
+            uploaded = _slack_upload_file(
+                config, str(html_path), "pr_review_report.html",
+                channel=channel, thread_ts=thread_ts or "",
+            )
+            if not uploaded:
+                print("[post_findings] HTML upload skipped — check channel permissions", flush=True)
+        except Exception as e:
+            print(f"[post_findings] HTML upload error (non-fatal): {e}", flush=True)
+
     # Always write slack message to artifact (regardless of whether Slack is configured)
     text = _build_slack_text(findings)
     public_url = (config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
@@ -232,10 +248,6 @@ def main(findings_path: str) -> None:
     (reports_dir / "slack_message.txt").write_text(text)
 
     # --- Slack post (non-fatal) ---
-    token = config.get("SLACK_BOT_TOKEN", "")
-    channel = config.get("SLACK_CHANNEL", "").lstrip("#")
-    thread_ts = config.get("SLACK_THREAD_TS", "") or None
-
     if not token or not channel:
         msg = "SLACK_BOT_TOKEN or SLACK_CHANNEL not set — skipping Slack post"
         print(f"[post_findings] {msg}", flush=True)
