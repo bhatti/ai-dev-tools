@@ -150,6 +150,14 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
         pr_ids = data.get("pr_ids", "")
         if pr_ids:
             print(f"::add-task-context PR_AUDIT_PR_IDS::{pr_ids}", flush=True)
+        metrics = data.get("metrics", {})
+        if isinstance(metrics, dict):
+            verbosity_rate = metrics.get("verbosity_accumulation_rate", 0)
+            complexity_prs = metrics.get("complexity_creep_pr_count", 0)
+            if verbosity_rate:
+                print(f"::add-task-context PR_AUDIT_VERBOSITY_RATE::{verbosity_rate:.2f}", flush=True)
+            if complexity_prs:
+                print(f"::add-task-context PR_AUDIT_COMPLEXITY_CREEP::{complexity_prs}", flush=True)
     except Exception as e:
         print(f"[pr-audit] could not parse findings for markers: {e}", flush=True)
 
@@ -404,7 +412,12 @@ Write these files using relative paths from the repo root (the `reports/` symlin
       "gap_type":"team_skill|process|tooling","impact_type":"blocks_delivery|slows_delivery|increases_risk",
       "frequency":N,"pr_number":N,"prs":[N,M],"title":"...","evidence":"specific finding","recommendation":"specific action"}}],
     "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"gap_type":"team_skill|process|tooling","recommendation":"..."}}],
-    "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}}}}
+    "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}},
+    "metrics":{{"spec_coverage_pct":0.0,"ci_catch_rate":0.0,"code_review_skill_catch_rate":0.0,
+      "bot_finding_follow_through_rate":0.0,"human_review_burden":0.0,"avg_pr_size_loc":0,
+      "large_pr_review_depth":0.0,"security_review_invocation_rate":0.0,
+      "rubber_stamp_rate":0.0,"revert_followup_rate":0.0,
+      "verbosity_accumulation_rate":0.0,"complexity_creep_pr_count":0}}}}
 
    Severity definitions (use these — do not invent your own):
    - CRITICAL: security vulnerability, data loss, or production outage risk

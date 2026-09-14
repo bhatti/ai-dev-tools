@@ -2,7 +2,7 @@
 
 Usage:
     python -m scripts.analyze.run_codebase_audit [--repo-url <url>] [--branch main]
-        [--commits 1000] [--focus all]
+        [--commits 1000] [--focus all|architecture|security|tests|duplicates|health|sloppiness]
 
 Required env: ANTHROPIC_API_KEY or CLAUDE_CODE_USE_BEDROCK=1
 
@@ -157,6 +157,14 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
         print(f"::add-task-context AUDIT_HIGH_COUNT::{high}", flush=True)
         if hotspot:
             print(f"::add-task-context AUDIT_HOTSPOT_FILE::{hotspot}", flush=True)
+        metrics = data.get("metrics", {})
+        if isinstance(metrics, dict):
+            verbosity = metrics.get("verbosity_ratio")
+            erosion = metrics.get("erosion_score")
+            if verbosity is not None:
+                print(f"::add-task-context AUDIT_VERBOSITY_RATIO::{verbosity:.3f}", flush=True)
+            if erosion is not None:
+                print(f"::add-task-context AUDIT_EROSION_SCORE::{erosion:.3f}", flush=True)
     except Exception as e:
         print(f"[audit] could not parse findings for markers: {e}", flush=True)
 
@@ -261,11 +269,12 @@ Write these files using relative paths from the repo root (the `reports/` symlin
    {{"repo":"{repo_label}","branch":"{branch}","commits_analyzed":{n_commits},"focus":"{focus}",
     "critical_count":N,"high_count":N,
     "findings":[{{"severity":"CRITICAL|HIGH|MEDIUM|LOW",
-      "dimension":"hotspot|architecture|security|sre|tests|duplicates|knowledge-silo|commit-quality",
+      "dimension":"hotspot|architecture|security|sre|tests|duplicates|knowledge-silo|commit-quality|sloppiness",
       "location":"path/to/file:line or module","evidence":"command → output snippet",
       "recommendation":"specific action targeting this exact file/module"}}],
     "patterns":[{{"pattern":"description seen in N files/commits","locations":["a","b"],"recommendation":"..."}}],
-    "metrics":{{"fix_ratio":0.0,"avg_files_per_commit":0.0,"single_author_hotspots":0,"temporal_coupling_pairs":0,"test_gap_files":0}}}}
+    "metrics":{{"fix_ratio":0.0,"avg_files_per_commit":0.0,"single_author_hotspots":0,"temporal_coupling_pairs":0,"test_gap_files":0,
+      "verbosity_ratio":0.0,"erosion_score":0.0,"high_mass_functions":0,"churn_complexity_hotspots":0}}}}
 
 DO NOT emit any ::add-task-context markers yourself — the orchestrator script reads
 your JSON output and emits them automatically. Focus only on writing the two report files.
@@ -285,7 +294,7 @@ Or on failure:
 @click.option("--repo-url", default=None, help="Git clone URL or HTTPS repo URL to audit")
 @click.option("--branch", default=None, help="Branch to audit (default: BB_REPO_BRANCH for Bitbucket, GH_REPO_BRANCH for GitHub)")
 @click.option("--commits", default=None, type=int, help="Number of commits to analyze (default: N_COMMITS config or 1000)")
-@click.option("--focus", default=None, help="Audit focus: all|architecture|security|tests|duplicates|health")
+@click.option("--focus", default=None, help="Audit focus: all|architecture|security|tests|duplicates|health|sloppiness")
 @click.option("--skill", default="ygs-codebase-audit", show_default=True, help="Skill name override")
 def main(repo_url: str | None, branch: str | None, commits: int | None, focus: str | None, skill: str) -> None:
     config = load_config()
