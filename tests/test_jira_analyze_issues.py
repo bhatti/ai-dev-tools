@@ -155,7 +155,7 @@ def test_main_analyze_by_keys(mock_notify, mock_claude, mock_get_issue,
     assert "race condition" in text
 
 
-@patch("scripts.jira.query_issues._resolve_team_field_id", return_value=None)
+@patch("scripts.jira.query_issues.resolve_field_id", return_value=None)
 @patch("scripts.common.jira_api.search_issues", return_value=[])
 @patch("scripts.jira.analyze_issues.notify")
 def test_main_no_results(mock_notify, mock_search, mock_resolve):

@@ -98,11 +98,8 @@ def main() -> None:
 
     artifact_link = ""
     if formicary_url and job_id:
-        html_url = (
-            f"{formicary_url}/dashboard/artifacts/by-job/{job_id}/download"
-            "?file=reports/pr_audit_report.html"
-        )
-        artifact_link = f"\n<{html_url}|View full HTML report>"
+        job_url = f"{formicary_url}/dashboard/jobs/requests/{job_id}"
+        artifact_link = f"\n<{job_url}|View full report & artifacts>"
 
     header = (
         f":mag: *PR Audit* -- {repo or 'repo'}"

@@ -88,8 +88,8 @@ DEFAULTS: dict[str, str] = {
     "MAX_PR_AUDIT_SIZE":              "10000000",
     "MAX_DEEP_REVIEWS":               "2",
     "PR_AUDIT_TEAM_MEMBERS":          "",
-    "PR_AUDIT_JIRA_BOARDS":           "",
     "PR_AUDIT_GH_MILESTONE":          "",
+    "PR_AUDIT_FILTER":                "",
     "YGS_SKILLS_REPO":                "",
 }
 
@@ -166,8 +166,10 @@ _ALIASES: list[tuple[str, str]] = [
     ("PrAuditFocus",                "PR_AUDIT_FOCUS"),
     ("MaxPrAuditSize",              "MAX_PR_AUDIT_SIZE"),
     ("MaxDeepReviews",              "MAX_DEEP_REVIEWS"),
+    ("TeamId",                       "JIRA_SPACE"),   # TeamId → JIRA_SPACE (same concept)
+    ("PrAuditFilter",               "PR_AUDIT_FILTER"),
     ("PrAuditTeamMembers",          "PR_AUDIT_TEAM_MEMBERS"),
-    ("PrAuditJiraBoards",           "PR_AUDIT_JIRA_BOARDS"),
+    ("PrAuditJiraBoards",           "JIRA_BOARDS"),  # PrAuditJiraBoards → JIRA_BOARDS (same key standup uses)
     ("PrAuditGhMilestone",          "PR_AUDIT_GH_MILESTONE"),
     ("PrAuditFullReport",           "AUDIT_FULL_REPORT"),
     ("AuditFullReport",             "AUDIT_FULL_REPORT"),

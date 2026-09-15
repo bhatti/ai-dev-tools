@@ -523,7 +523,11 @@ def post_report(config: dict, slack_text: str, md_text: str,
                 f"{public_url}/dashboard/artifacts/by-job/{job_id}/download"
                 f"?file={zip_path}"
             )
-            fallback_text = f"📎 Full report: <{html_link}|{filename}>"
+            job_link = f"{public_url}/dashboard/jobs/requests/{job_id}"
+            fallback_text = (
+                f"📎 Full report: <{html_link}|{filename}>"
+                f"  |  <{job_link}|All artifacts & zip>"
+            )
             _post_message_ts(config, fallback_text, channel=channel,
                              thread_ts=upload_thread_ts)
 

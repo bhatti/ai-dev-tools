@@ -127,8 +127,14 @@ def main() -> None:
     slack_text = _format_for_slack(full_message)
     (reports_dir / "slack_message.txt").write_text(slack_text)
     thread_ts = config.get("SLACK_THREAD_TS") or None
+    formicary_url = config.get("FORMICARY_PUBLIC_URL", "").rstrip("/")
+    job_id = config.get("JOB_ID", "")
+    if formicary_url and job_id:
+        job_link = f"\n<{formicary_url}/dashboard/jobs/requests/{job_id}|View standup artifacts & zip>"
+        slack_text = slack_text + job_link
     slack_ok = post_report(config, slack_text, report_text,
                            title="Daily Standup", filename="standup_report.html",
+                           artifact_path="reports/report.html",
                            thread_ts=thread_ts)
 
     post_result = {

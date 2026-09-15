@@ -13,7 +13,6 @@ import json
 import re
 import sys
 from base64 import b64encode
-from typing import Any
 
 import requests
 
@@ -111,13 +110,68 @@ def _base(config: dict) -> str:
     return config["JIRA_BASE_URL"].rstrip("/")
 
 
-def search_issues(config: dict, jql: str, max_results: int = 20) -> list[dict]:
+_field_id_cache: dict[str, str] = {}
+
+
+def resolve_field_id(config: dict, field_name: str) -> str | None:
+    """Resolve a Jira field name to its customfield ID. Strips whitespace. Cached."""
+    norm = field_name.lower().replace(" ", "")
+    if norm in _field_id_cache:
+        return _field_id_cache[norm]
+    try:
+        resp = requests.get(
+            f"{_base(config)}/rest/api/3/field",
+            headers=_auth_headers(config),
+            timeout=15,
+        )
+        if resp.ok:
+            for f in resp.json():
+                if f.get("name", "").lower().replace(" ", "") == norm:
+                    _field_id_cache[norm] = f["id"]
+                    return f["id"]
+    except Exception:
+        pass
+    return None
+
+
+def fetch_board_issue_keys(
+    config: dict, board_id: "str | int", max_results: int = 500
+) -> set[str]:
+    """Return Jira issue keys for all issues on a board (not sprint-scoped)."""
+    keys: set[str] = set()
+    start = 0
+    while start < max_results:
+        resp = requests.get(
+            f"{_base(config)}/rest/agile/1.0/board/{board_id}/issue",
+            headers=_auth_headers(config),
+            params={"startAt": start, "maxResults": 50, "fields": "summary"},
+            timeout=30,
+        )
+        if not resp.ok:
+            print(f"[jira-api] board/{board_id}/issue error {resp.status_code}", file=sys.stderr)
+            break
+        data = resp.json()
+        for issue in data.get("issues", []):
+            keys.add(issue["key"])
+        fetched = len(data.get("issues", []))
+        start += fetched
+        if fetched == 0 or start >= data.get("total", 0):
+            break
+    return keys
+
+
+def search_issues(
+    config: dict,
+    jql: str,
+    max_results: int = 20,
+    fields: "list[str] | None" = None,
+) -> list[dict]:
     """Search Jira issues by JQL. Returns list of issue dicts."""
-    url = f"{_base(config)}/rest/api/3/search/jql"
-    resp = requests.get(
-        url,
+    default_fields = ["summary", "description", "labels", "status", "assignee", "priority", "issuetype", "created"]
+    resp = requests.post(
+        f"{_base(config)}/rest/api/3/search/jql",
         headers=_auth_headers(config),
-        params={"jql": jql, "maxResults": max_results, "fields": "summary,description,labels,status,assignee,priority,issuetype,created"},
+        json={"jql": jql, "maxResults": max_results, "fields": fields or default_fields},
         timeout=30,
     )
     if not resp.ok:

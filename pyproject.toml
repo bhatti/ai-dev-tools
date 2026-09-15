@@ -29,6 +29,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "integration: marks tests as integration tests that require real credentials and network access",
+]
 
 [tool.coverage.run]
 source = ["scripts"]

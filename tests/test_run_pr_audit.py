@@ -109,14 +109,48 @@ class TestParseSlackFlags:
         assert "team_members" in result
         assert "jira_boards" in result
         assert "gh_milestone" in result
+        assert "jira_team" in result
+        assert "pr_filter" in result
         assert result["team_members"] is None
         assert result["jira_boards"] is None
         assert result["gh_milestone"] is None
+        assert result["jira_team"] is None
+        assert result["pr_filter"] is None
+
+    def test_jira_team_flag_single_word(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --team MyTeam last 20 prs"})
+        assert result["jira_team"] == "MyTeam"
+        assert result["team_members"] is None  # no comma → not a member list
+
+    def test_team_with_comma_is_member_list_not_jira_team(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --team alice,bob"})
+        assert result["team_members"] == "alice,bob"
+        assert result["jira_team"] is None
+
+    def test_filter_flag_simple(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --filter label=security"})
+        assert result["pr_filter"] == "label=security"
+
+    def test_filter_flag_with_quoted_field(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": 'pr-audit --filter "Eng Scrum Team"=TeamAlpha'})
+        assert result["pr_filter"] == "Eng Scrum Team=TeamAlpha"
+
+    def test_combined_board_and_jira_team(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 1234 --team MyTeam last 10 prs"})
+        assert result["jira_boards"] == "1234"
+        assert result["jira_team"] == "MyTeam"
+
+    def test_board_without_team_leaves_jira_team_none(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 1234 last 10 prs"})
+        assert result["jira_boards"] == "1234"
+        assert result["jira_team"] is None
 
     def test_combined_team_and_milestone(self):
+        # Single-word --team alice → jira_team (not team_members); use comma for member list
         result = _parse_slack_flags({"SLACK_MESSAGE": "audit last 20 prs --team alice --milestone sprint-3"})
         assert result["n_prs"] == 20
-        assert result["team_members"] == "alice"
+        assert result["jira_team"] == "alice"
+        assert result["team_members"] is None
         assert result["gh_milestone"] == "sprint-3"
 
     def test_tracker_flag_github(self):
@@ -213,50 +247,61 @@ class TestResolveBranch:
 
 
 class TestGhTrackerBoardWarning:
-    """--board with a GitHub-tracker job should warn and NOT set PR_AUDIT_JIRA_BOARDS."""
+    """--board with a GitHub-tracker job warns and skips when Jira creds absent; allows when present."""
 
-    def _run_main_stub(self, config_overrides: dict, env_overrides: dict) -> tuple[dict, list[str]]:
-        """Run just the board-flag processing branch of main() in isolation."""
-        import io as _io
-        from unittest.mock import patch as _patch
-        import scripts.analyze.run_pr_audit as m
-
-        captured = []
-
-        def fake_print(*args, **kwargs):
-            captured.append(" ".join(str(a) for a in args))
-
-        config = {"DEFAULT_TRACKER": "github", **config_overrides}
-        env = {**env_overrides}
-
-        with _patch("builtins.print", side_effect=fake_print), \
-             _patch.dict(os.environ, env, clear=False):
-            flags = m._parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 123"})
-            board_val = flags["jira_boards"]
-            if board_val == "__default__":
-                board_val = config.get("JIRA_BOARDS", "") or ""
-            if board_val:
-                tracker = config.get("DEFAULT_TRACKER", "").lower()
-                if tracker == "github":
-                    fake_print(
-                        "[pr-audit] WARNING: --board scopes by Jira/Bitbucket active-sprint assignees "
-                        "and has no effect for GitHub-tracker jobs; use --milestone to scope by milestone"
-                    )
-                else:
-                    os.environ["PR_AUDIT_JIRA_BOARDS"] = board_val
-                    config["PR_AUDIT_JIRA_BOARDS"] = board_val
-
-        return config, captured
-
-    def test_board_with_gh_tracker_warns_and_does_not_set_env(self):
-        config, output = self._run_main_stub({"DEFAULT_TRACKER": "github"}, {})
-        assert "PR_AUDIT_JIRA_BOARDS" not in config
-        assert any("WARNING" in line and "--milestone" in line for line in output)
-
-    def test_board_with_jira_tracker_sets_env(self):
+    def test_board_flag_parsed_correctly(self):
         import scripts.analyze.run_pr_audit as m
         flags = m._parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 456"})
         assert flags["jira_boards"] == "456"
+
+    def test_board_flag_without_id_returns_sentinel(self):
+        import scripts.analyze.run_pr_audit as m
+        flags = m._parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board"})
+        assert flags["jira_boards"] == "__default__"
+
+
+class TestMainEnvWrites:
+    """Verify main() propagates Slack flags to os.environ for downstream tasks.
+
+    main() exits early (sys.exit(1)) when no repo URL or CODEBASE_DIR is provided.
+    The env writes happen before that exit, so catching SystemExit is correct here.
+    """
+
+    def _run_main_with_message(self, message: str, monkeypatch, tmp_path, extra_env=None):
+        monkeypatch.setenv("SLACK_MESSAGE", message)
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        monkeypatch.setenv("ANTHROPIC_BEDROCK_BASE_URL", "http://ai/bedrock")
+        monkeypatch.setenv("BITBUCKET_WORKSPACE", "ws")
+        monkeypatch.setenv("BITBUCKET_REPO", "repo")
+        monkeypatch.delenv("CODEBASE_DIR", raising=False)
+        for k, v in (extra_env or {}).items():
+            monkeypatch.setenv(k, v)
+
+        from scripts.analyze import run_pr_audit
+        with patch("scripts.analyze.run_pr_audit.validate_claude_config"), \
+             patch("scripts.analyze.run_pr_audit._ensure_ygs_skills"), \
+             patch("scripts.analyze.run_pr_audit.resolve_repo_url", return_value=None), \
+             patch("scripts.analyze.run_pr_audit.compute_repo_label", return_value="ws/repo"):
+            with pytest.raises(SystemExit):
+                # Invoke Click command via standalone_mode=False to pass kwargs directly.
+                run_pr_audit.main.main(
+                    args=[], standalone_mode=False,
+                    obj={},
+                )
+
+    def test_jira_team_flag_writes_jira_space(self, monkeypatch, tmp_path):
+        self._run_main_with_message("--team PlatformTeam", monkeypatch, tmp_path)
+        assert os.environ.get("JIRA_SPACE") == "PlatformTeam"
+
+    def test_jira_boards_flag_writes_jira_boards(self, monkeypatch, tmp_path):
+        extra = {"JIRA_BASE_URL": "https://jira.example.com", "JIRA_EMAIL": "u@e.com", "JIRA_API_TOKEN": "tok"}
+        self._run_main_with_message("--board 42", monkeypatch, tmp_path, extra_env=extra)
+        assert os.environ.get("JIRA_BOARDS") == "42"
+
+    def test_pr_filter_flag_writes_pr_audit_filter(self, monkeypatch, tmp_path):
+        self._run_main_with_message('--filter "Priority Area"=Backend', monkeypatch, tmp_path)
+        assert os.environ.get("PR_AUDIT_FILTER") == "Priority Area=Backend"
 
 
 class TestPromptTemplate:

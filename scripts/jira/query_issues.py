@@ -6,10 +6,9 @@ Usage:
 
 Required env: JIRA_PROJECT, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_BASE_URL
 Optional env:
-    JIRA_SPACE        — scrum-team / area filter value; defaults to BITBUCKET_WORKSPACE.
-                        Matched against the field named by JIRA_TEAM_FIELD (see below).
-    JIRA_TEAM_FIELD   — Jira custom field name for the team/area dimension.
-                        Defaults to "EngScrumTeam". Set to "" to disable the filter.
+    JIRA_SPACE        — scrum-team / area filter value; also accepts JiraSpace or TeamId org-config aliases.
+    JIRA_TEAM_FIELD   — Jira custom field name for the team dimension.
+                        Defaults to "Eng Scrum Team". Set to "" to disable.
     SLACK_BOT_TOKEN, SLACK_CHANNEL, SLACK_THREAD_TS (SlackThreadTs)
 
 The query is used to filter Jira issue summaries (summary ~ "<query>").
@@ -22,42 +21,25 @@ import sys
 from pathlib import Path
 
 import click
-import requests
 
 from scripts.common.config import load_config, get_workspace_dir
-from scripts.common.jira_api import _auth_headers, _base, extract_adf_text, resolve_jira_issues, search_issues
+from scripts.common.jira_api import _auth_headers, _base, extract_adf_text, resolve_jira_issues, search_issues, resolve_field_id
 from scripts.common.report_renderer import render_simple_html
 from scripts.standup.slack_client import build_issue_blocks, notify
-
-
-def _resolve_team_field_id(config: dict, field_name: str) -> str | None:
-    """Return the Jira field ID for a given field name, or None if not found."""
-    url = f"{_base(config)}/rest/api/3/field"
-    try:
-        resp = requests.get(url, headers=_auth_headers(config), timeout=15)
-        if not resp.ok:
-            return None
-        for f in resp.json():
-            if f.get("name", "").lower() == field_name.lower():
-                return f.get("id")
-    except Exception:
-        pass
-    return None
 
 
 def _build_jql(config: dict, query: str, issue_type: str | None = None) -> str:
     """Build JQL for a free-text query against project + optional team field."""
     project = config["JIRA_PROJECT"]
-    # JIRA_SPACE: team/area value. Defaults to BITBUCKET_WORKSPACE if not set.
     space = config.get("JIRA_SPACE") or config.get("BITBUCKET_WORKSPACE") or ""
     # JIRA_TEAM_FIELD: Jira field name for the team dimension. Set to "" to disable.
-    team_field_name = config.get("JIRA_TEAM_FIELD", "EngScrumTeam")
+    team_field_name = config.get("JIRA_TEAM_FIELD", "Eng Scrum Team")
 
     parts = [f'project = "{project}"']
     if issue_type:
         parts.append(f'issuetype = "{issue_type}"')
     if space and team_field_name:
-        field_id = _resolve_team_field_id(config, team_field_name)
+        field_id = resolve_field_id(config, team_field_name)  # shared, cached, strips spaces
         if field_id:
             parts.append(f'{field_id} = "{space}"')
         else:

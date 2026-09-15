@@ -15,7 +15,7 @@ BASE_CONFIG = {
 }
 
 
-@patch("scripts.jira.query_issues._resolve_team_field_id", return_value="customfield_10248")
+@patch("scripts.jira.query_issues.resolve_field_id", return_value="customfield_10248")
 def test_build_jql_with_space(mock_resolve):
     cfg = {**BASE_CONFIG, "JIRA_SPACE": "Distributed Management"}
     jql = _build_jql(cfg, "flaky")
@@ -26,7 +26,7 @@ def test_build_jql_with_space(mock_resolve):
     assert "Done" in jql
 
 
-@patch("scripts.jira.query_issues._resolve_team_field_id", return_value="customfield_10248")
+@patch("scripts.jira.query_issues.resolve_field_id", return_value="customfield_10248")
 def test_build_jql_space_falls_back_to_bitbucket_workspace(mock_resolve):
     cfg = {**BASE_CONFIG, "BITBUCKET_WORKSPACE": "myorg"}
     jql = _build_jql(cfg, "flaky")
@@ -51,7 +51,7 @@ def test_build_jql_empty_query():
     assert "ORDER BY" in jql
 
 
-@patch("scripts.jira.query_issues._resolve_team_field_id", return_value=None)
+@patch("scripts.jira.query_issues.resolve_field_id", return_value=None)
 def test_build_jql_team_field_not_found_skips_filter(mock_resolve):
     cfg = {**BASE_CONFIG, "JIRA_SPACE": "My Team"}
     jql = _build_jql(cfg, "flaky")

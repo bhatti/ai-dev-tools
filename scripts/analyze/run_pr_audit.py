@@ -122,19 +122,23 @@ def _parse_slack_flags(config: dict) -> dict:
       model: claude-opus-5
       --team alice,bob               (filter by GitHub logins or Jira display names)
       team:alice,bob
-      --board <id>                   (filter by Jira board ID — numeric; resolves active sprint)
+      --team MyTeam                  (single word → Jira-issue-first filter by Eng Scrum Team field)
+      --board <id>                   (filter by Jira board ID — fetches all board issues)
       --board                        (bare --board uses JIRA_BOARDS org config)
       https://company.atlassian.net/jira/software/c/projects/X/boards/<id>
       --milestone v2.5               (filter by GitHub milestone)
+      --filter label=security        (GitHub label filter)
+      --filter "Eng Scrum Team"=MyTeam  (Jira field=value filter)
 
     Returns dict with keys: n_prs, focus, pr_urls, model, team_members, jira_boards, gh_milestone,
-    tracker, full_report.
+    tracker, full_report, jira_team, pr_filter.
     """
     msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
     if not msg:
         return {"n_prs": None, "focus": None, "pr_urls": [], "model": None,
                 "team_members": None, "jira_boards": None, "gh_milestone": None,
-                "tracker": None, "full_report": False}
+                "tracker": None, "full_report": False,
+                "jira_team": None, "pr_filter": None}
 
     msg_lower = msg.lower()
 
@@ -161,10 +165,17 @@ def _parse_slack_flags(config: dict) -> dict:
     if m:
         model = m.group(1) or m.group(2)
 
-    # Team filter: --team alice,bob  OR  team:alice,bob
+    # Team filter: --team alice,bob (commas → member list) | --team MyTeam (no comma → Jira team)
+    # team:alice,bob also accepted for backward compat.
+    # Unified parse: comma → team_members; single word → jira_team.
+    jira_team: str | None = None
     m = re.search(r"(?:--team|team:)\s*([\w,@\-\.]+)", msg, re.IGNORECASE)
     if m:
-        team_members = m.group(1).strip()
+        val = m.group(1).strip()
+        if "," in val:
+            team_members = val   # comma-sep display names → PR author/reviewer filter
+        else:
+            jira_team = val      # single word → Jira-issue-first team filter
 
     # Jira board ID: --board [<id>] | board:<id> | Jira board URL .../boards/<id>
     # Bare --board (no ID) signals "use JIRA_BOARDS org config" → sentinel "__default__"
@@ -193,6 +204,12 @@ def _parse_slack_flags(config: dict) -> dict:
     # Full report flag: --full posts the complete report to Slack instead of the digest.
     full_report = bool(re.search(r"--full\b", msg, re.IGNORECASE))
 
+    # Explicit field=value filter: --filter <field>=<value> (Jira field or label=X for GH).
+    pr_filter: str | None = None
+    m = re.search(r'--filter\s+"?([^"=\n]+?)"?\s*=\s*("?[^"\s\n]+"?)', msg, re.IGNORECASE)
+    if m:
+        pr_filter = f"{m.group(1).strip()}={m.group(2).strip().strip(chr(34))}"
+
     # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
     for token in re.findall(r"https?://\S+", msg):
         token = token.rstrip(".,;)")
@@ -202,9 +219,12 @@ def _parse_slack_flags(config: dict) -> dict:
         except ValueError:
             pass
 
-    return {"n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
-            "team_members": team_members, "jira_boards": jira_boards,
-            "gh_milestone": gh_milestone, "tracker": tracker, "full_report": full_report}
+    return {
+        "n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
+        "team_members": team_members, "jira_boards": jira_boards,
+        "gh_milestone": gh_milestone, "tracker": tracker, "full_report": full_report,
+        "jira_team": jira_team, "pr_filter": pr_filter,
+    }
 
 
 # -- Markers -------------------------------------------------------------------
@@ -588,15 +608,18 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             if not board_val:
                 print("[pr-audit] --board used but JIRA_BOARDS org config not set", flush=True)
         if board_val:
-            if effective_tracker == "github":
+            has_jira_creds = all([
+                config.get("JIRA_BASE_URL"), config.get("JIRA_EMAIL"), config.get("JIRA_API_TOKEN"),
+            ])
+            if effective_tracker == "github" and not has_jira_creds:
                 print(
-                    "[pr-audit] WARNING: --board scopes by Jira/Bitbucket active-sprint assignees "
-                    "and has no effect for GitHub-tracker jobs; use --milestone to scope by milestone",
+                    "[pr-audit] WARNING: --board requires Jira credentials (JIRA_BASE_URL/EMAIL/TOKEN); "
+                    "use --milestone to scope GitHub PRs by milestone instead",
                     flush=True,
                 )
             else:
-                os.environ["PR_AUDIT_JIRA_BOARDS"] = board_val
-                config["PR_AUDIT_JIRA_BOARDS"] = board_val
+                os.environ["JIRA_BOARDS"] = board_val
+                config["JIRA_BOARDS"] = board_val
                 print(f"[pr-audit] Slack override: jira_boards={board_val}", flush=True)
     if slack_flags["gh_milestone"]:
         os.environ["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
@@ -606,6 +629,17 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         os.environ["AUDIT_FULL_REPORT"] = "1"
         config["AUDIT_FULL_REPORT"] = "1"
         print("[pr-audit] Slack override: full_report=1 (posting complete report to Slack)", flush=True)
+    # Tracker-independent team filter: --team <name> resolves Jira issues by team field.
+    # Fallback chain: Slack --team flag → JIRA_SPACE org config (JiraSpace / TeamId alias).
+    effective_team = (slack_flags.get("jira_team") or config.get("JIRA_SPACE", "")).strip()
+    if effective_team:
+        os.environ["JIRA_SPACE"] = effective_team
+        config["JIRA_SPACE"] = effective_team
+        print(f"[pr-audit] team filter: {effective_team}", flush=True)
+    if slack_flags.get("pr_filter"):
+        os.environ["PR_AUDIT_FILTER"] = slack_flags["pr_filter"]
+        config["PR_AUDIT_FILTER"] = slack_flags["pr_filter"]
+        print(f"[pr-audit] Slack override: filter={slack_flags['pr_filter']}", flush=True)
     # Combine PR URLs: CLI flag + Slack message + PR_URLS env var (space/comma separated)
     pr_urls_env = [u.strip() for u in re.split(r"[\s,]+", os.environ.get("PR_URLS", "")) if u.strip()]
     all_pr_urls = list(pr_urls) + slack_flags["pr_urls"] + pr_urls_env

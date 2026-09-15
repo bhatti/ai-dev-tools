@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, search_issues as _jira_search_issues
+
 KNOWN_BOTS = {
     "github-actions[bot]", "dependabot[bot]", "renovate[bot]",
     "codecov[bot]", "sonarcloud[bot]", "mergify[bot]",
@@ -156,11 +158,17 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         "number,title,body,author,mergedAt,url,headRefName,"
         "comments,reviews,reviewDecision,labels,files"
     )
+    has_jira_filter = any([
+        config.get("JIRA_BOARDS", ""),
+        config.get("JIRA_SPACE", ""),
+        config.get("PR_AUDIT_FILTER", ""),
+    ])
+    fetch_limit = n_prs * 3 if has_jira_filter else n_prs
     cmd = [
         "gh", "pr", "list",
         "-R", f"{org}/{repo}",
         "--state", "merged",
-        "--limit", str(n_prs),
+        "--limit", str(fetch_limit),
         "--json", fields,
     ]
     milestone = config.get("PR_AUDIT_GH_MILESTONE", "").strip()
@@ -276,6 +284,19 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
     # Post-filter by team members if configured
     prs = _filter_by_team(prs, config.get("PR_AUDIT_TEAM_MEMBERS", ""), tracker="github")
 
+    # Jira-issue-first filter (hybrid GH+Jira setups: --board / --team <name>)
+    issue_keys = _resolve_jira_issue_keys(config)
+    if issue_keys is not None:
+        prs = _filter_prs_by_issue_keys(prs, issue_keys)
+    else:
+        # GH-native: label filter from --filter label=X or --team <name> as label
+        pr_filter = config.get("PR_AUDIT_FILTER", "").strip()
+        if pr_filter and pr_filter.lower().startswith("label="):
+            prs = _filter_by_label(prs, pr_filter.split("=", 1)[1].strip())
+        elif config.get("JIRA_SPACE", "").strip() and config.get("DEFAULT_TRACKER", "").lower() == "github":
+            prs = _filter_by_label(prs, config["JIRA_SPACE"].strip())
+
+    prs = prs[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from GitHub ({org}/{repo})", flush=True)
     return prs
 
@@ -430,8 +451,10 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     """Fetch last N merged PRs via Bitbucket REST API.
 
     Supports optional filtering:
-      PR_AUDIT_JIRA_BOARDS — resolve active-sprint assignees from Jira board(s) and use as team filter
-      PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep display names (overrides board-derived team)
+      JIRA_BOARDS     — filter to PRs referencing issues from these board(s) (Jira-issue-first)
+      JIRA_SPACE      — filter to PRs referencing issues tagged with this team (Eng Scrum Team field)
+      PR_AUDIT_FILTER — filter by field=value (Jira JQL) or label=X (GitHub-native)
+      PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep display names
     """
     import requests as _requests
 
@@ -449,8 +472,16 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     # +values.participants adds approval data without removing any default fields
     url = f"{base}/pullrequests?state=MERGED&sort=-updated_on&pagelen=50&fields=%2Bvalues.participants"
 
+    # Over-fetch when any Jira filter is active so there are enough PRs after filtering.
+    has_filter = any([
+        config.get("JIRA_BOARDS", ""),
+        config.get("JIRA_SPACE", ""),
+        config.get("PR_AUDIT_FILTER", ""),
+    ])
+    fetch_cap = n_prs * 3 if has_filter else n_prs
+
     raw_prs: list[dict] = []
-    while url and len(raw_prs) < n_prs:
+    while url and len(raw_prs) < fetch_cap:
         try:
             resp = _requests.get(url, auth=auth, timeout=30)
             resp.raise_for_status()
@@ -462,12 +493,12 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         url = data.get("next", "")
 
     # A.1: save raw PR list to artifact
-    _write_raw("pr_data_raw.json", raw_prs[:n_prs])
+    _write_raw("pr_data_raw.json", raw_prs[:fetch_cap])
 
     prs: list[dict] = []
     reviews_raw: dict[int, list] = {}
 
-    for rp in raw_prs[:n_prs]:
+    for rp in raw_prs[:fetch_cap]:
         pr_id = rp.get("id", 0)
         # Fetch comments
         all_comments = _fetch_bb_comments(base, pr_id, auth)
@@ -533,16 +564,17 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     if reviews_raw:
         _write_raw("pr_reviews_raw.json", reviews_raw)
 
-    # Derive team from Jira board if configured, then post-filter
+    # Name-based member filter (--team alice,bob → PR_AUDIT_TEAM_MEMBERS)
     team_str = config.get("PR_AUDIT_TEAM_MEMBERS", "").strip()
-    board_str = config.get("PR_AUDIT_JIRA_BOARDS", "").strip()
-    if not team_str and board_str:
-        board_team = _resolve_board_team(board_str, config)
-        if board_team:
-            team_str = ",".join(sorted(board_team))
-            print(f"[pr-fetch] board-derived team ({len(board_team)} members): {team_str[:120]}", flush=True)
-    prs = _filter_by_team(prs, team_str, tracker="bitbucket")
+    if team_str:
+        prs = _filter_by_team(prs, team_str, tracker="bitbucket")
 
+    # Jira-issue-first filter: --board / --team <name> / --filter field=value
+    issue_keys = _resolve_jira_issue_keys(config)
+    if issue_keys is not None:
+        prs = _filter_prs_by_issue_keys(prs, issue_keys)
+
+    prs = prs[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
     return prs
 
@@ -711,71 +743,91 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
     return filtered
 
 
-def _resolve_board_team(board_ids_str: str, config: dict) -> set[str]:
-    """Resolve active-sprint assignees for the given Jira board IDs.
+def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
+    """Resolve Jira issue keys from board, team, or field filter config.
 
-    Calls the Jira agile API to find the active sprint for each board,
-    then fetches sprint issues and collects assignee display names.
-    Returns an empty set on any error (non-fatal).
+    Returns a set of issue keys to filter PRs by, or None when no filter is
+    configured (meaning all PRs should pass through).
+
+    Sources are unioned: --board + --team + --filter all contribute keys.
     """
-    import requests as _requests
+    board_str = config.get("JIRA_BOARDS", "").strip()
+    team_name = config.get("JIRA_SPACE", "").strip()
+    pr_filter = config.get("PR_AUDIT_FILTER", "").strip()
 
-    jira_url = config.get("JIRA_BASE_URL", "").rstrip("/")
-    email = config.get("JIRA_EMAIL", "")
-    token = config.get("JIRA_API_TOKEN", "")
-    if not all([jira_url, email, token]):
-        print("[pr-fetch] JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN not set — cannot resolve board team", file=sys.stderr, flush=True)
-        return set()
+    if not any([board_str, team_name, pr_filter]):
+        return None
 
-    auth = (email, token)
-    board_ids = [b.strip() for b in board_ids_str.split(",") if b.strip()]
-    members: set[str] = set()
+    if not all([config.get("JIRA_BASE_URL"), config.get("JIRA_EMAIL"), config.get("JIRA_API_TOKEN")]):
+        print("[pr-fetch] JIRA creds not set — skipping issue-key filter", flush=True)
+        return None
 
-    for board_id in board_ids:
-        try:
-            # Fetch active sprint for this board
-            resp = _requests.get(
-                f"{jira_url}/rest/agile/1.0/board/{board_id}/sprint",
-                params={"state": "active"},
-                auth=auth,
-                timeout=20,
-            )
-            if not resp.ok:
-                print(f"[pr-fetch] Jira board/{board_id}/sprint error: {resp.status_code}", file=sys.stderr, flush=True)
-                continue
-            sprints = resp.json().get("values", [])
-            if not sprints:
-                print(f"[pr-fetch] no active sprint for board {board_id}", flush=True)
-                continue
-            sprint_id = sprints[0]["id"]
+    keys: set[str] = set()
 
-            # Fetch sprint issues
-            start_at = 0
-            page_size = 100
-            while True:
-                issue_resp = _requests.get(
-                    f"{jira_url}/rest/agile/1.0/sprint/{sprint_id}/issue",
-                    params={"startAt": start_at, "maxResults": page_size, "fields": "assignee"},
-                    auth=auth,
-                    timeout=30,
-                )
-                if not issue_resp.ok:
-                    break
-                data = issue_resp.json()
-                for issue in data.get("issues", []):
-                    assignee = (issue.get("fields", {}).get("assignee") or {})
-                    name = assignee.get("displayName") or assignee.get("name", "")
-                    if name:
-                        members.add(name)
-                total = data.get("total", 0)
-                start_at += len(data.get("issues", []))
-                if start_at >= total:
-                    break
-            print(f"[pr-fetch] board {board_id}: {len(members)} team members from active sprint", flush=True)
-        except Exception as e:
-            print(f"[pr-fetch] WARNING: board team resolution failed for {board_id}: {e}", file=sys.stderr, flush=True)
+    # Board filter: fetch all issues for each board ID
+    if board_str:
+        for bid in (b.strip() for b in board_str.split(",") if b.strip()):
+            try:
+                board_keys = fetch_board_issue_keys(config, bid, max_results=500)
+                keys |= board_keys
+                print(f"[pr-fetch] board {bid}: {len(board_keys)} issue keys", flush=True)
+            except Exception as e:
+                print(f"[pr-fetch] WARNING: board {bid} key fetch failed: {e}", flush=True)
 
-    return members
+    # Team filter: JQL by custom field value
+    if team_name:
+        field_name = config.get("JIRA_TEAM_FIELD", "Eng Scrum Team")
+        field_id = resolve_field_id(config, field_name)
+        if field_id:
+            safe_team = team_name.replace("\\", "\\\\").replace('"', '\\"')
+            jql = f'{field_id} = "{safe_team}" ORDER BY updated DESC'
+            issues = _jira_search_issues(config, jql, max_results=500, fields=["summary"])
+            team_keys = {i["key"] for i in issues}
+            keys |= team_keys
+            print(f"[pr-fetch] team '{team_name}': {len(team_keys)} issue keys", flush=True)
+        else:
+            print(f"[pr-fetch] WARNING: Jira field '{field_name}' not found — skipping team filter", flush=True)
+
+    # Explicit field=value filter (non-label)
+    if pr_filter and "=" in pr_filter:
+        field_name, _, field_value = pr_filter.partition("=")
+        field_name, field_value = field_name.strip(), field_value.strip()
+        if field_name.lower() != "label":
+            field_id = resolve_field_id(config, field_name)
+            if field_id:
+                safe_value = field_value.replace("\\", "\\\\").replace('"', '\\"')
+                jql = f'{field_id} = "{safe_value}" ORDER BY updated DESC'
+                issues = _jira_search_issues(config, jql, max_results=500, fields=["summary"])
+                filter_keys = {i["key"] for i in issues}
+                keys |= filter_keys
+                print(f"[pr-fetch] filter '{field_name}'='{field_value}': {len(filter_keys)} issue keys", flush=True)
+
+    print(f"[pr-fetch] total issue key set: {len(keys)} keys", flush=True)
+    return keys
+
+
+def _filter_prs_by_issue_keys(prs: list[dict], issue_keys: set[str]) -> list[dict]:
+    """Keep PRs whose title/body references any key in issue_keys."""
+    if not issue_keys:
+        print("[pr-fetch] WARNING: issue-key filter active but 0 issue keys resolved — no PRs will match", flush=True)
+        return []
+    filtered = []
+    for pr in prs:
+        text = f"{pr.get('title', '')} {pr.get('body', '')}"
+        found = set(re.findall(r'[A-Z][A-Z0-9]+-\d+', text))
+        if found & issue_keys:
+            filtered.append(pr)
+    print(f"[pr-fetch] issue-key filter: {len(prs)} → {len(filtered)} PRs", flush=True)
+    return filtered
+
+
+def _filter_by_label(prs: list[dict], label_value: str) -> list[dict]:
+    """Keep PRs with a label matching label_value (case-insensitive)."""
+    wanted = label_value.lower()
+    filtered = [pr for pr in prs
+                if wanted in [lb.lower() for lb in pr.get("labels", [])]]
+    print(f"[pr-fetch] label filter '{label_value}': {len(prs)} → {len(filtered)} PRs", flush=True)
+    return filtered
 
 
 # ---------------------------------------------------------------------------
