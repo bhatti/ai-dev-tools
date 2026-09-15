@@ -164,6 +164,50 @@ def test_main_exits_0_when_no_slack_token(tmp_workspace, monkeypatch):
     assert data["status"] == "SKIPPED"
 
 
+def test_artifact_link_uses_by_job_endpoint(tmp_workspace, monkeypatch):
+    """Slack message artifact link uses the by-job endpoint with task filter."""
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("SLACK_CHANNEL", "my-channel")
+    monkeypatch.setenv("FORMICARY_PUBLIC_URL", "https://formicary.example.com")
+    monkeypatch.setenv("JOB_ID", "job-review-001")
+
+    findings_path = tmp_workspace / "findings.json"
+    findings_path.write_text(json.dumps(SAMPLE_FINDINGS))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["--findings", str(findings_path)])
+    assert result.exit_code == 0
+
+    msg_file = tmp_workspace / "reports" / "slack_message.txt"
+    assert msg_file.exists()
+    text = msg_file.read_text()
+    assert "by-job/job-review-001/download" in text
+    assert "task=post" in text
+    assert "file=reports/report.html" in text
+    assert "dashboard/jobs/requests/job-review-001" in text
+
+
+def test_artifact_link_absent_without_config(tmp_workspace, monkeypatch):
+    """Artifact link is not present when FORMICARY_PUBLIC_URL is absent."""
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("FORMICARY_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("JOB_ID", raising=False)
+    monkeypatch.setenv("SLACK_CHANNEL", "my-channel")
+
+    findings_path = tmp_workspace / "findings.json"
+    findings_path.write_text(json.dumps(SAMPLE_FINDINGS))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["--findings", str(findings_path)])
+    assert result.exit_code == 0
+
+    msg_file = tmp_workspace / "reports" / "slack_message.txt"
+    text = msg_file.read_text()
+    assert "by-job" not in text
+
+
 def test_main_handles_missing_findings(tmp_workspace, monkeypatch):
     """post_findings handles missing findings.json gracefully."""
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))

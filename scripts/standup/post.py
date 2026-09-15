@@ -128,7 +128,7 @@ def main() -> None:
     (reports_dir / "slack_message.txt").write_text(slack_text)
     thread_ts = config.get("SLACK_THREAD_TS") or None
     slack_ok = post_report(config, slack_text, report_text,
-                           title="Daily Standup", filename="standup_report.html",
+                           title="Daily Standup", filename="report.html",
                            thread_ts=thread_ts)
 
     post_result = {

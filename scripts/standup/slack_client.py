@@ -497,13 +497,13 @@ def _upload_html_to_formicary(config: dict, html: str, filename: str) -> str | N
 def post_report(config: dict, slack_text: str, md_text: str,
                 title: str, filename: str,
                 thread_ts: str | None = None,
-                channel: str | None = None) -> bool:
+                channel: str | None = None,
+                task_type: str = "post") -> bool:
     """Post a mrkdwn report to Slack and upload an HTML version in the same thread.
 
     Primary path: render HTML and upload as a Slack file (requires files:write scope).
     Fallback when Slack upload fails: upload HTML directly to formicary artifact store
-    and post a direct download link.  This avoids the by-job task-ordering problem
-    (later tasks shadow earlier artifacts in the by-job endpoint).
+    and post a direct download link.
 
     Args:
         slack_text:  Pre-formatted mrkdwn text (from format_for_slack).
@@ -512,6 +512,8 @@ def post_report(config: dict, slack_text: str, md_text: str,
         filename:    Slack display name for the uploaded file (e.g. "audit_report.html").
         thread_ts:   Existing thread to reply into.  When None the text message creates a
                      new top-level post and the HTML is threaded to that new message's ts.
+        task_type:   Formicary task type that produces the report artifact (e.g. "audit-prs").
+                     Used in the fallback link to select the correct task's artifact zip.
     """
     from scripts.common.report_renderer import render_simple_html
     import tempfile, os
@@ -548,19 +550,20 @@ def post_report(config: dict, slack_text: str, md_text: str,
         except Exception as e:
             print(f"[slack] HTML upload error for '{filename}' (non-fatal): {e}", flush=True)
 
-    # Fallback: upload HTML directly to formicary to get a stable direct download URL.
-    # This is more reliable than by-job (which returns the most recently uploaded task
-    # artifact and may not contain the file when later tasks also upload artifacts).
+    # Fallback: post direct artifact links when Slack file upload fails.
+    # Try uploading HTML to formicary for a stable SHA256-based URL first;
+    # otherwise use the by-job endpoint with task filter to extract the file.
     if not upload_ok:
-        public_url = (config.get("FORMICARY_PUBLIC_URL") or config.get("FORMICARY_URL") or "").rstrip("/")
-        job_id = config.get("JOB_ID") or ""
-        if public_url and job_id:
-            direct_url = _upload_html_to_formicary(config, html, filename) if html else None
-            job_link = f"{public_url}/dashboard/jobs/requests/{job_id}"
-            if direct_url:
-                fallback_text = f"📎 Full report: <{direct_url}|{filename}>  |  <{job_link}|All artifacts>"
-            else:
-                fallback_text = f"📎 Full report: <{job_link}|View {filename} & all artifacts>"
+        from scripts.common.slack_format import build_artifact_links
+        direct_url = _upload_html_to_formicary(config, html, filename) if html else None
+        by_job_url, job_link = build_artifact_links(config, task_type, filename)
+        if direct_url and job_link:
+            fallback_text = f"📎 Full report: <{direct_url}|{filename}>  |  <{job_link}|All artifacts>"
+        elif by_job_url:
+            fallback_text = f"📎 Full report: <{by_job_url}|View {filename}>  |  <{job_link}|All artifacts>"
+        else:
+            fallback_text = None
+        if fallback_text:
             _post_message_ts(config, fallback_text, channel=channel,
                              thread_ts=upload_thread_ts)
 

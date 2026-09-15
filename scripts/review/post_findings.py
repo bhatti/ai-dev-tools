@@ -24,6 +24,7 @@ import click
 import requests
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.slack_format import build_artifact_links
 from scripts.standup.slack_client import upload_file as _slack_upload_file
 
 _SEVERITY_EMOJI = {
@@ -241,10 +242,9 @@ def main(findings_path: str) -> None:
 
     # Always write slack message to artifact (regardless of whether Slack is configured)
     text = _build_slack_text(findings)
-    public_url = (config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
-    job_id = config.get("JOB_ID", "") or ""
-    if public_url and job_id:
-        text += f"\n<{public_url}/dashboard/jobs/requests/{job_id}|View full report in Formicary>"
+    html_url, job_url = build_artifact_links(config, "post", "report.html")
+    if html_url:
+        text += f"\n<{html_url}|View report.html>  |  <{job_url}|All artifacts>"
     (reports_dir / "slack_message.txt").write_text(text)
 
     # --- Slack post (non-fatal) ---

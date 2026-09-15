@@ -28,9 +28,11 @@ def _run_post(tmp_path: Path, config_overrides: dict, *, has_summary: bool = Tru
 
     posted_texts: list[str] = []
 
-    def fake_post_report(cfg, slack_text, md_text, title, filename, thread_ts=None, channel=None):
+    def fake_post_report(cfg, slack_text, md_text, title, filename,
+                         thread_ts=None, channel=None, task_type="post"):
         posted_texts.append(slack_text)
         assert full_text in md_text, "HTML attachment must always use full report"
+        assert task_type == "audit", f"Expected task_type='audit', got '{task_type}'"
         return True
 
     with patch("scripts.analyze.post_audit.load_config", return_value=config), \
@@ -79,3 +81,18 @@ class TestPostAuditSlackBodySelection:
         assert "report_bytes" in data
         assert "slack_bytes" in data
         assert data["slack_posted"] is True
+
+    def test_artifact_link_uses_by_job_endpoint(self, tmp_path):
+        result = _run_post(tmp_path, {
+            "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+            "JOB_ID": "job-audit-001",
+        }, has_summary=True)
+        text = result["posted_text"]
+        assert "by-job/job-audit-001/download" in text
+        assert "task=audit" in text
+        assert "file=reports/audit_report.html" in text
+        assert "dashboard/jobs/requests/job-audit-001" in text
+
+    def test_artifact_link_absent_without_config(self, tmp_path):
+        result = _run_post(tmp_path, {}, has_summary=True)
+        assert "by-job" not in result["posted_text"]

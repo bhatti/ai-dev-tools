@@ -46,3 +46,20 @@ def format_for_slack(text: str) -> str:
     if len(text) > SLACK_TEXT_LIMIT:
         text = text[:SLACK_TEXT_LIMIT] + "\n…(truncated — see full report in job artifacts)"
     return text
+
+
+def build_artifact_links(config: dict, task_type: str, report_filename: str) -> tuple[str, str]:
+    """Return (html_url, job_url) for Slack artifact links.
+
+    html_url uses the by-job endpoint with task filter to extract the HTML
+    report directly from the correct task's artifact zip.
+    job_url links to the job page which has the full zip download.
+    Returns ("", "") when FORMICARY_PUBLIC_URL or JOB_ID are not set.
+    """
+    base = (config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
+    job_id = config.get("JOB_ID", "") or ""
+    if not base or not job_id:
+        return "", ""
+    html_url = f"{base}/dashboard/artifacts/by-job/{job_id}/download?task={task_type}&file=reports/{report_filename}"
+    job_url = f"{base}/dashboard/jobs/requests/{job_id}"
+    return html_url, job_url

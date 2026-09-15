@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.slack_format import format_for_slack
+from scripts.common.slack_format import build_artifact_links, format_for_slack
 from scripts.standup.slack_client import post_report
 
 
@@ -93,13 +93,10 @@ def main() -> None:
         print("[post-pr-audit] pr_audit_findings.json not found -- counts will be 0", flush=True)
 
     # --- Build header summary ---
-    formicary_url = config.get("FORMICARY_PUBLIC_URL", "").rstrip("/")
-    job_id = config.get("JOB_ID", "")
-
+    html_url, job_url = build_artifact_links(config, "audit-prs", "pr_audit_report.html")
     artifact_link = ""
-    if formicary_url and job_id:
-        job_url = f"{formicary_url}/dashboard/jobs/requests/{job_id}"
-        artifact_link = f"\n<{job_url}|View full report & artifacts>"
+    if html_url:
+        artifact_link = f"\n<{html_url}|View pr_audit_report.html>  |  <{job_url}|All artifacts>"
 
     header = (
         f":mag: *PR Audit* -- {repo or 'repo'}"
@@ -117,7 +114,7 @@ def main() -> None:
     thread_ts = config.get("SLACK_THREAD_TS") or None
     slack_ok = post_report(config, slack_text, full_report_text,
                            title=title, filename="pr_audit_report.html",
-                           thread_ts=thread_ts)
+                           thread_ts=thread_ts, task_type="audit-prs")
 
     result = {
         "status": "OK" if slack_ok else "SLACK_FAILED",
