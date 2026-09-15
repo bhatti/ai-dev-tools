@@ -545,11 +545,12 @@ def test_post_report_render_exception_is_nonfatal(mock_post, mock_render, config
 # post_report — fallback link when upload fails
 # ---------------------------------------------------------------------------
 
+@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value="https://formicary.example.com/dashboard/artifacts/abc123/download")
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_uses_job_page_url(mock_post, mock_render, mock_upload):
-    """When upload fails, fallback shows a stable job page link (not a by-job file link)."""
+def test_post_report_fallback_uses_direct_formicary_link(mock_post, mock_render, mock_upload, mock_fmc):
+    """When Slack upload fails, fallback uses direct formicary artifact download link."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000020.000001"}
     )
@@ -557,6 +558,7 @@ def test_post_report_fallback_uses_job_page_url(mock_post, mock_render, mock_upl
         "SLACK_BOT_TOKEN": "xoxb-test",
         "SLACK_CHANNEL": "#test",
         "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "FORMICARY_TOKEN": "tok",
         "JOB_ID": "job-abc-123",
     }
 
@@ -565,19 +567,19 @@ def test_post_report_fallback_uses_job_page_url(mock_post, mock_render, mock_upl
 
     # Two posts: main message + fallback
     assert mock_post.call_count == 2
-    fallback_payload = mock_post.call_args_list[1].kwargs["json"]
-    fallback_text = fallback_payload.get("text", "")
-    # Must link to stable job page, not the unreliable by-job file endpoint
-    assert "dashboard/jobs/requests/job-abc-123" in fallback_text
+    fallback_text = mock_post.call_args_list[1].kwargs["json"].get("text", "")
+    # Direct artifact download link must appear
+    assert "dashboard/artifacts/abc123/download" in fallback_text
     assert "pr_audit_report.html" in fallback_text
     assert "by-job" not in fallback_text
 
 
+@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_standup(mock_post, mock_render, mock_upload):
-    """Fallback for standup report also shows job page link."""
+def test_post_report_fallback_degrades_to_job_page(mock_post, mock_render, mock_upload, mock_fmc):
+    """When both Slack and formicary uploads fail, fallback degrades to job page link."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000021.000001"}
     )
@@ -592,8 +594,7 @@ def test_post_report_fallback_standup(mock_post, mock_render, mock_upload):
                 title="Standup", filename="standup_report.html")
 
     assert mock_post.call_count == 2
-    fallback_payload = mock_post.call_args_list[1].kwargs["json"]
-    fallback_text = fallback_payload.get("text", "")
+    fallback_text = mock_post.call_args_list[1].kwargs["json"].get("text", "")
     assert "dashboard/jobs/requests/job-xyz-456" in fallback_text
     assert "standup_report.html" in fallback_text
     assert "by-job" not in fallback_text

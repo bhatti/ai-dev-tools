@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from scripts.common import jira_api as _mod
-from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, search_issues
+from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, search_issues, resolve_current_user_team
 
 
 FAKE_CONFIG = {
@@ -176,6 +176,61 @@ class TestFetchBoardIssueKeys:
         data_call_params = mock_req.get.call_args_list[1][1]["params"]
         assert data_call_params["startAt"] == 70
         assert "NEW-1" in keys
+
+
+class TestResolveCurrentUserTeam:
+    @pytest.fixture(autouse=True)
+    def clear_user_cache(self):
+        _mod._user_team_cache.clear()
+        yield
+        _mod._user_team_cache.clear()
+
+    def test_returns_team_from_assigned_issue(self):
+        field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
+        team_issues = {"issues": [{"key": "PROJ-1", "fields": {"customfield_10248": {"value": "TeamAlpha"}}}]}
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.return_value = _make_response(field_list)
+            mock_req.post.return_value = _make_response(team_issues)
+            result = resolve_current_user_team(FAKE_CONFIG)
+        assert result == "TeamAlpha"
+        # uses currentUser() in JQL — no /myself call needed
+        assert mock_req.get.call_count == 1  # only the field-list lookup
+
+    def test_returns_none_when_search_fails(self):
+        field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.return_value = _make_response(field_list)
+            mock_req.post.return_value = _make_response(status_code=401, ok=False)
+            result = resolve_current_user_team(FAKE_CONFIG)
+        assert result is None
+
+    def test_returns_none_when_no_assigned_issues(self):
+        field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
+        empty_issues = {"issues": []}
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.return_value = _make_response(field_list)
+            mock_req.post.return_value = _make_response(empty_issues)
+            result = resolve_current_user_team(FAKE_CONFIG)
+        assert result is None
+
+    def test_returns_none_when_team_field_not_found(self):
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.return_value = _make_response([])  # empty field list
+            result = resolve_current_user_team(FAKE_CONFIG)
+        assert result is None
+        mock_req.post.assert_not_called()  # search never reached
+
+    def test_caches_result(self):
+        field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
+        team_issues = {"issues": [{"key": "PROJ-1", "fields": {"customfield_10248": {"value": "TeamBeta"}}}]}
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.return_value = _make_response(field_list)
+            mock_req.post.return_value = _make_response(team_issues)
+            result1 = resolve_current_user_team(FAKE_CONFIG)
+            result2 = resolve_current_user_team(FAKE_CONFIG)
+        assert result1 == result2 == "TeamBeta"
+        # Second call hits _user_team_cache → no additional API calls
+        assert mock_req.post.call_count == 1
 
 
 class TestSearchIssues:

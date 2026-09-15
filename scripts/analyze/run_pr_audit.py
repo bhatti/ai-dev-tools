@@ -80,7 +80,7 @@ def _resolve_effective_tracker(config: dict, slack_flags: dict) -> str:
       3. ``DEFAULT_TRACKER`` from job config / environment.
 
     This ensures any prompt can override the job-level default, so e.g.
-    ``@bot pr-audit --tracker jira --board 123`` works even when the submitted
+    ``@bot pr-audit --tracker jira`` works even when the submitted
     job definition has ``DEFAULT_TRACKER=github``.
     """
     # 1. Explicit --tracker flag wins
@@ -123,9 +123,6 @@ def _parse_slack_flags(config: dict) -> dict:
       --team alice,bob               (filter by GitHub logins or Jira display names)
       team:alice,bob
       --team MyTeam                  (single word → Jira-issue-first filter by Eng Scrum Team field)
-      --board <id>                   (filter by Jira board ID — fetches all board issues)
-      --board                        (bare --board uses JIRA_BOARDS org config)
-      https://company.atlassian.net/jira/software/c/projects/X/boards/<id>
       --milestone v2.5               (filter by GitHub milestone)
       --filter label=security        (GitHub label filter)
       --filter "Eng Scrum Team"=MyTeam  (Jira field=value filter)
@@ -177,8 +174,9 @@ def _parse_slack_flags(config: dict) -> dict:
         else:
             jira_team = val      # single word → Jira-issue-first team filter
 
-    # Jira board ID: --board [<id>] | board:<id> | Jira board URL .../boards/<id>
-    # Bare --board (no ID) signals "use JIRA_BOARDS org config" → sentinel "__default__"
+    # --board is still parsed for backward compat with JIRA_BOARDS env configs.
+    # New behavior: team is auto-detected from Jira account; board ID only used as
+    # sprint-fetch fallback when team auto-detection fails.
     m = re.search(r"--board(?:\s+(\d+))?(?=\s|$)", msg, re.IGNORECASE)
     if m:
         jira_boards = m.group(1) if m.group(1) else "__default__"

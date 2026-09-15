@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, search_issues as _jira_search_issues
+from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
 
 KNOWN_BOTS = {
     "github-actions[bot]", "dependabot[bot]", "renovate[bot]",
@@ -749,7 +749,10 @@ def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
     Returns a set of issue keys to filter PRs by, or None when no filter is
     configured (meaning all PRs should pass through).
 
-    Sources are unioned: --board + --team + --filter all contribute keys.
+    Priority: team (JQL, precise) > board sprint fetch (fallback when no team).
+    When JIRA_SPACE is set or auto-detected, the board sprint fetch is skipped
+    to avoid false positives from shared/cross-team boards.
+    label=X filters are GitHub-native and bypass this function (returns None).
     """
     board_str = config.get("JIRA_BOARDS", "").strip()
     team_name = config.get("JIRA_SPACE", "").strip()
@@ -758,29 +761,50 @@ def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
     if not any([board_str, team_name, pr_filter]):
         return None
 
+    # label=X is a GitHub-native filter — not a Jira issue lookup.
+    # Return None (no filter) so the GH label path in the caller handles it.
+    if pr_filter.lower().startswith("label=") and not board_str and not team_name:
+        return None
+
     if not all([config.get("JIRA_BASE_URL"), config.get("JIRA_EMAIL"), config.get("JIRA_API_TOKEN")]):
         print("[pr-fetch] JIRA creds not set — skipping issue-key filter", flush=True)
         return None
 
+    # Auto-detect team from the current Jira user's account when --board is used but
+    # JIRA_SPACE (team name) hasn't been explicitly configured.
+    if board_str and not team_name:
+        detected = resolve_current_user_team(config)
+        if detected:
+            team_name = detected
+            print(f"[pr-fetch] using auto-detected team '{team_name}' for board filter", flush=True)
+
     keys: set[str] = set()
 
-    # Board filter: fetch all issues for each board ID
-    if board_str:
+    # Board filter: fetch issues from recent sprints only.
+    # SKIP if team_name is configured — JQL team filter (below) is more precise than sprint
+    # fetch, which returns hundreds of keys from many teams on shared boards.
+    if board_str and not team_name:
         for bid in (b.strip() for b in board_str.split(",") if b.strip()):
             try:
-                board_keys = fetch_board_issue_keys(config, bid, max_results=500)
+                board_keys = fetch_board_issue_keys(config, bid, max_results=500, days_back=30)
                 keys |= board_keys
                 print(f"[pr-fetch] board {bid}: {len(board_keys)} issue keys", flush=True)
             except Exception as e:
                 print(f"[pr-fetch] WARNING: board {bid} key fetch failed: {e}", flush=True)
 
-    # Team filter: JQL by custom field value
+    # Team filter: JQL by custom field value (preferred over board sprint fetch when team is known)
     if team_name:
         field_name = config.get("JIRA_TEAM_FIELD", "Eng Scrum Team")
         field_id = resolve_field_id(config, field_name)
         if field_id:
             safe_team = team_name.replace("\\", "\\\\").replace('"', '\\"')
-            jql = f'{field_id} = "{safe_team}" ORDER BY updated DESC'
+            # Include recently closed issues (merged PR → closed issue) and any updated in last 30d.
+            # Time window matches typical PR audit lookback; status filter prefers closed/done
+            # but falls back to recently-updated issues to avoid missing in-flight work.
+            jql = (
+                f'{field_id} = "{safe_team}" AND updated >= -30d '
+                f'ORDER BY updated DESC'
+            )
             issues = _jira_search_issues(config, jql, max_results=500, fields=["summary"])
             team_keys = {i["key"] for i in issues}
             keys |= team_keys

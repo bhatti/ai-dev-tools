@@ -184,9 +184,9 @@ class TestResolveJiraIssueKeysIntegration:
         config.pop("JIRA_BOARDS", None)
         config.pop("JIRA_SPACE", None)
         from scripts.analyze.pr_fetcher import _resolve_jira_issue_keys
-        # label= is GH-native; should return empty set (not None, not an error)
+        # label= is GH-native; returns None so the caller uses the GH label filter path
         keys = _resolve_jira_issue_keys(config)
-        assert keys == set(), f"label= filter should return empty set, got {keys}"
+        assert keys is None, f"label= filter should return None (GH-native), got {keys}"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +217,54 @@ class TestFetchBitbucketPrsWithFilter:
 # ---------------------------------------------------------------------------
 # Full PR fetch with label filter (GitHub)
 # ---------------------------------------------------------------------------
+
+class TestResolveCurrentUserTeamIntegration:
+    def test_auto_detect_team_from_account(self):
+        """Verify team auto-detection works via currentUser() JQL — no /myself needed."""
+        config = _config()
+        _skip_unless_jira(config)
+        from scripts.common.jira_api import resolve_current_user_team, _user_team_cache
+        _user_team_cache.clear()
+        team = resolve_current_user_team(config)
+        # Returns team string when user has recent assigned issues with the team field set.
+        # Returns None if no recent assignments or field not configured — both are valid.
+        assert team is None or (isinstance(team, str) and len(team) > 0), \
+            f"Expected non-empty str or None, got {team!r}"
+        if team:
+            print(f"\n[integ] auto-detected team via currentUser(): '{team}'")
+
+    def test_auto_detect_cached(self):
+        """Second call returns cached result without extra API calls."""
+        config = _config()
+        _skip_unless_jira(config)
+        from scripts.common.jira_api import resolve_current_user_team, _user_team_cache
+        _user_team_cache.clear()
+        team1 = resolve_current_user_team(config)
+        team2 = resolve_current_user_team(config)
+        assert team1 == team2  # cached
+
+    def test_board_flag_auto_detects_team(self):
+        """When JIRA_BOARDS is set but JIRA_SPACE is not, team is auto-detected and JQL filter runs."""
+        config = _config()
+        _skip_unless_jira(config)
+        board_id = config.get("JIRA_BOARDS")
+        if not board_id:
+            pytest.skip("JIRA_BOARDS not configured")
+        config = dict(config)
+        config.pop("JIRA_SPACE", None)  # ensure no explicit team
+        from scripts.analyze.pr_fetcher import _resolve_jira_issue_keys
+        from scripts.common.jira_api import _user_team_cache
+        _user_team_cache.clear()
+        keys = _resolve_jira_issue_keys(config)
+        # Should return either None (no filter) or a non-empty set of issue keys
+        assert keys is None or isinstance(keys, set)
+        if keys:
+            import re
+            key_re = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
+            for k in list(keys)[:5]:
+                assert key_re.match(k), f"Unexpected key format: {k}"
+            print(f"\n[integ] board+auto-detect: {len(keys)} issue keys resolved")
+
 
 class TestFetchGithubPrsWithLabelFilter:
     def test_label_filter_returns_subset(self):

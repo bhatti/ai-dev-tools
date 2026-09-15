@@ -63,7 +63,7 @@ test:            ## Run unit tests (local Python)
 test-cov:        ## Run tests with coverage report
 	PYTHONPATH=. pytest tests/ -v --cov=scripts --cov-report=term-missing
 
-FORMICARY_URL      ?= https://10.8.97.24.nip.io
+FORMICARY_URL      ?= $(shell echo $${FORMICARY_URL})
 FORMICARY_EXAMPLES ?= $(CURDIR)/../formicary/docs/examples
 K8S_NODE_SSH       ?= k3s-node
 PR_URL             ?=

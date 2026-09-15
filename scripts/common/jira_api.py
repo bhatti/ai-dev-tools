@@ -111,6 +111,7 @@ def _base(config: dict) -> str:
 
 
 _field_id_cache: dict[str, str] = {}
+_user_team_cache: dict[str, str] = {}
 
 
 def resolve_field_id(config: dict, field_name: str) -> str | None:
@@ -131,6 +132,53 @@ def resolve_field_id(config: dict, field_name: str) -> str | None:
                     return f["id"]
     except Exception:
         pass
+    return None
+
+
+def resolve_current_user_team(config: dict) -> str | None:
+    """Auto-detect the current Jira user's team from their recent issue assignments.
+
+    Uses `currentUser()` in JQL (no separate /myself round-trip needed) to find
+    the team custom field value on a recently assigned issue.
+    Cached per JIRA_EMAIL so repeated calls are cheap.
+    """
+    cache_key = (config.get("JIRA_EMAIL") or "").lower()
+    if cache_key and cache_key in _user_team_cache:
+        return _user_team_cache[cache_key]
+
+    team_field_name = config.get("JIRA_TEAM_FIELD", "Eng Scrum Team")
+    field_id = resolve_field_id(config, team_field_name)
+    if not field_id:
+        print(f"[jira-api] team field '{team_field_name}' not found — cannot auto-detect team", file=sys.stderr)
+        return None
+
+    try:
+        resp = requests.post(
+            f"{_base(config)}/rest/api/3/search/jql",
+            headers=_auth_headers(config),
+            json={
+                "jql": "assignee = currentUser() AND updated >= -30d ORDER BY updated DESC",
+                "maxResults": 20,
+                "fields": [field_id],
+            },
+            timeout=15,
+        )
+        if not resp.ok:
+            return None
+        for issue in resp.json().get("issues", []):
+            team_val = issue.get("fields", {}).get(field_id)
+            if team_val:
+                team_str = (
+                    team_val.get("value") or team_val.get("name")
+                    if isinstance(team_val, dict) else str(team_val)
+                )
+                if team_str:
+                    print(f"[jira-api] auto-detected team: '{team_str}'", flush=True)
+                    if cache_key:
+                        _user_team_cache[cache_key] = team_str
+                    return team_str
+    except Exception as e:
+        print(f"[jira-api] team auto-detect error: {e}", file=sys.stderr)
     return None
 
 

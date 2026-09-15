@@ -927,7 +927,7 @@ They also check task context variables (SKILL, SKILL_LOADED, SKILLS_INVOKED, etc
 
 ```bash
 # Required environment variables (add to ~/.zshrc):
-export EC2_IP=10.8.97.24.nip.io           # or your Formicary host
+export EC2_IP=<your-formicary-host>           # or your Formicary host
 export FORMICARY_TOKEN=<your-api-token>
 export PR_URL=https://bitbucket.org/<workspace>/<repo>/pull-requests/<number>  # for review tests
 export ISSUE_ID=<PROJ-123>               # Jira issue key for analyze tests (e.g. PROJ-123)
@@ -959,7 +959,7 @@ bash deploy-ai-jira-workflows.sh
 
 # 4. Run functional tests
 cd ~/workplace/ai-dev-tools
-FORMICARY_URL=https://10.8.97.24.nip.io \
+FORMICARY_URL=https://<your-formicary-host> \
   python3 tests/test_functional_workflows.py \
     --tests standup,standup-post,review,review-post \
     --timeout 1200
