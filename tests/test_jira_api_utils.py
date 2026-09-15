@@ -83,37 +83,72 @@ class TestResolveFieldId:
             assert mock_req.get.call_count == 1  # still 1
 
 
+def _sprint_response(sprint_id: int, state: str = "active", days_ago: int = 0) -> dict:
+    """Build a fake sprint dict for test fixtures."""
+    from datetime import datetime, timezone, timedelta
+    end = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    return {"id": sprint_id, "state": state, "completeDate": end}
+
+
 class TestFetchBoardIssueKeys:
-    def test_returns_keys_from_board(self):
-        data = {
-            "issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}, {"key": "PROJ-3"}],
-            "total": 3,
-        }
+    def test_returns_keys_from_active_sprint(self):
+        """Active sprint issues are collected via sprint/{id}/issue endpoint."""
+        sprints_resp = {"values": [_sprint_response(10, state="active")]}
+        sprint_issues = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 2}
         with patch("scripts.common.jira_api.requests") as mock_req:
-            mock_req.get.return_value = _make_response(data)
+            mock_req.get.side_effect = [
+                _make_response(sprints_resp),    # board/{id}/sprint
+                _make_response(sprint_issues),   # sprint/10/issue
+            ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 42, max_results=100)
-        assert keys == {"PROJ-1", "PROJ-2", "PROJ-3"}
+        assert keys == {"PROJ-1", "PROJ-2"}
 
-    def test_paginates_correctly(self):
-        page1 = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 4}
-        page2 = {"issues": [{"key": "PROJ-3"}, {"key": "PROJ-4"}], "total": 4}
+    def test_includes_done_issues_from_recent_closed_sprint(self):
+        """Closed sprint issues (including Done) are included when sprint ended within days_back."""
+        sprints_resp = {"values": [_sprint_response(20, state="closed", days_ago=14)]}
+        sprint_issues = {"issues": [{"key": "PROJ-10"}, {"key": "PROJ-11"}], "total": 2}
         with patch("scripts.common.jira_api.requests") as mock_req:
-            mock_req.get.side_effect = [_make_response(page1), _make_response(page2)]
-            keys = fetch_board_issue_keys(FAKE_CONFIG, 7, max_results=100)
-        assert len(keys) == 4
-        assert "PROJ-1" in keys and "PROJ-4" in keys
+            mock_req.get.side_effect = [
+                _make_response(sprints_resp),
+                _make_response(sprint_issues),
+            ]
+            keys = fetch_board_issue_keys(FAKE_CONFIG, 42, days_back=90)
+        assert keys == {"PROJ-10", "PROJ-11"}
 
-    def test_api_error_returns_empty(self):
+    def test_uses_all_sprints_when_none_are_recent(self):
+        """When all sprints are older than days_back, they are still fetched as fallback."""
+        sprints_resp = {"values": [_sprint_response(30, state="closed", days_ago=120)]}
+        sprint_issues = {"issues": [{"key": "PROJ-30"}], "total": 1}
         with patch("scripts.common.jira_api.requests") as mock_req:
-            mock_req.get.return_value = _make_response(status_code=404, ok=False)
+            mock_req.get.side_effect = [
+                _make_response(sprints_resp),  # board/sprint
+                _make_response(sprint_issues), # sprint/30/issue — still fetched
+            ]
+            keys = fetch_board_issue_keys(FAKE_CONFIG, 42, days_back=90)
+        assert "PROJ-30" in keys
+
+    def test_api_error_falls_back_to_board_endpoint(self):
+        """Sprint API 404 falls back to board/issue endpoint."""
+        board_issues = {"issues": [{"key": "PROJ-99"}], "total": 1}
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.side_effect = [
+                _make_response(status_code=404, ok=False),  # board/sprint fails
+                _make_response(board_issues),               # board/issue fallback
+            ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 99)
-        assert keys == set()
+        assert "PROJ-99" in keys
 
-    def test_empty_board_returns_empty(self):
+    def test_no_sprints_falls_back_to_board_endpoint(self):
+        """Board with no sprints (kanban) falls back to board/issue endpoint."""
+        sprints_resp = {"values": []}
+        board_issues = {"issues": [{"key": "PROJ-55"}], "total": 1}
         with patch("scripts.common.jira_api.requests") as mock_req:
-            mock_req.get.return_value = _make_response({"issues": [], "total": 0})
+            mock_req.get.side_effect = [
+                _make_response(sprints_resp),
+                _make_response(board_issues),
+            ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 0)
-        assert keys == set()
+        assert "PROJ-55" in keys
 
 
 class TestSearchIssues:

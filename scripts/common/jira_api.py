@@ -135,9 +135,100 @@ def resolve_field_id(config: dict, field_name: str) -> str | None:
 
 
 def fetch_board_issue_keys(
-    config: dict, board_id: "str | int", max_results: int = 500
+    config: dict, board_id: "str | int", max_results: int = 500, days_back: int = 90
 ) -> set[str]:
-    """Return Jira issue keys for all issues on a board (not sprint-scoped)."""
+    """Return Jira issue keys for recent board sprints (including Done issues).
+
+    Fetches active + recently closed sprints and collects all issue keys from
+    each sprint.  Sprint-scoped fetch includes Done issues (unlike the board/issue
+    endpoint which excludes Done by default).  This matches how standup's
+    'open prs' flow finds sprint-linked PRs.
+
+    Falls back to the board/issue endpoint for Kanban boards (no sprints).
+    """
+    from datetime import datetime, timezone, timedelta
+
+    base = _base(config)
+    headers = _auth_headers(config)
+    keys: set[str] = set()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+
+    # --- Step 1: get active + closed sprints for this board ---
+    try:
+        sresp = requests.get(
+            f"{base}/rest/agile/1.0/board/{board_id}/sprint",
+            headers=headers,
+            params={"state": "active,closed", "maxResults": 10},
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"[jira-api] board/{board_id}/sprint fetch error: {e}", file=sys.stderr)
+        return _fetch_board_issues_direct(config, board_id, max_results)
+
+    if not sresp.ok:
+        print(f"[jira-api] board/{board_id}/sprint error {sresp.status_code}", file=sys.stderr)
+        return _fetch_board_issues_direct(config, board_id, max_results)
+
+    sprints = sresp.json().get("values", [])
+    if not sprints:
+        # Kanban or API unavailable — fall back to direct board/issue endpoint
+        return _fetch_board_issues_direct(config, board_id, max_results)
+
+    # Filter to sprints that are active or ended within days_back
+    recent: list[dict] = []
+    for sp in sprints:
+        if sp.get("state") == "active":
+            recent.append(sp)
+            continue
+        end_str = sp.get("completeDate") or sp.get("endDate", "")
+        try:
+            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            if end_dt >= cutoff:
+                recent.append(sp)
+        except (ValueError, TypeError):
+            recent.append(sp)  # include on parse failure
+
+    if not recent:
+        recent = sprints  # all sprints fetched are old, use them anyway
+
+    # --- Step 2: fetch issues for each recent sprint ---
+    for sp in recent:
+        sprint_id = sp.get("id")
+        if not sprint_id:
+            continue
+        start = 0
+        while len(keys) < max_results:
+            try:
+                iresp = requests.get(
+                    f"{base}/rest/agile/1.0/sprint/{sprint_id}/issue",
+                    headers=headers,
+                    params={"startAt": start, "maxResults": 100, "fields": "summary"},
+                    timeout=30,
+                )
+            except Exception as e:
+                print(f"[jira-api] sprint/{sprint_id}/issue error: {e}", file=sys.stderr)
+                break
+            if not iresp.ok:
+                break
+            data = iresp.json()
+            for issue in data.get("issues", []):
+                keys.add(issue["key"])
+            fetched = len(data.get("issues", []))
+            start += fetched
+            if fetched == 0 or start >= data.get("total", 0):
+                break
+
+    if not keys:
+        # Sprint API returned nothing — fall back to board/issue endpoint
+        keys = _fetch_board_issues_direct(config, board_id, max_results)
+
+    return keys
+
+
+def _fetch_board_issues_direct(
+    config: dict, board_id: "str | int", max_results: int
+) -> set[str]:
+    """Fallback: board/issue endpoint (excludes Done by default, used for Kanban)."""
     keys: set[str] = set()
     start = 0
     while start < max_results:

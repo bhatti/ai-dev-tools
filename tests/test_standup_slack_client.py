@@ -542,14 +542,14 @@ def test_post_report_render_exception_is_nonfatal(mock_post, mock_render, config
 
 
 # ---------------------------------------------------------------------------
-# post_report — artifact_path kwarg and fallback link
+# post_report — fallback link when upload fails
 # ---------------------------------------------------------------------------
 
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_uses_artifact_path(mock_post, mock_render, mock_upload):
-    """When upload fails, fallback link uses the explicit artifact_path, not filename."""
+def test_post_report_fallback_uses_job_page_url(mock_post, mock_render, mock_upload):
+    """When upload fails, fallback shows a stable job page link (not a by-job file link)."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000020.000001"}
     )
@@ -561,23 +561,23 @@ def test_post_report_fallback_uses_artifact_path(mock_post, mock_render, mock_up
     }
 
     post_report(config, "text", "# md",
-                title="PR Audit", filename="pr_audit_report.html",
-                artifact_path="reports/pr_audit_report.html")
+                title="PR Audit", filename="pr_audit_report.html")
 
-    # The second post call should be the fallback message containing the artifact path.
+    # Two posts: main message + fallback
     assert mock_post.call_count == 2
     fallback_payload = mock_post.call_args_list[1].kwargs["json"]
     fallback_text = fallback_payload.get("text", "")
-    assert "by-job/job-abc-123/download" in fallback_text
-    assert "file=reports/pr_audit_report.html" in fallback_text
+    # Must link to stable job page, not the unreliable by-job file endpoint
+    assert "dashboard/jobs/requests/job-abc-123" in fallback_text
     assert "pr_audit_report.html" in fallback_text
+    assert "by-job" not in fallback_text
 
 
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_defaults_to_reports_filename(mock_post, mock_render, mock_upload):
-    """When artifact_path is omitted, fallback link defaults to reports/<filename>."""
+def test_post_report_fallback_standup(mock_post, mock_render, mock_upload):
+    """Fallback for standup report also shows job page link."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000021.000001"}
     )
@@ -594,7 +594,9 @@ def test_post_report_fallback_defaults_to_reports_filename(mock_post, mock_rende
     assert mock_post.call_count == 2
     fallback_payload = mock_post.call_args_list[1].kwargs["json"]
     fallback_text = fallback_payload.get("text", "")
-    assert "file=reports/standup_report.html" in fallback_text
+    assert "dashboard/jobs/requests/job-xyz-456" in fallback_text
+    assert "standup_report.html" in fallback_text
+    assert "by-job" not in fallback_text
 
 
 @patch("scripts.standup.slack_client.upload_file", return_value=False)

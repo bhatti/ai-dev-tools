@@ -117,8 +117,7 @@ def main() -> None:
     thread_ts = config.get("SLACK_THREAD_TS") or None
     slack_ok = post_report(config, slack_text, full_report_text,
                            title=title, filename="pr_audit_report.html",
-                           thread_ts=thread_ts,
-                           artifact_path="reports/pr_audit_report.html")
+                           thread_ts=thread_ts)
 
     result = {
         "status": "OK" if slack_ok else "SLACK_FAILED",

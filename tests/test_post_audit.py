@@ -28,7 +28,7 @@ def _run_post(tmp_path: Path, config_overrides: dict, *, has_summary: bool = Tru
 
     posted_texts: list[str] = []
 
-    def fake_post_report(cfg, slack_text, md_text, title, filename, thread_ts=None, artifact_path=None):
+    def fake_post_report(cfg, slack_text, md_text, title, filename, thread_ts=None, channel=None):
         posted_texts.append(slack_text)
         assert full_text in md_text, "HTML attachment must always use full report"
         return True

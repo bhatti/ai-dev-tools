@@ -134,7 +134,6 @@ def main() -> None:
         slack_text = slack_text + job_link
     slack_ok = post_report(config, slack_text, report_text,
                            title="Daily Standup", filename="standup_report.html",
-                           artifact_path="reports/report.html",
                            thread_ts=thread_ts)
 
     post_result = {

@@ -125,9 +125,14 @@ class TestResolveJiraIssueKeys:
         assert _resolve_jira_issue_keys(config) is None
 
     def test_board_filter_returns_keys(self):
-        board_data = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 2}
+        # New flow: board/sprint → sprint/issue (includes Done issues)
+        sprints_resp = {"values": [{"id": 10, "state": "active"}]}
+        sprint_issues = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 2}
         with patch("scripts.common.jira_api.requests") as mock_req:
-            mock_req.get.return_value = _mock_response(board_data)
+            mock_req.get.side_effect = [
+                _mock_response(sprints_resp),  # board/sprint
+                _mock_response(sprint_issues), # sprint/10/issue
+            ]
             config = {**JIRA_CONFIG, "JIRA_BOARDS": "42"}
             keys = _resolve_jira_issue_keys(config)
         assert keys == {"PROJ-1", "PROJ-2"}
@@ -156,11 +161,17 @@ class TestResolveJiraIssueKeys:
         assert "FEAT-5" in keys
 
     def test_multiple_sources_unioned(self):
-        board_data = {"issues": [{"key": "PROJ-1"}], "total": 1}
+        # Board filter uses sprint-based fetch; team filter uses JQL
+        sprints_resp = {"values": [{"id": 10, "state": "active"}]}
+        sprint_issues = {"issues": [{"key": "PROJ-1"}], "total": 1}
         field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
         search_result = {"issues": [{"key": "PROJ-2"}]}
         with patch("scripts.common.jira_api.requests") as mock_req:
-            mock_req.get.side_effect = [_mock_response(board_data), _mock_response(field_list)]
+            mock_req.get.side_effect = [
+                _mock_response(sprints_resp),  # board/sprint
+                _mock_response(sprint_issues), # sprint/10/issue
+                _mock_response(field_list),    # field resolution for team filter
+            ]
             mock_req.post.return_value = _mock_response(search_result)
             config = {**JIRA_CONFIG, "JIRA_BOARDS": "1", "JIRA_SPACE": TEAM}
             keys = _resolve_jira_issue_keys(config)
