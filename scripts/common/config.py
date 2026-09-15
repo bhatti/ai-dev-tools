@@ -169,6 +169,8 @@ _ALIASES: list[tuple[str, str]] = [
     ("PrAuditTeamMembers",          "PR_AUDIT_TEAM_MEMBERS"),
     ("PrAuditJiraBoards",           "PR_AUDIT_JIRA_BOARDS"),
     ("PrAuditGhMilestone",          "PR_AUDIT_GH_MILESTONE"),
+    ("PrAuditFullReport",           "AUDIT_FULL_REPORT"),
+    ("AuditFullReport",             "AUDIT_FULL_REPORT"),
     ("YgsSkillsRepo",               "YGS_SKILLS_REPO"),
 ]
 

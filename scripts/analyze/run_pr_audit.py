@@ -127,13 +127,14 @@ def _parse_slack_flags(config: dict) -> dict:
       https://company.atlassian.net/jira/software/c/projects/X/boards/<id>
       --milestone v2.5               (filter by GitHub milestone)
 
-    Returns dict with keys: n_prs, focus, pr_urls, model, team_members, jira_boards, gh_milestone.
+    Returns dict with keys: n_prs, focus, pr_urls, model, team_members, jira_boards, gh_milestone,
+    tracker, full_report.
     """
     msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
     if not msg:
         return {"n_prs": None, "focus": None, "pr_urls": [], "model": None,
                 "team_members": None, "jira_boards": None, "gh_milestone": None,
-                "tracker": None}
+                "tracker": None, "full_report": False}
 
     msg_lower = msg.lower()
 
@@ -189,6 +190,9 @@ def _parse_slack_flags(config: dict) -> dict:
     if m:
         tracker = m.group(1).lower()
 
+    # Full report flag: --full posts the complete report to Slack instead of the digest.
+    full_report = bool(re.search(r"--full\b", msg, re.IGNORECASE))
+
     # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
     for token in re.findall(r"https?://\S+", msg):
         token = token.rstrip(".,;)")
@@ -200,7 +204,7 @@ def _parse_slack_flags(config: dict) -> dict:
 
     return {"n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
             "team_members": team_members, "jira_boards": jira_boards,
-            "gh_milestone": gh_milestone, "tracker": tracker}
+            "gh_milestone": gh_milestone, "tracker": tracker, "full_report": full_report}
 
 
 # -- Markers -------------------------------------------------------------------
@@ -598,6 +602,10 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         os.environ["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
         config["PR_AUDIT_GH_MILESTONE"] = slack_flags["gh_milestone"]
         print(f"[pr-audit] Slack override: milestone={slack_flags['gh_milestone']}", flush=True)
+    if slack_flags["full_report"]:
+        os.environ["AUDIT_FULL_REPORT"] = "1"
+        config["AUDIT_FULL_REPORT"] = "1"
+        print("[pr-audit] Slack override: full_report=1 (posting complete report to Slack)", flush=True)
     # Combine PR URLs: CLI flag + Slack message + PR_URLS env var (space/comma separated)
     pr_urls_env = [u.strip() for u in re.split(r"[\s,]+", os.environ.get("PR_URLS", "")) if u.strip()]
     all_pr_urls = list(pr_urls) + slack_flags["pr_urls"] + pr_urls_env
@@ -617,6 +625,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     print(f"::add-task-context PR_AUDIT_BRANCH::{branch}", flush=True)
     print(f"::add-task-context PR_AUDIT_N_PRS::{n_prs}", flush=True)
     print(f"::add-task-context PR_AUDIT_FOCUS::{focus}", flush=True)
+    print(f"::add-task-context AUDIT_FULL_REPORT::{config.get('AUDIT_FULL_REPORT', '')}", flush=True)
 
     _ensure_ygs_skills()
 

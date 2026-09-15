@@ -81,7 +81,7 @@ def _load_dimension_skill(
 
 # ── Clone ──────────────────────────────────────────────────────────────────────
 
-def _parse_slack_flags(config: dict) -> tuple[int | None, int | None]:
+def _parse_slack_flags(config: dict) -> dict:
     """Parse inline Slack flags from SLACK_MESSAGE env var.
 
     Supports natural language like:
@@ -90,12 +90,13 @@ def _parse_slack_flags(config: dict) -> tuple[int | None, int | None]:
       -- audit with max size 2MB
       --commits 200
       --max-size 2097152
+      --full
 
-    Returns (n_commits_override, max_code_size_override) — None if not found.
+    Returns dict with keys: n_commits, max_size, full_report.
     """
     msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", "")).lower()
     if not msg:
-        return None, None
+        return {"n_commits": None, "max_size": None, "full_report": False}
 
     n_commits: int | None = None
     max_size: int | None = None
@@ -122,7 +123,10 @@ def _parse_slack_flags(config: dict) -> tuple[int | None, int | None]:
             else:
                 max_size = int(val * 1024 * 1024)
 
-    return n_commits, max_size
+    # Full report flag: --full posts the complete report to Slack instead of the digest.
+    full_report = bool(re.search(r"--full\b", msg, re.IGNORECASE))
+
+    return {"n_commits": n_commits, "max_size": max_size, "full_report": full_report}
 
 
 
@@ -313,13 +317,17 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
     focus = focus or config.get("AUDIT_FOCUS", "all")
     max_code_size = int(config.get("MAX_AUDIT_SIZE", "1048576"))
 
-    slack_commits, slack_max_size = _parse_slack_flags(config)
-    if slack_commits and not commits:
-        n_commits = slack_commits
+    slack_flags = _parse_slack_flags(config)
+    if slack_flags["n_commits"] and not commits:
+        n_commits = slack_flags["n_commits"]
         print(f"[audit] Slack override: n_commits={n_commits}", flush=True)
-    if slack_max_size:
-        max_code_size = slack_max_size
+    if slack_flags["max_size"]:
+        max_code_size = slack_flags["max_size"]
         print(f"[audit] Slack override: max_code_size={max_code_size // 1024}KB", flush=True)
+    if slack_flags["full_report"]:
+        os.environ["AUDIT_FULL_REPORT"] = "1"
+        config["AUDIT_FULL_REPORT"] = "1"
+        print("[audit] Slack override: full_report=1 (posting complete report to Slack)", flush=True)
 
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -337,6 +345,7 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
     print(f"::add-task-context AUDIT_COMMITS::{n_commits}", flush=True)
     print(f"::add-task-context AUDIT_FOCUS::{focus}", flush=True)
     print(f"::add-task-context AUDIT_MAX_CODE_SIZE::{max_code_size}", flush=True)
+    print(f"::add-task-context AUDIT_FULL_REPORT::{config.get('AUDIT_FULL_REPORT', '')}", flush=True)
 
     _ensure_ygs_skills()
 

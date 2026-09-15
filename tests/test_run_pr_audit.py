@@ -136,6 +136,29 @@ class TestParseSlackFlags:
         assert "tracker" in result
         assert result["tracker"] is None
 
+    def test_full_flag_detected(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --full"})
+        assert result["full_report"] is True
+
+    def test_full_flag_absent(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --board 123"})
+        assert result["full_report"] is False
+
+    def test_full_flag_case_insensitive(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "PR-AUDIT --FULL"})
+        assert result["full_report"] is True
+
+    def test_full_flag_combined_with_other_flags(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "audit last 20 prs --full --tracker github"})
+        assert result["full_report"] is True
+        assert result["n_prs"] == 20
+        assert result["tracker"] == "github"
+
+    def test_empty_message_full_report_key_present(self):
+        result = _parse_slack_flags({})
+        assert "full_report" in result
+        assert result["full_report"] is False
+
 
 class TestResolveEffectiveTracker:
     """_resolve_effective_tracker priority: --tracker > PR URL > DEFAULT_TRACKER."""
