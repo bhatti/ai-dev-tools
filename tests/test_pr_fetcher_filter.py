@@ -125,12 +125,14 @@ class TestResolveJiraIssueKeys:
         assert _resolve_jira_issue_keys(config) is None
 
     def test_board_filter_returns_keys(self):
-        # New flow: board/sprint → sprint/issue (includes Done issues)
-        sprints_resp = {"values": [{"id": 10, "state": "active"}]}
+        # New flow: count call → board/sprint data → sprint/issue (includes Done issues)
+        count_resp = {"total": 1, "values": []}
+        sprints_page = {"values": [{"id": 10, "state": "active"}]}
         sprint_issues = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 2}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _mock_response(sprints_resp),  # board/sprint
+                _mock_response(count_resp),    # board/sprint?maxResults=1 (count)
+                _mock_response(sprints_page),  # board/sprint?startAt=0 (data)
                 _mock_response(sprint_issues), # sprint/10/issue
             ]
             config = {**JIRA_CONFIG, "JIRA_BOARDS": "42"}
@@ -161,14 +163,16 @@ class TestResolveJiraIssueKeys:
         assert "FEAT-5" in keys
 
     def test_multiple_sources_unioned(self):
-        # Board filter uses sprint-based fetch; team filter uses JQL
-        sprints_resp = {"values": [{"id": 10, "state": "active"}]}
+        # Board filter uses count+data sprint fetch; team filter uses JQL
+        count_resp = {"total": 1, "values": []}
+        sprints_page = {"values": [{"id": 10, "state": "active"}]}
         sprint_issues = {"issues": [{"key": "PROJ-1"}], "total": 1}
         field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
         search_result = {"issues": [{"key": "PROJ-2"}]}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _mock_response(sprints_resp),  # board/sprint
+                _mock_response(count_resp),    # count call
+                _mock_response(sprints_page),  # data call
                 _mock_response(sprint_issues), # sprint/10/issue
                 _mock_response(field_list),    # field resolution for team filter
             ]

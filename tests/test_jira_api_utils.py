@@ -83,21 +83,29 @@ class TestResolveFieldId:
             assert mock_req.get.call_count == 1  # still 1
 
 
-def _sprint_response(sprint_id: int, state: str = "active", days_ago: int = 0) -> dict:
+def _sprint_response(sprint_id: int, state: str = "active", days_ago: int | None = None) -> dict:
     """Build a fake sprint dict for test fixtures."""
-    from datetime import datetime, timezone, timedelta
-    end = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
-    return {"id": sprint_id, "state": state, "completeDate": end}
+    sp: dict = {"id": sprint_id, "state": state}
+    if days_ago is not None:
+        from datetime import datetime, timezone, timedelta
+        sp["completeDate"] = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    return sp
+
+
+def _count_resp(total: int) -> object:
+    """Fake sprint count response (first pagination call)."""
+    return _make_response({"total": total, "values": []})
 
 
 class TestFetchBoardIssueKeys:
     def test_returns_keys_from_active_sprint(self):
         """Active sprint issues are collected via sprint/{id}/issue endpoint."""
-        sprints_resp = {"values": [_sprint_response(10, state="active")]}
+        sprints_page = {"values": [_sprint_response(10, state="active")]}
         sprint_issues = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 2}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _make_response(sprints_resp),    # board/{id}/sprint
+                _count_resp(1),                  # board/sprint?maxResults=1 (count)
+                _make_response(sprints_page),    # board/sprint?startAt=0 (data)
                 _make_response(sprint_issues),   # sprint/10/issue
             ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 42, max_results=100)
@@ -105,11 +113,12 @@ class TestFetchBoardIssueKeys:
 
     def test_includes_done_issues_from_recent_closed_sprint(self):
         """Closed sprint issues (including Done) are included when sprint ended within days_back."""
-        sprints_resp = {"values": [_sprint_response(20, state="closed", days_ago=14)]}
+        sprints_page = {"values": [_sprint_response(20, state="closed", days_ago=14)]}
         sprint_issues = {"issues": [{"key": "PROJ-10"}, {"key": "PROJ-11"}], "total": 2}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _make_response(sprints_resp),
+                _count_resp(1),
+                _make_response(sprints_page),
                 _make_response(sprint_issues),
             ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 42, days_back=90)
@@ -117,22 +126,23 @@ class TestFetchBoardIssueKeys:
 
     def test_uses_all_sprints_when_none_are_recent(self):
         """When all sprints are older than days_back, they are still fetched as fallback."""
-        sprints_resp = {"values": [_sprint_response(30, state="closed", days_ago=120)]}
+        sprints_page = {"values": [_sprint_response(30, state="closed", days_ago=120)]}
         sprint_issues = {"issues": [{"key": "PROJ-30"}], "total": 1}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _make_response(sprints_resp),  # board/sprint
-                _make_response(sprint_issues), # sprint/30/issue — still fetched
+                _count_resp(1),
+                _make_response(sprints_page),
+                _make_response(sprint_issues),
             ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 42, days_back=90)
         assert "PROJ-30" in keys
 
     def test_api_error_falls_back_to_board_endpoint(self):
-        """Sprint API 404 falls back to board/issue endpoint."""
+        """Sprint count API 404 falls back to board/issue endpoint."""
         board_issues = {"issues": [{"key": "PROJ-99"}], "total": 1}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _make_response(status_code=404, ok=False),  # board/sprint fails
+                _make_response(status_code=404, ok=False),  # count call fails
                 _make_response(board_issues),               # board/issue fallback
             ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 99)
@@ -140,15 +150,32 @@ class TestFetchBoardIssueKeys:
 
     def test_no_sprints_falls_back_to_board_endpoint(self):
         """Board with no sprints (kanban) falls back to board/issue endpoint."""
-        sprints_resp = {"values": []}
         board_issues = {"issues": [{"key": "PROJ-55"}], "total": 1}
         with patch("scripts.common.jira_api.requests") as mock_req:
             mock_req.get.side_effect = [
-                _make_response(sprints_resp),
-                _make_response(board_issues),
+                _count_resp(0),                # total=0
+                _make_response({"values": []}),  # data call returns no sprints
+                _make_response(board_issues),    # board/issue fallback
             ]
             keys = fetch_board_issue_keys(FAKE_CONFIG, 0)
         assert "PROJ-55" in keys
+
+    def test_jumps_to_last_page_for_old_boards(self):
+        """When board has many historical sprints, startAt skips to the last page."""
+        # Board has 120 sprints; start_at should be max(0, 120-50)=70
+        sprints_page = {"values": [_sprint_response(119, state="active")]}
+        sprint_issues = {"issues": [{"key": "NEW-1"}], "total": 1}
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.side_effect = [
+                _count_resp(120),
+                _make_response(sprints_page),
+                _make_response(sprint_issues),
+            ]
+            keys = fetch_board_issue_keys(FAKE_CONFIG, 42)
+        # Verify the data call used startAt=70
+        data_call_params = mock_req.get.call_args_list[1][1]["params"]
+        assert data_call_params["startAt"] == 70
+        assert "NEW-1" in keys
 
 
 class TestSearchIssues:

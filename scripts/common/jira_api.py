@@ -153,12 +153,26 @@ def fetch_board_issue_keys(
     keys: set[str] = set()
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
-    # --- Step 1: get active + closed sprints for this board ---
+    # --- Step 1: get the most recent closed + active sprints for this board ---
+    # Jira returns sprints oldest-first, so we must jump to the last page to
+    # get recent ones.  First call gets total count, second call fetches the last 50.
     try:
+        count_resp = requests.get(
+            f"{base}/rest/agile/1.0/board/{board_id}/sprint",
+            headers=headers,
+            params={"state": "active,closed", "maxResults": 1},
+            timeout=30,
+        )
+        if not count_resp.ok:
+            print(f"[jira-api] board/{board_id}/sprint error {count_resp.status_code}", file=sys.stderr)
+            return _fetch_board_issues_direct(config, board_id, max_results)
+        total_sprints = count_resp.json().get("total", 0)
+        start_at = max(0, total_sprints - 50)  # last 50 sprints (most recent)
+
         sresp = requests.get(
             f"{base}/rest/agile/1.0/board/{board_id}/sprint",
             headers=headers,
-            params={"state": "active,closed", "maxResults": 10},
+            params={"state": "active,closed", "maxResults": 50, "startAt": start_at},
             timeout=30,
         )
     except Exception as e:
