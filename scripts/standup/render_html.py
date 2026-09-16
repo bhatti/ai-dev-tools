@@ -129,11 +129,27 @@ def _esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_EMOJI_MAP = {
+    ":white_check_mark:": "✅", ":warning:": "⚠️",
+    ":red_circle:": "🔴", ":large_yellow_circle:": "🟡",
+    ":rotating_light:": "🚨", ":bust_in_silhouette:": "👤",
+    ":question:": "❓", ":paperclip:": "📎",
+    ":mag:": "🔍", ":chart_with_upwards_trend:": "📈",
+    ":speech_balloon:": "💬", ":clock1:": "🕐",
+    ":fire:": "🔥", ":bell:": "🔔",
+}
+
+
 def _inline_md(s: str) -> str:
-    """Apply inline Markdown/mrkdwn: bold, italic, code, emoji shortcuts."""
-    # Emoji text aliases
-    s = s.replace(":white_check_mark:", "✅").replace(":warning:", "⚠️")
-    s = s.replace(":red_circle:", "🔴").replace(":large_yellow_circle:", "🟡")
+    """Apply inline Markdown/mrkdwn: bold, italic, code, links, emoji shortcuts.
+
+    Input has already been HTML-escaped by _esc(), so < > & are entities.
+    Slack mrkdwn links <url|text> arrive as &lt;url|text&gt; — convert those first.
+    """
+    for alias, emoji in _EMOJI_MAP.items():
+        s = s.replace(alias, emoji)
+    # Slack mrkdwn links: &lt;https://...url|display text&gt; → <a href="url">text</a>
+    s = re.sub(r"&lt;(https?://[^|&]+)\|([^&]+)&gt;", r'<a href="\1">\2</a>', s)
     # Bold **text** or *text* (mrkdwn)
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"\*(.+?)\*", r"<strong>\1</strong>", s)
@@ -141,7 +157,7 @@ def _inline_md(s: str) -> str:
     s = re.sub(r"_(.+?)_", r"<em>\1</em>", s)
     # Inline code
     s = re.sub(r"`(.+?)`", r"<code>\1</code>", s)
-    # Links [text](url)
+    # Markdown links [text](url)
     s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
     return s
 
@@ -259,6 +275,8 @@ _HTML = """\
     .risk-high {{ border-left: 4px solid #dc3545; padding-left:.75rem; margin-bottom:.75rem; }}
     .risk-med  {{ border-left: 4px solid #ffc107; padding-left:.75rem; margin-bottom:.75rem; }}
     .risk-low  {{ border-left: 4px solid #0dcaf0; padding-left:.75rem; margin-bottom:.75rem; }}
+    .brief-section {{ background:#f8f9fa; border-radius:.5rem; padding:1rem 1.25rem; margin-bottom:1rem; }}
+    .brief-section hr {{ border-color: #dee2e6; }}
   </style>
 </head>
 <body class="container-fluid py-3">
@@ -267,6 +285,8 @@ _HTML = """\
   <h2 class="mb-0">📋 Standup Report — {report_date}</h2>
   <span class="text-muted small">Generated {generated_at}</span>
 </div>
+
+{brief_html}
 
 <!-- ── Board Status ──────────────────────────────────────────────────────── -->
 <h3>Board Status</h3>
@@ -332,12 +352,21 @@ def main() -> None:
     risk_md = risk_report_path.read_text() if risk_report_path.exists() else ""
     risk_html = _md_to_html(risk_md) if risk_md else "<p class='text-muted'>No risk report generated.</p>"
 
+    brief_path = workspace_dir / "standup_brief.md"
+    brief_html = ""
+    if brief_path.exists():
+        brief_md = brief_path.read_text().strip()
+        if brief_md:
+            brief_html = f'<div class="brief-section">\n{_md_to_html(brief_md)}\n</div>'
+            print(f"[render_html] included standup_brief.md ({len(brief_md)} chars)", flush=True)
+
     report_date = date.today().isoformat()
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     html = _HTML.format(
         report_date=report_date,
         generated_at=generated_at,
+        brief_html=brief_html,
         board_rows=_board_status_rows(signals),
         person_rows=_person_rows(signals),
         risk_html=risk_html,
