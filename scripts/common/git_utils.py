@@ -272,6 +272,26 @@ def get_commit_count(repo_path: Path, base_branch: str = "main") -> int:
     return 0
 
 
+def resolve_clone_auth(config: dict, tracker: str = "") -> tuple[str, str, str]:
+    """Extract git clone credentials from config for a given tracker.
+
+    Returns (http_token, http_username, ssh_key). Callers pass these to clone_repo().
+    """
+    if not tracker:
+        tracker = (config.get("DEFAULT_TRACKER") or "").lower().strip()
+
+    ssh_key = config.get("SSH_PRIVATE_KEY", "")
+
+    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+        http_token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
+        http_username = get_bitbucket_git_username(config) if http_token else "x-token-auth"
+        return http_token, http_username, ssh_key
+
+    http_token = config.get("GH_TOKEN", config.get("GITHUB_TOKEN", ""))
+    http_username = "x-access-token" if http_token else ""
+    return http_token, http_username, ssh_key
+
+
 def clone_by_tracker(config: dict, dest: Path, tracker: str = "") -> Path:
     """Clone a repo using the correct auth for the tracker (github or bitbucket).
 
@@ -289,16 +309,14 @@ def clone_by_tracker(config: dict, dest: Path, tracker: str = "") -> Path:
     if not tracker:
         tracker = (config.get("DEFAULT_TRACKER") or "").lower().strip()
 
-    ssh_key = config.get("SSH_PRIVATE_KEY", "")
+    http_token, http_username, ssh_key = resolve_clone_auth(config, tracker)
 
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
         workspace = config.get("BITBUCKET_WORKSPACE", "")
         repo_name = config.get("BITBUCKET_REPO", "")
         if not workspace or not repo_name:
             raise ValueError("BITBUCKET_WORKSPACE and BITBUCKET_REPO must be set")
-        http_token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", ""))
         if http_token:
-            http_username = get_bitbucket_git_username(config)
             clone_url = detect_bitbucket_url(workspace, repo_name, use_ssh=False)
             print(f"[clone] cloning {workspace}/{repo_name} via HTTPS", flush=True)
             return clone_repo(clone_url, dest, http_token=http_token, http_username=http_username)
@@ -311,12 +329,11 @@ def clone_by_tracker(config: dict, dest: Path, tracker: str = "") -> Path:
         repo_name = config.get("GH_REPO", "")
         if not org or not repo_name:
             raise ValueError("GH_ORG and GH_REPO must be set")
-        token = config.get("GH_TOKEN", "")
-        use_ssh = not token or config.get("USE_SSH", "0") == "1"
-        if token and not use_ssh:
+        use_ssh = not http_token or config.get("USE_SSH", "0") == "1"
+        if http_token and not use_ssh:
             clone_url = detect_repo_url(org, repo_name, use_ssh=False)
             print(f"[clone] cloning {org}/{repo_name} via HTTPS token", flush=True)
-            return clone_repo(clone_url, dest, http_token=token, http_username="x-access-token")
+            return clone_repo(clone_url, dest, http_token=http_token, http_username=http_username)
         else:
             clone_url = detect_repo_url(org, repo_name, use_ssh=True)
             print(f"[clone] cloning {org}/{repo_name} via SSH", flush=True)

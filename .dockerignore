@@ -17,5 +17,8 @@ k8s/
 tests/
 *.md
 !README.md
+!.claude/
+!.claude/**
+!**/SKILL.md
 docker-compose.yml
 Makefile

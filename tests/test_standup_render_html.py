@@ -155,7 +155,7 @@ def test_brief_slack_bold_rendered(tmp_workspace, monkeypatch):
 
 def test_mrkdwn_links_rendered_as_anchors(tmp_workspace, monkeypatch):
     """Slack <url|text> links in standup_brief.md should become clickable <a> tags."""
-    brief = "🔴 <https://jira.com/browse/CRIBL-123|CRIBL-123> blocked\n"
+    brief = "🔴 <https://jira.com/browse/PROJ-123|PROJ-123> blocked\n"
     html = _run_with_brief(tmp_workspace, monkeypatch, _make_signals(), brief_md=brief)
-    assert '<a href="https://jira.com/browse/CRIBL-123">CRIBL-123</a>' in html
+    assert '<a href="https://jira.com/browse/PROJ-123">PROJ-123</a>' in html
     assert "&lt;https://jira.com" not in html

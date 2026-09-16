@@ -10,6 +10,7 @@ from scripts.common.git_utils import (
     create_branch,
     get_commit_count,
     make_branch_name,
+    resolve_clone_auth,
 )
 
 
@@ -177,3 +178,42 @@ def test_create_branch_new_with_base_needs_fetch(mock_run):
     # final checkout should reference origin/stage
     checkout_call = mock_run.call_args_list[-1][0][0]
     assert checkout_call == ["git", "checkout", "-b", "ai/42-my-branch-abc", "origin/stage"]
+
+
+# ─── resolve_clone_auth ──────────────────────────────────────────────────────
+
+
+def test_resolve_clone_auth_github():
+    config = {"GH_TOKEN": "ghp_abc123"}
+    token, username, ssh_key = resolve_clone_auth(config, "github")
+    assert token == "ghp_abc123"
+    assert username == "x-access-token"
+    assert ssh_key == ""
+
+
+def test_resolve_clone_auth_bitbucket():
+    config = {"BITBUCKET_TOKEN": "ATATT_xyz", "BITBUCKET_USERNAME": "user@example.com"}
+    token, username, ssh_key = resolve_clone_auth(config, "jira")
+    assert token == "ATATT_xyz"
+    assert username == "x-token-auth"
+
+
+def test_resolve_clone_auth_bitbucket_app_password():
+    config = {"BITBUCKET_APP_PASSWORD": "app_pw", "BITBUCKET_USERNAME": "user@example.com"}
+    token, username, ssh_key = resolve_clone_auth(config, "jira/bitbucket")
+    assert token == "app_pw"
+    assert username == "user@example.com"
+
+
+def test_resolve_clone_auth_ssh_fallback():
+    config = {"SSH_PRIVATE_KEY": "-----BEGIN OPENSSH PRIVATE KEY-----"}
+    token, username, ssh_key = resolve_clone_auth(config, "github")
+    assert token == ""
+    assert ssh_key == "-----BEGIN OPENSSH PRIVATE KEY-----"
+
+
+def test_resolve_clone_auth_auto_detect_tracker():
+    config = {"DEFAULT_TRACKER": "github", "GH_TOKEN": "ghp_test"}
+    token, username, ssh_key = resolve_clone_auth(config)
+    assert token == "ghp_test"
+    assert username == "x-access-token"

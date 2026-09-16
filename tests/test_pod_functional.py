@@ -155,6 +155,16 @@ _SCRIPTS_TO_COPY = [
     "scripts/common/shell.py",
     "scripts/gh/learn.py",
     "scripts/jira/learn.py",
+    "scripts/adhoc/__init__.py",
+    "scripts/adhoc/run_skill.py",
+    "scripts/skill/__init__.py",
+    "scripts/skill/flags.py",
+    "scripts/skill/run_skill.py",
+]
+
+# Directories to copy wholesale (e.g. .claude/skills for skill pod tests).
+_DIRS_TO_COPY = [
+    ".claude/skills",
 ]
 
 # Public GitHub repo used for codebase-audit pod tests.
@@ -249,7 +259,16 @@ def _copy_scripts(pod_name: str) -> None:
             continue
         _kubectl("cp", str(local), f"{pod_name}:/app/{rel}", timeout=30)
         n += 1
-    print(f"    copied {n} script(s) into {pod_name}", flush=True)
+    # Copy whole directories (e.g. .claude/skills).
+    for rel_dir in _DIRS_TO_COPY:
+        local_dir = REPO_ROOT / rel_dir
+        if not local_dir.is_dir():
+            print(f"    WARNING: {rel_dir}/ not found locally — skipping", flush=True)
+            continue
+        _kubectl("exec", pod_name, "--", "mkdir", "-p", f"/app/{rel_dir}", timeout=15, check=False)
+        _kubectl("cp", str(local_dir), f"{pod_name}:/app/{rel_dir}", timeout=30)
+        n += 1
+    print(f"    copied {n} item(s) into {pod_name}", flush=True)
 
 
 # ── pod fixture ────────────────────────────────────────────────────────────────
@@ -2283,6 +2302,310 @@ def test_21_pr_audit_slack_routing(base_env: dict[str, str]) -> TestResult:
     return _pass(result, "all SLACK_MESSAGE routing checks passed")
 
 
+def test_22_skill_invoke(base_env: dict[str, str]) -> TestResult:
+    """Run scripts.skill.run_skill with ygs-ask via RAW_ARGS. Verifies:
+      1. Exit 0
+      2. skill_result.json written with valid JSON
+      3. reports/report.md written with content (Claude answer)
+      4. reports/report.html generated
+      5. SKILL, SKILL_LOADED, SELECTED_TRACKER context markers emitted
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor ANTHROPIC_API_KEY set.
+    """
+    result = TestResult("skill-invoke")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/skill_invoke"
+    env["WORKSPACE_DIR"] = ws
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_ADHOC"] = "20"
+    env["RAW_ARGS"] = "ygs-ask -- What are the first 5 prime numbers? List them as bullets."
+    env["DEFAULT_TRACKER"] = "github"
+    env["GH_ORG"] = GH_ORG
+    env["GH_REPO"] = GH_REPO
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("skill-invoke") as pod:
+        step = exec_step(pod, "skill-invoke",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill",
+                         env, timeout=300)
+        result.steps.append(step)
+
+        if not step.ok:
+            return _fail(result, step, f"run_skill exit code {step.returncode}")
+
+        err = _check_keys(step, ["SKILL", "SKILL_LOADED", "SELECTED_TRACKER"])
+        if err:
+            return _fail(result, step, f"context markers missing: {err}")
+
+        if step.context.get("SKILL") != "ygs-ask":
+            return _fail(result, step,
+                         f"SKILL={step.context.get('SKILL')!r} — expected 'ygs-ask'")
+
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"# skill_result.json must be valid JSON\n"
+            f"rj = os.path.join(ws, 'skill_result.json')\n"
+            f"if not os.path.exists(rj):\n"
+            f"    issues.append('skill_result.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(rj).read())\n"
+            f"        print(f'::add-task-context SKILL_STATUS::{{d.get(\"status\", \"?\")}}')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'skill_result.json parse error: {{e}}')\n"
+            f"# reports/report.md must exist with content\n"
+            f"md = os.path.join(ws, 'reports', 'report.md')\n"
+            f"if not os.path.exists(md):\n"
+            f"    issues.append('reports/report.md missing')\n"
+            f"elif os.path.getsize(md) < 50:\n"
+            f"    issues.append(f'reports/report.md too small ({{os.path.getsize(md)}} bytes)')\n"
+            f"else:\n"
+            f"    print(f'::add-task-context REPORT_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"# reports/report.html must exist\n"
+            f"html = os.path.join(ws, 'reports', 'report.html')\n"
+            f"if not os.path.exists(html):\n"
+            f"    issues.append('reports/report.html missing')\n"
+            f"else:\n"
+            f"    print(f'::add-task-context REPORT_HTML_BYTES::{{os.path.getsize(html)}}')\n"
+            f"if issues:\n"
+            f"    print('FILE ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context FILES_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-skill", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"file verification failed: {verify_step.stderr[-300:]}")
+
+    report_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    html_bytes = verify_step.context.get("REPORT_HTML_BYTES", "?")
+    model = step.context.get("SELECTED_MODEL", "?")
+    skill_status = verify_step.context.get("SKILL_STATUS", "?")
+    return _pass(result,
+                 f"SKILL=ygs-ask LOADED={step.context.get('SKILL_LOADED')} "
+                 f"status={skill_status} report={report_bytes}B html={html_bytes}B "
+                 f"MODEL={model} elapsed={step.elapsed:.0f}s")
+
+
+def test_23_skill_flag_parsing(base_env: dict[str, str]) -> TestResult:
+    """Verify skill flag parsing works in the pod — no Claude call needed.
+
+    Checks:
+      1. Empty RAW_ARGS → exit 1 with "no skill name" error
+      2. Valid RAW_ARGS → exit 0 with correct context markers (SKILL, SELECTED_TRACKER)
+    """
+    result = TestResult("skill-flag-parsing")
+
+    env = dict(base_env)
+    ws = "/workspace/skill_flags"
+    env["WORKSPACE_DIR"] = ws
+    env["DEFAULT_TRACKER"] = "github"
+    env.pop("SLACK_BOT_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLAUDE_CODE_USE_BEDROCK", None)
+
+    with pod_fixture("skill-flags") as pod:
+        # Step 1 — empty RAW_ARGS should fail with clear error
+        env_empty = dict(env)
+        env_empty["RAW_ARGS"] = ""
+        step = exec_step(pod, "empty-args",
+                         f"mkdir -p {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill 2>&1 || true",
+                         env_empty, timeout=30)
+        result.steps.append(step)
+
+        # Check stderr/stdout for "no skill name"
+        combined = step.stdout + step.stderr
+        if "no skill name" not in combined.lower():
+            return _fail(result, step,
+                         f"expected 'no skill name' error, got: {combined[-300:]}")
+
+        # Step 2 — valid RAW_ARGS with flag parsing only (will fail at Claude call
+        # but we verify flags parsed correctly via context markers before that).
+        env_valid = dict(env)
+        env_valid["RAW_ARGS"] = "integ-tests --repo https://github.com/bhatti/todo-sample.git --branch main --tracker github"
+        step2 = exec_step(pod, "parse-flags",
+                          f"mkdir -p {ws}/logs && "
+                          "python3 -m scripts.skill.run_skill 2>&1 || true",
+                          env_valid, timeout=60)
+        result.steps.append(step2)
+
+        # Even if it exits non-zero (no Claude creds), the context markers should be emitted
+        # before the Claude invocation.
+        ctx_err = _check_keys(step2, ["SELECTED_TRACKER", "SKILL"])
+        if ctx_err:
+            return _fail(result, step2, f"context markers missing: {ctx_err}")
+
+        val_err = _check_values(step2, {
+            "SKILL": "integ-tests",
+            "SELECTED_TRACKER": "github",
+        })
+        if val_err:
+            return _fail(result, step2, val_err)
+
+    return _pass(result, "flag parsing verified: empty→error, valid→correct context markers")
+
+
+def test_24_skill_integ_tests(base_env: dict[str, str]) -> TestResult:
+    """Run scripts.skill.run_skill with integ-tests skill against todo-sample repo.
+
+    Verifies:
+      1. Exit 0
+      2. Context markers: SKILL, SKILL_LOADED, SELECTED_TRACKER, SELECTED_MODEL, REPO_URL, BRANCH
+      3. skill_result.json exists with valid JSON
+      4. reports/report.md has content
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor ANTHROPIC_API_KEY set.
+    """
+    result = TestResult("skill-integ-tests")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/skill_invoke"
+    env["WORKSPACE_DIR"] = ws
+    env["RAW_ARGS"] = "integ-tests --repo https://github.com/bhatti/todo-sample.git --branch main -- run tests and generate report"
+    env["DEFAULT_TRACKER"] = "github"
+    env["GH_ORG"] = GH_ORG
+    env["GH_REPO"] = GH_REPO
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_ADHOC"] = "20"
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("skill-invoke") as pod:
+        # Step 1 — run skill
+        step = exec_step(pod, "skill-invoke",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill",
+                         env, timeout=600)
+        result.steps.append(step)
+
+        if not step.ok:
+            return _fail(result, step, f"run_skill exit code {step.returncode}")
+
+        err = _check_keys(step, ["SELECTED_TRACKER", "SKILL", "SKILL_LOADED", "SELECTED_MODEL"])
+        if err:
+            return _fail(result, step, f"context markers missing: {err}")
+
+        val_err = _check_values(step, {"SKILL": "integ-tests", "SELECTED_TRACKER": "github"})
+        if val_err:
+            return _fail(result, step, val_err)
+
+        # Step 2 — verify output files
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"# skill_result.json must exist with valid JSON\n"
+            f"rj = os.path.join(ws, 'skill_result.json')\n"
+            f"if not os.path.exists(rj):\n"
+            f"    issues.append('skill_result.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(rj).read())\n"
+            f"        print(f'::add-task-context SKILL_STATUS::{{d.get(\"status\", \"?\")}}')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'skill_result.json parse error: {{e}}')\n"
+            f"# reports/report.md should exist with content\n"
+            f"md = os.path.join(ws, 'reports', 'report.md')\n"
+            f"if os.path.exists(md):\n"
+            f"    sz = os.path.getsize(md)\n"
+            f"    print(f'::add-task-context REPORT_MD_BYTES::{{sz}}')\n"
+            f"    if sz < 50: issues.append(f'report.md too small ({{sz}} bytes)')\n"
+            f"else:\n"
+            f"    issues.append('reports/report.md missing')\n"
+            f"# reports/report.html should exist\n"
+            f"html = os.path.join(ws, 'reports', 'report.html')\n"
+            f"if os.path.exists(html):\n"
+            f"    print(f'::add-task-context REPORT_HTML_BYTES::{{os.path.getsize(html)}}')\n"
+            f"if issues:\n"
+            f"    print('FILE ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context FILES_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-skill", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"file verification failed: {verify_step.stderr[-300:]}")
+
+    report_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    html_bytes = verify_step.context.get("REPORT_HTML_BYTES", "?")
+    model = step.context.get("SELECTED_MODEL", "?")
+    skill_status = verify_step.context.get("SKILL_STATUS", "?")
+    return _pass(result,
+                 f"SKILL=integ-tests status={skill_status} report={report_bytes}B html={html_bytes}B "
+                 f"MODEL={model} elapsed={step.elapsed:.0f}s")
+
+
+def test_25_skill_service_awareness(base_env: dict[str, str]) -> TestResult:
+    """Verify skill script detects SERVICE_IMAGE env and logs service info.
+
+    Does NOT require Claude credentials — the script logs service awareness
+    before invoking Claude, so we can verify detection even when Claude call fails.
+    """
+    result = TestResult("skill-service-awareness")
+
+    env = dict(base_env)
+    ws = "/workspace/skill_service"
+    env["WORKSPACE_DIR"] = ws
+    env["RAW_ARGS"] = "ygs-ask --repo https://github.com/bhatti/todo-sample.git -- check service"
+    env["DEFAULT_TRACKER"] = "github"
+    env["SERVICE_IMAGE"] = "nginx:alpine"
+    env["SERVICE_NAME"] = "test-svc"
+    env["SERVICE_PORT"] = "8080"
+    env.pop("SLACK_BOT_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLAUDE_CODE_USE_BEDROCK", None)
+
+    with pod_fixture("skill-svc") as pod:
+        step = exec_step(pod, "svc-detect",
+                         f"mkdir -p {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill 2>&1 || true",
+                         env, timeout=60)
+        result.steps.append(step)
+
+        combined = step.stdout + step.stderr
+        if "service running: nginx:alpine at localhost:8080" not in combined:
+            return _fail(result, step,
+                         f"service detection log missing, got: {combined[-500:]}")
+
+        ctx_err = _check_keys(step, ["SKILL"])
+        if ctx_err:
+            return _fail(result, step, f"context markers missing: {ctx_err}")
+
+        val_err = _check_values(step, {"SKILL": "ygs-ask"})
+        if val_err:
+            return _fail(result, step, val_err)
+
+    return _pass(result, "service awareness verified: SERVICE_IMAGE detected and logged")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -2307,6 +2630,10 @@ ALL_TESTS: dict[str, callable] = {
     "learn-gh":              test_19_learn_gh,
     "adhoc-ask":             test_20_adhoc_ask,
     "pr-audit-slack-routing": test_21_pr_audit_slack_routing,
+    "skill-invoke":           test_22_skill_invoke,
+    "skill-flag-parsing":     test_23_skill_flag_parsing,
+    "skill-integ-tests":      test_24_skill_integ_tests,
+    "skill-service-awareness": test_25_skill_service_awareness,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

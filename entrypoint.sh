@@ -169,6 +169,9 @@ _apply_project_skills() {
   [ "$count" -gt 0 ] && echo "Project skills: ${count} override(s) applied from ${proj_skills_dir}"
 }
 
+# Apply ai-dev-tools built-in skills (e.g. integ-tests) from /app/.claude/skills
+_apply_project_skills "/app/.claude/skills"
+
 if [ -n "${CODEBASE_DIR:-}" ]; then
   _apply_project_skills "${CODEBASE_DIR}/.claude/skills"
 fi

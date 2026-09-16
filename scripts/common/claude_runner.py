@@ -131,7 +131,17 @@ def _ensure_ygs_skills() -> None:
             + "\n".join(inventory_lines)
         )
 
-    # Apply project-level skill overrides if CODEBASE_DIR is set
+    # Apply ai-dev-tools built-in skills from /app/.claude/skills (e.g. integ-tests)
+    app_skills = Path("/app/.claude/skills")
+    if app_skills.is_dir():
+        for skill_dir in sorted(app_skills.iterdir()):
+            if skill_dir.is_dir():
+                link = skills_base / skill_dir.name
+                link.unlink(missing_ok=True)
+                link.symlink_to(skill_dir.resolve())
+        print(f"[ygs] built-in skills applied from {app_skills}", flush=True)
+
+    # Apply project-level skill overrides if CODEBASE_DIR is set (overrides built-in)
     codebase_dir = os.environ.get("CODEBASE_DIR", "")
     if codebase_dir:
         proj_skills = Path(codebase_dir) / ".claude" / "skills"

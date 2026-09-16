@@ -240,12 +240,12 @@ class TestResolveAndFilter:
 
     def test_branch_name_matches_issue_key(self):
         prs = [
-            {"title": "fix bug", "body": "", "branch": "goatbot/bugs/PROJ-42_description"},
+            {"title": "fix bug", "body": "", "branch": "aibot/bugs/PROJ-42_description"},
             {"title": "other fix", "body": "", "branch": "feature/unrelated"},
         ]
         filtered = _filter_prs_by_issue_keys(prs, {"PROJ-42"})
         assert len(filtered) == 1
-        assert filtered[0]["branch"] == "goatbot/bugs/PROJ-42_description"
+        assert filtered[0]["branch"] == "aibot/bugs/PROJ-42_description"
 
 
 # ---------------------------------------------------------------------------

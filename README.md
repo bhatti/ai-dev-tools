@@ -386,6 +386,7 @@ The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that list
 | `@bot jira-analyze PROJ-1,PROJ-2` | Analyze and summarize a set of Jira issues | `ai-jira-query` (Mode=analyze) |
 | `@bot gh-query <keywords>` | Search GitHub issues by keyword | `ai-jira-query` (DefaultTracker=github) |
 | `@bot gh-analyze #123,#456` | Analyze GitHub issues for root cause and fixes | `ai-jira-query` (Mode=analyze, DefaultTracker=github) |
+| `@bot skill <name> [flags] [-- instructions]` | Run any YGS skill against a repo with optional service sidecar | `ai-skill` |
 | `@bot doctor` | Connectivity check against all configured services | `ai-connectivity-check` |
 
 When a paused job is waiting in a thread, replying in that thread resumes the job with `ReplyText` set to your message.
@@ -433,6 +434,58 @@ formicary submit formicary/ai-adhoc.yaml \
   --var Skill=ygs-standup \
   --var Prompt="summarize open PRs for this week"
 ```
+
+---
+
+## Generic Skill Invocation (`ai-skill`)
+
+Run **any** YGS skill against **any** repo with full flag parsing, smart defaults, and optional background services — all from a single Slack command or API call.
+
+### Via Slack
+
+```
+@bot skill ygs-analyze --repo myapp --branch dev -- focus on test coverage
+@bot skill ygs-security-review --repo https://github.com/org/repo --branch release-2.0
+@bot skill ygs-investigate -- investigate flaky test JIRA-123 and update Jira
+@bot skill ygs-qa --repo myapp -- run E2E tests
+```
+
+### Via API (with optional service sidecar)
+
+```bash
+curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
+  -H "Authorization: Bearer $FORMICARY_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"job_type":"ai-skill","params":{
+    "RawArgs":"ygs-qa --repo myapp -- run E2E tests against leader",
+    "ServiceImage":"myapp/myapp-leader:4.10",
+    "ServicePort":"9000"
+  }}'
+```
+
+### Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--repo <url\|name>` | Repo to clone (full URL, `org/repo`, or bare name expanded via org config) | Org config default |
+| `--branch <name>` | Branch to check out | `main` (GitHub) / `dev` (Bitbucket) |
+| `--tracker github\|jira` | Override tracker auto-detection | Auto-detected from URL or `DEFAULT_TRACKER` |
+| `--model <id>` | Model override (shortnames: `haiku`, `sonnet`, `opus`) | Org config default |
+| `--service <image:tag>` | Service sidecar image (requires API submission with `ServiceImage` param) | None |
+| `-- <text>` | Additional instructions passed to the skill | None |
+
+### Service Sidecars
+
+When `ServiceImage` is set (via API `params`), a sidecar container runs alongside the skill task. The skill accesses it at `localhost:<ServicePort>`. Customizable via job variables: `ServiceName`, `ServicePort`, `ServiceCommand`, `ServiceMemoryLimit`, `ServiceCpuRequest`.
+
+### How it works
+
+1. Slack router passes full message as `RawArgs` → formicary submits `ai-skill` job
+2. `scripts/skill/run_skill.py` parses flags, resolves tracker/repo/branch from org config
+3. Clones repo (with tracker-appropriate auth), installs YGS skills + extras
+4. Loads skill SKILL.md, builds prompt with repo context + service info + instructions
+5. Invokes Claude, writes reports (`skill_result.json`, `reports/report.{md,html}`)
+6. Posts results to Slack thread
 
 ---
 
@@ -703,6 +756,10 @@ python3 tests/test_pod_functional.py --list
 | `standup-pipeline` | Full pipeline: gather → synthesize in one pod (shared workspace) |
 | `gh-query` | GitHub issue query, `SELECTED_TRACKER=github` |
 | `gh-analyze` | Claude analysis of GitHub issues, `ANALYSIS_TYPE` key |
+| `skill-invoke` | Generic skill invocation with `ygs-ask`, context markers, result files |
+| `skill-flag-parsing` | Flag parsing: empty args → error, valid args → correct context markers |
+| `skill-integ-tests` | Built-in `integ-tests` skill against a repo (requires Claude creds) |
+| `skill-service-awareness` | SERVICE_IMAGE env detection and service info logging |
 
 Each test creates its own pod, copies scripts, runs, then deletes the pod — clean isolation.
 The standup-pipeline test runs `gather_jira` then `synthesize` in the **same pod** so
@@ -741,6 +798,7 @@ you> prs
 you> risk
 you> review https://github.com/org/repo/pull/42
 you> security review https://github.com/org/repo/pull/42
+you> skill ygs-analyze --repo myapp -- focus on test coverage
 you> jira query open authentication bugs
 you> implement PROJ-123
 you> /workflows       ← list all loaded workflows
@@ -844,6 +902,18 @@ SKILL_PROMPT="" \
 python3 -m scripts.adhoc.run_skill --skill ygs-pr-queue --prompt ""
 ```
 
+### Test generic skill invocation locally
+
+```bash
+source ~/.zshrc
+
+# Run any skill against a repo with flag parsing
+RAW_ARGS="ygs-ask --repo https://github.com/bhatti/todo-sample.git --branch main -- what does this repo do?" \
+WORKSPACE_DIR="/tmp/skill_test" \
+DEFAULT_TRACKER="github" \
+python3 -m scripts.skill.run_skill
+```
+
 ---
 
 ### Test via Slack (requires deployed router)
@@ -856,6 +926,7 @@ After running `deploy-ai-slack-router.sh`, mention the bot in your channel:
 | `@bot prs` | PR table posted: Jira key, PR number, description, status, reviewers |
 | `@bot risk` / `@bot risks` | Risk list posted |
 | `@bot review <pr-url>` | Review findings Block Kit posted with Approve / Request Changes buttons |
+| `@bot skill ygs-ask -- what is 2+2` | Skill result posted to thread; `ai-skill` job in Formicary |
 
 **Check router logs for errors:**
 ```bash
