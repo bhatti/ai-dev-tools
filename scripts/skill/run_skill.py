@@ -263,6 +263,10 @@ def main() -> None:
             flush=True,
         )
 
+    if flags.identifier:
+        print(f"[skill] identifier={flags.identifier}", flush=True)
+        print(f"::add-task-context IDENTIFIER::{flags.identifier}", flush=True)
+
     # Build the prompt.
     extra_instructions = flags.instructions
     if service_info:

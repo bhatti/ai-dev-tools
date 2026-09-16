@@ -444,10 +444,12 @@ Run **any** YGS skill against **any** repo with full flag parsing, smart default
 ### Via Slack
 
 ```
-@bot skill ygs-analyze --repo myapp --branch dev -- focus on test coverage
+@bot skill ygs-analyze myapp --branch dev -- focus on test coverage
+@bot skill ygs-review-pr myapp 4444
+@bot skill ygs-review-pr myapp 4444 --branch release
 @bot skill ygs-security-review --repo https://github.com/org/repo --branch release-2.0
 @bot skill ygs-investigate -- investigate flaky test JIRA-123 and update Jira
-@bot skill ygs-qa --repo myapp -- run E2E tests
+@bot skill ygs-qa myapp -- run E2E tests
 ```
 
 ### Via API (with optional service sidecar)
@@ -467,7 +469,9 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--repo <url\|name>` | Repo to clone (full URL, `org/repo`, or bare name expanded via org config) | Org config default |
+| Positional: `<repo>` | First non-numeric word after skill name → repo (same as `--repo`) | Org config default |
+| Positional: `<number>` | First numeric word → identifier (PR number, issue ID) passed to skill | None |
+| `--repo <url\|name>` | Explicit repo (full URL, `org/repo`, or bare name expanded via org config) | Org config default |
 | `--branch <name>` | Branch to check out | `main` (GitHub) / `dev` (Bitbucket) |
 | `--tracker github\|jira` | Override tracker auto-detection | Auto-detected from URL or `DEFAULT_TRACKER` |
 | `--model <id>` | Model override (shortnames: `haiku`, `sonnet`, `opus`) | Org config default |
@@ -798,7 +802,8 @@ you> prs
 you> risk
 you> review https://github.com/org/repo/pull/42
 you> security review https://github.com/org/repo/pull/42
-you> skill ygs-analyze --repo myapp -- focus on test coverage
+you> skill ygs-analyze myapp -- focus on test coverage
+you> skill ygs-review-pr myapp 4444
 you> jira query open authentication bugs
 you> implement PROJ-123
 you> /workflows       ← list all loaded workflows

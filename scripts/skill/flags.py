@@ -1,14 +1,19 @@
 """Parse skill invocation flags from RAW_ARGS and resolve repo/branch/tracker.
 
 The RAW_ARGS string comes from the Slack router and has the format:
-    <skill-name> [--repo <url|name>] [--branch <name>] [--tracker github|jira]
-                  [--model <id>] [--service <image:tag>] [-- additional instructions]
+    <skill-name> [positional-args...] [--flags...] [-- additional instructions]
+
+Positional args (before any --flag):
+  - First non-numeric token → repo (if --repo not set)
+  - First numeric token → identifier (PR number, issue ID)
+  - Remaining tokens → prepended to instructions
 
 Examples:
-    ygs-analyze --repo myapp --branch dev -- focus on test coverage
-    ygs-security-review --repo https://github.com/org/repo --branch release-2.0
-    ygs-investigate -- investigate flaky test JIRA-123
-    ygs-qa --repo myapp --service myapp/myapp-leader:4.10 -- run E2E tests
+    review-pr myapp 4444                             → repo=myapp, id=4444
+    review-pr myapp 4444 --branch release            → repo=myapp, id=4444, branch=release
+    analyze myapp --branch dev -- focus on coverage   → repo=myapp, instructions="focus on coverage"
+    ask what is the deployment process                → instructions="what is the deployment process"
+    security-review --repo https://github.com/o/r    → repo=URL (explicit flag)
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ class SkillFlags:
     tracker: str = ""
     service: str = ""
     model: str = ""
+    identifier: str = ""
     instructions: str = ""
 
 
@@ -32,9 +38,18 @@ _FLAG_PATTERN = re.compile(
     r"--(?P<key>repo|branch|tracker|service|model)\s+(?P<val>\S+)"
 )
 
+_NUMERIC = re.compile(r"^\d+$")
+
 
 def parse_skill_flags(raw: str) -> SkillFlags:
-    """Parse a RAW_ARGS string into a SkillFlags dataclass."""
+    """Parse a RAW_ARGS string into a SkillFlags dataclass.
+
+    Supports both explicit flags (--repo, --branch) and positional shorthand.
+    Positional tokens after the skill name are interpreted as:
+      - First non-numeric word → repo (unless --repo is also present)
+      - First numeric word → identifier (PR/issue number)
+      - Remaining words → prepended to instructions
+    """
     raw = (raw or "").strip()
     if not raw:
         return SkillFlags()
@@ -57,9 +72,12 @@ def parse_skill_flags(raw: str) -> SkillFlags:
 
     flags = SkillFlags(skill=skill, instructions=instructions)
 
+    # Extract explicit --key value flags first.
+    flag_spans: list[tuple[int, int]] = []
     for m in _FLAG_PATTERN.finditer(rest):
         key = m.group("key")
         val = m.group("val")
+        flag_spans.append((m.start(), m.end()))
         if key == "repo":
             flags.repo = val
         elif key == "branch":
@@ -70,6 +88,33 @@ def parse_skill_flags(raw: str) -> SkillFlags:
             flags.service = val
         elif key == "model":
             flags.model = val
+
+    # Collect positional tokens (not consumed by --flags).
+    positional: list[str] = []
+    if rest:
+        consumed = set()
+        for start, end in flag_spans:
+            for i in range(start, end):
+                consumed.add(i)
+        remaining = "".join(c if i not in consumed else " " for i, c in enumerate(rest))
+        positional = remaining.split()
+
+    # Interpret positional args: first non-numeric → repo, first numeric → identifier.
+    extra_words: list[str] = []
+    for token in positional:
+        if token == "--":
+            continue
+        if _NUMERIC.match(token) and not flags.identifier:
+            flags.identifier = token
+        elif not flags.repo and not token.startswith("-"):
+            flags.repo = token
+        else:
+            extra_words.append(token)
+
+    # Prepend leftover positional words to instructions.
+    if extra_words:
+        extra = " ".join(extra_words)
+        flags.instructions = f"{extra} {flags.instructions}".strip() if flags.instructions else extra
 
     return flags
 

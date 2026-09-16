@@ -86,6 +86,58 @@ class TestParseSkillFlags:
         assert f.skill == "ygs-analyze"
         assert f.instructions == ""
 
+    # ── positional args ──
+
+    def test_positional_repo_and_id(self):
+        f = parse_skill_flags("review-pr myapp 4444")
+        assert f.skill == "review-pr"
+        assert f.repo == "myapp"
+        assert f.identifier == "4444"
+        assert f.instructions == ""
+
+    def test_positional_repo_id_with_flags(self):
+        f = parse_skill_flags("review-pr myapp 4444 --branch release")
+        assert f.skill == "review-pr"
+        assert f.repo == "myapp"
+        assert f.identifier == "4444"
+        assert f.branch == "release"
+
+    def test_positional_repo_only(self):
+        f = parse_skill_flags("analyze myapp")
+        assert f.skill == "analyze"
+        assert f.repo == "myapp"
+        assert f.identifier == ""
+
+    def test_positional_with_instructions(self):
+        f = parse_skill_flags("analyze myapp -- focus on test coverage")
+        assert f.skill == "analyze"
+        assert f.repo == "myapp"
+        assert f.instructions == "focus on test coverage"
+
+    def test_positional_words_become_instructions(self):
+        f = parse_skill_flags("ask what is the deployment process")
+        assert f.skill == "ask"
+        assert f.instructions == "is the deployment process"
+        assert f.repo == "what"  # first non-numeric becomes repo
+
+    def test_positional_all_words_no_flags(self):
+        """When no flags at all, first word=skill, second=repo, rest=instructions."""
+        f = parse_skill_flags("ask -- what is the deployment process")
+        assert f.skill == "ask"
+        assert f.repo == ""
+        assert f.instructions == "what is the deployment process"
+
+    def test_explicit_repo_flag_wins_over_positional(self):
+        f = parse_skill_flags("review-pr --repo https://github.com/org/repo 4444")
+        assert f.repo == "https://github.com/org/repo"
+        assert f.identifier == "4444"
+
+    def test_positional_id_only(self):
+        f = parse_skill_flags("review-pr 4444")
+        assert f.skill == "review-pr"
+        assert f.identifier == "4444"
+        assert f.repo == ""
+
 
 # ─── resolve_tracker ──────────────────────────────────────────────────────────
 
