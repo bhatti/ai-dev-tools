@@ -311,12 +311,17 @@ class TestPromptTemplate:
             repo_label="org/repo",
             branch="main",
             n_prs=50,
+            date_from="2026-08-15",
+            date_to="2026-09-15",
+            jiras_reviewed=42,
             focus="all",
             pr_context="## PRs\n(test data)",
             skill_instructions="Analyze the PRs.",
             pr_ids="1,2,3",
         )
         assert "org/repo" in result
+        assert "2026-08-15" in result
+        assert "42" in result
         assert "50" in result
         assert "all" in result
         assert "Analyze the PRs." in result

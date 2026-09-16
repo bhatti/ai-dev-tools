@@ -253,6 +253,14 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
         pr_ids = data.get("pr_ids", "")
         if pr_ids:
             print(f"::add-task-context PR_AUDIT_PR_IDS::{pr_ids}", flush=True)
+        date_from = data.get("date_from", "")
+        date_to = data.get("date_to", "")
+        if date_from:
+            print(f"::add-task-context PR_AUDIT_DATE_FROM::{date_from}", flush=True)
+            print(f"::add-task-context PR_AUDIT_DATE_TO::{date_to}", flush=True)
+        jiras_reviewed = data.get("jiras_reviewed", 0)
+        if jiras_reviewed:
+            print(f"::add-task-context PR_AUDIT_JIRAS_REVIEWED::{jiras_reviewed}", flush=True)
         metrics = data.get("metrics", {})
         if isinstance(metrics, dict):
             verbosity_rate = metrics.get("verbosity_accumulation_rate", 0)
@@ -313,6 +321,8 @@ _PR_AUDIT_PROMPT_TEMPLATE = """\
 **Repository**: {repo_label}
 **Branch**: {branch}
 **PRs analyzed**: {n_prs}
+**Date range**: {date_from} to {date_to}
+**Jira issues reviewed**: {jiras_reviewed}
 **Focus**: {focus}
 **Working directory**: You are in the cloned repository root -- run `grep`, `find`, `cat`, etc. directly on the source files.
 **Reports directory**: Write output files to `./reports/` (relative path, same as other workflows).
@@ -509,7 +519,7 @@ Write these files using relative paths from the repo root (the `reports/` symlin
 
 2. `reports/pr_audit_findings.json` -- Structured JSON:
    {{"repo":"{repo_label}","branch":"{branch}","prs_analyzed":{n_prs},"focus":"{focus}",
-    "pr_ids":"{pr_ids}",
+    "pr_ids":"{pr_ids}","date_from":"{date_from}","date_to":"{date_to}","jiras_reviewed":{jiras_reviewed},
     "spec_gap_count":N,"design_gap_count":N,"skill_gap_count":N,"practice_gap_count":N,
     "findings":[{{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"spec|design|skill|practice",
       "gap_type":"team_skill|process|tooling","impact_type":"blocks_delivery|slows_delivery|increases_risk",
@@ -756,6 +766,20 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         print(f"[pr-audit] PR context: {len(pr_context)} chars from {len(prs)} PRs", flush=True)
         print(f"::add-task-context PR_AUDIT_PR_IDS::{pr_ids_str}", flush=True)
 
+        # Compute date range from merged_at timestamps
+        merged_dates = sorted(
+            d for pr in prs
+            if (d := pr.get("merged_at", ""))
+        )
+        date_from = merged_dates[0][:10] if merged_dates else ""
+        date_to = merged_dates[-1][:10] if merged_dates else ""
+        jiras_reviewed = config.get("_jira_issues_reviewed", 0)
+        if date_from:
+            print(f"::add-task-context PR_AUDIT_DATE_FROM::{date_from}", flush=True)
+            print(f"::add-task-context PR_AUDIT_DATE_TO::{date_to}", flush=True)
+        if jiras_reviewed:
+            print(f"::add-task-context PR_AUDIT_JIRAS_REVIEWED::{jiras_reviewed}", flush=True)
+
         # -- Load PR audit skill -----------------------------------------------
         _pr_audit_skill_candidates = ["pr-audit", skill, "ygs-pr-audit"]
         skill_md: str | None = None
@@ -775,6 +799,9 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 repo_label=label,
                 branch=branch,
                 n_prs=len(prs),
+                date_from=date_from or "N/A",
+                date_to=date_to or "N/A",
+                jiras_reviewed=jiras_reviewed,
                 focus=focus,
                 pr_context=pr_context,
                 skill_instructions=skill_md,

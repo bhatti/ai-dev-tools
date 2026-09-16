@@ -135,8 +135,9 @@ class TestResolveJiraIssueKeysIntegration:
         config = dict(config)
         config["JIRA_BOARDS"] = board_id.split(",")[0].strip()
         from scripts.analyze.pr_fetcher import _resolve_jira_issue_keys
-        keys = _resolve_jira_issue_keys(config)
-        assert keys is not None
+        result = _resolve_jira_issue_keys(config)
+        assert result is not None
+        keys, issues = result
         assert len(keys) > 0, "Expected issue keys from board filter"
 
     def test_team_filter_returns_keys(self):
@@ -172,8 +173,9 @@ class TestResolveJiraIssueKeysIntegration:
         config["JIRA_TEAM_FIELD"] = "Eng Scrum Team"
         config.pop("JIRA_BOARDS", None)
         from scripts.analyze.pr_fetcher import _resolve_jira_issue_keys
-        keys = _resolve_jira_issue_keys(config)
-        assert keys is not None
+        result = _resolve_jira_issue_keys(config)
+        assert result is not None
+        keys, issues = result
         assert len(keys) > 0, f"Expected issue keys for team '{team_name}'"
 
     def test_label_filter_skipped_gracefully(self):
@@ -255,10 +257,11 @@ class TestResolveCurrentUserTeamIntegration:
         from scripts.analyze.pr_fetcher import _resolve_jira_issue_keys
         from scripts.common.jira_api import _user_team_cache
         _user_team_cache.clear()
-        keys = _resolve_jira_issue_keys(config)
-        # Should return either None (no filter) or a non-empty set of issue keys
-        assert keys is None or isinstance(keys, set)
-        if keys:
+        result = _resolve_jira_issue_keys(config)
+        # Should return either None (no filter) or a (keys, issues) tuple
+        if result is not None:
+            keys, issues = result
+            assert isinstance(keys, set)
             import re
             key_re = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
             for k in list(keys)[:5]:

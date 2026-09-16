@@ -76,6 +76,10 @@ def main() -> None:
     branch = ""
     prs_analyzed: int | str = "?"
 
+    date_from = ""
+    date_to = ""
+    jiras_reviewed = 0
+
     findings_path = reports_dir / "pr_audit_findings.json"
     if findings_path.exists():
         try:
@@ -87,6 +91,9 @@ def main() -> None:
             repo = findings.get("repo", "")
             branch = findings.get("branch", "")
             prs_analyzed = findings.get("prs_analyzed", "?")
+            date_from = findings.get("date_from", "")
+            date_to = findings.get("date_to", "")
+            jiras_reviewed = findings.get("jiras_reviewed", 0)
         except Exception as e:
             print(f"[post-pr-audit] warning: could not parse findings JSON: {e}", flush=True)
     else:
@@ -98,10 +105,21 @@ def main() -> None:
     if html_url:
         artifact_link = f"\n<{html_url}|View pr_audit_report.html>  |  <{job_url}|All artifacts>"
 
+    date_range = ""
+    if date_from and date_to:
+        date_range = f"\n{date_from} → {date_to}"
+    elif date_from:
+        date_range = f"\n{date_from}"
+
+    jira_info = ""
+    if jiras_reviewed:
+        jira_info = f" from {jiras_reviewed} Jira issues"
+
     header = (
         f":mag: *PR Audit* -- {repo or 'repo'}"
         + (f" @ {branch}" if branch else "")
-        + f" ({prs_analyzed} PRs)"
+        + f" ({prs_analyzed} PRs{jira_info})"
+        + date_range
         + f"\n*{spec_gaps} spec | {design_gaps} design | {skill_gaps} skill | {practice_gaps} practice gaps*"
         + artifact_link
         + "\n\n"

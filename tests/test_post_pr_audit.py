@@ -102,3 +102,30 @@ class TestPostPrAuditSlackBodySelection:
     def test_artifact_link_absent_without_config(self, tmp_path):
         result = _run_post(tmp_path, {}, has_summary=True)
         assert "by-job" not in result["posted_text"]
+
+    def test_header_shows_date_range_and_jira_count(self, tmp_path):
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        full_text = "## PR Audit\n### Executive Summary\nFull report content.\n### Critical Findings\n..."
+        (reports_dir / "pr_audit_report.md").write_text(full_text, encoding="utf-8")
+        (reports_dir / "slack_summary.md").write_text("### Summary\nDigest.\n", encoding="utf-8")
+        findings = {
+            "spec_gap_count": 1, "design_gap_count": 0, "skill_gap_count": 0,
+            "practice_gap_count": 0, "repo": "org/repo", "branch": "dev",
+            "prs_analyzed": 15, "date_from": "2026-08-15", "date_to": "2026-09-15",
+            "jiras_reviewed": 42,
+        }
+        (reports_dir / "pr_audit_findings.json").write_text(json.dumps(findings), encoding="utf-8")
+        config = {"WORKSPACE_DIR": str(tmp_path), "SLACK_BOT_TOKEN": "", "SLACK_CHANNEL": "C0"}
+        posted = []
+        def fake_post(cfg, slack_text, md_text, title, filename, thread_ts=None, channel=None, task_type="post"):
+            posted.append(slack_text)
+            return True
+        with patch("scripts.analyze.post_pr_audit.load_config", return_value=config), \
+             patch("scripts.analyze.post_pr_audit.post_report", side_effect=fake_post):
+            import scripts.analyze.post_pr_audit as m
+            m.main()
+        text = posted[0]
+        assert "2026-08-15" in text
+        assert "2026-09-15" in text
+        assert "42 Jira issues" in text

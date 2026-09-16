@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
+from scripts.common.issue_fetcher import get_jira_linked_prs
 
 KNOWN_BOTS = {
     "github-actions[bot]", "dependabot[bot]", "renovate[bot]",
@@ -163,7 +164,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         config.get("JIRA_SPACE", ""),
         config.get("PR_AUDIT_FILTER", ""),
     ])
-    fetch_limit = n_prs * 3 if has_jira_filter else n_prs
+    fetch_limit = n_prs * 10 if has_jira_filter else n_prs
     cmd = [
         "gh", "pr", "list",
         "-R", f"{org}/{repo}",
@@ -285,9 +286,12 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
     prs = _filter_by_team(prs, config.get("PR_AUDIT_TEAM_MEMBERS", ""), tracker="github")
 
     # Jira-issue-first filter (hybrid GH+Jira setups: --board / --team <name>)
-    issue_keys = _resolve_jira_issue_keys(config)
-    if issue_keys is not None:
+    resolved = _resolve_jira_issue_keys(config)
+    if resolved is not None:
+        issue_keys, jira_issues = resolved
+        config["_jira_issues_reviewed"] = len(issue_keys)
         prs = _filter_prs_by_issue_keys(prs, issue_keys)
+        prs = _supplement_from_dev_status(config, jira_issues, prs)
     else:
         # GH-native: label filter from --filter label=X or --team <name> as label
         pr_filter = config.get("PR_AUDIT_FILTER", "").strip()
@@ -478,7 +482,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         config.get("JIRA_SPACE", ""),
         config.get("PR_AUDIT_FILTER", ""),
     ])
-    fetch_cap = n_prs * 3 if has_filter else n_prs
+    fetch_cap = n_prs * 10 if has_filter else n_prs
 
     raw_prs: list[dict] = []
     while url and len(raw_prs) < fetch_cap:
@@ -570,9 +574,12 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         prs = _filter_by_team(prs, team_str, tracker="bitbucket")
 
     # Jira-issue-first filter: --board / --team <name> / --filter field=value
-    issue_keys = _resolve_jira_issue_keys(config)
-    if issue_keys is not None:
+    resolved = _resolve_jira_issue_keys(config)
+    if resolved is not None:
+        issue_keys, jira_issues = resolved
+        config["_jira_issues_reviewed"] = len(issue_keys)
         prs = _filter_prs_by_issue_keys(prs, issue_keys)
+        prs = _supplement_from_dev_status(config, jira_issues, prs)
 
     prs = prs[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
@@ -743,16 +750,12 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
     return filtered
 
 
-def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
+def _resolve_jira_issue_keys(config: dict) -> tuple[set[str], list[dict]] | None:
     """Resolve Jira issue keys from board, team, or field filter config.
 
-    Returns a set of issue keys to filter PRs by, or None when no filter is
-    configured (meaning all PRs should pass through).
-
-    Priority: team (JQL, precise) > board sprint fetch (fallback when no team).
-    When JIRA_SPACE is set or auto-detected, the board sprint fetch is skipped
-    to avoid false positives from shared/cross-team boards.
-    label=X filters are GitHub-native and bypass this function (returns None).
+    Returns (keys, issues) where *keys* is the set of issue keys and *issues*
+    is the full list of issue dicts (with ``id``/``key`` for dev-status lookup),
+    or None when no filter is configured.
     """
     board_str = config.get("JIRA_BOARDS", "").strip()
     team_name = config.get("JIRA_SPACE", "").strip()
@@ -779,6 +782,7 @@ def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
             print(f"[pr-fetch] using auto-detected team '{team_name}' for board filter", flush=True)
 
     keys: set[str] = set()
+    all_issues: list[dict] = []
 
     # Board filter: fetch issues from recent sprints only.
     # SKIP if team_name is configured — JQL team filter (below) is more precise than sprint
@@ -808,6 +812,7 @@ def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
             issues = _jira_search_issues(config, jql, max_results=500, fields=["summary"])
             team_keys = {i["key"] for i in issues}
             keys |= team_keys
+            all_issues.extend(issues)
             print(f"[pr-fetch] team '{team_name}': {len(team_keys)} issue keys", flush=True)
         else:
             print(f"[pr-fetch] WARNING: Jira field '{field_name}' not found — skipping team filter", flush=True)
@@ -824,20 +829,21 @@ def _resolve_jira_issue_keys(config: dict) -> set[str] | None:
                 issues = _jira_search_issues(config, jql, max_results=500, fields=["summary"])
                 filter_keys = {i["key"] for i in issues}
                 keys |= filter_keys
+                all_issues.extend(issues)
                 print(f"[pr-fetch] filter '{field_name}'='{field_value}': {len(filter_keys)} issue keys", flush=True)
 
     print(f"[pr-fetch] total issue key set: {len(keys)} keys", flush=True)
-    return keys
+    return keys, all_issues
 
 
 def _filter_prs_by_issue_keys(prs: list[dict], issue_keys: set[str]) -> list[dict]:
-    """Keep PRs whose title/body references any key in issue_keys."""
+    """Keep PRs whose title, body, or branch references any key in issue_keys."""
     if not issue_keys:
         print("[pr-fetch] WARNING: issue-key filter active but 0 issue keys resolved — no PRs will match", flush=True)
         return []
     filtered = []
     for pr in prs:
-        text = f"{pr.get('title', '')} {pr.get('body', '')}"
+        text = f"{pr.get('title', '')} {pr.get('body', '')} {pr.get('branch', '')}"
         found = set(re.findall(r'[A-Z][A-Z0-9]+-\d+', text))
         if found & issue_keys:
             filtered.append(pr)
@@ -852,6 +858,37 @@ def _filter_by_label(prs: list[dict], label_value: str) -> list[dict]:
                 if wanted in [lb.lower() for lb in pr.get("labels", [])]]
     print(f"[pr-fetch] label filter '{label_value}': {len(prs)} → {len(filtered)} PRs", flush=True)
     return filtered
+
+
+_PR_URL_NUMBER_RE = re.compile(r'/pull(?:-requests?)?/(\d+)')
+
+
+def _supplement_from_dev_status(
+    config: dict, jira_issues: list[dict], prs: list[dict],
+) -> list[dict]:
+    """Add PRs found via Jira dev-status API that text matching missed.
+
+    Queries at most 50 issues (most recently updated first) to avoid excessive
+    API calls.  Returns *prs* with any newly-fetched PRs appended.
+    """
+    if not jira_issues:
+        return prs
+    existing_numbers = {p.get("number") for p in prs}
+    extra_nums: list[int] = []
+    for issue in jira_issues[:50]:
+        linked = get_jira_linked_prs(config, issue.get("key", ""), issue.get("id", ""))
+        for lp in linked:
+            m = _PR_URL_NUMBER_RE.search(lp.get("url", ""))
+            if m:
+                pr_num = int(m.group(1))
+                if pr_num not in existing_numbers:
+                    existing_numbers.add(pr_num)
+                    extra_nums.append(pr_num)
+    if extra_nums:
+        extra_prs = fetch_prs_by_numbers(config, extra_nums)
+        prs = prs + extra_prs
+        print(f"[pr-fetch] dev-status added {len(extra_prs)} PRs not found via text matching", flush=True)
+    return prs
 
 
 # ---------------------------------------------------------------------------
