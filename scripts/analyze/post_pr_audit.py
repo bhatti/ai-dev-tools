@@ -122,7 +122,7 @@ def main() -> None:
     summary = f"**{spec_gaps} spec | {design_gaps} design | {skill_gaps} skill | {practice_gaps} practice gaps**"
     md_header = build_md_report_header("PR Audit", repo or "repo", branch, meta, summary)
     # Strip any leading `# PR Audit` heading Claude may have written to avoid duplication
-    body = re.sub(r"^#\s+PR Audit[^\n]*\n", "", full_report_text, count=1)
+    body = re.sub(r"^#{1,3}\s+PR Audit[^\n]*\n", "", full_report_text.lstrip(), count=1)
     full_report_text = md_header + body
 
     # --- Format and post with HTML attachment ---

@@ -85,6 +85,14 @@ def test_render_includes_risk_report(tmp_workspace, monkeypatch):
     html = _run(tmp_workspace, monkeypatch, _make_signals(), risk_md=risk_md)
     assert "something bad" in html
     assert "medium thing" in html
+    assert "Risk Report" in html
+
+
+def test_render_no_risk_section_when_absent(tmp_workspace, monkeypatch):
+    """No risk_report.md → Risk Report heading and placeholder must not appear."""
+    html = _run(tmp_workspace, monkeypatch, _make_signals())
+    assert "Risk Report" not in html
+    assert "No risk report generated" not in html
 
 
 def test_render_missing_signals_exits_1(tmp_workspace, monkeypatch):

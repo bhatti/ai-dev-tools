@@ -878,7 +878,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             "findings": [],
         })
 
-        # Patch Claude's JSON with identity fields if absent
+        # Patch Claude's JSON with identity and date fields if absent
         if findings_path.exists():
             try:
                 fdata = json.loads(findings_path.read_text(encoding="utf-8"))
@@ -887,6 +887,8 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                     ("repo", label), ("branch", branch),
                     ("prs_analyzed", len(prs)), ("focus", focus),
                     ("pr_ids", pr_ids_str),
+                    ("date_from", date_from), ("date_to", date_to),
+                    ("jiras_reviewed", jiras_reviewed),
                 ]:
                     if not fdata.get(key):
                         fdata[key] = val

@@ -105,7 +105,7 @@ def main() -> None:
         meta.append(f"`{commit_from}` ({commit_from_date}) → `{commit_to}` ({commit_to_date})")
     summary = f"**{critical_count} critical · {high_count} high**"
     md_header = build_md_report_header("Codebase Audit", repo or "repo", branch, meta, summary)
-    body = re.sub(r"^#\s+Codebase Audit[^\n]*\n", "", full_report_text, count=1)
+    body = re.sub(r"^#{1,3}\s+Codebase Audit[^\n]*\n", "", full_report_text.lstrip(), count=1)
     full_report_text = md_header + body
 
     # --- Format and post with HTML attachment ---

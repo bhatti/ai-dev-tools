@@ -13,6 +13,26 @@ from scripts.common.claude_runner import ClaudeResult, extract_status_json, run_
 
 
 # ---------------------------------------------------------------------------
+# Autouse fixture — prevent YGS installation from interfering with Popen mocks
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _skip_ygs_install():
+    """Set _YGS_INSTALLED=True so _ensure_ygs_skills() is a no-op.
+
+    Without this, run_claude() calls _ensure_ygs_skills() which calls
+    subprocess.run() which internally calls subprocess.Popen. The Popen mock
+    returns a MagicMock whose communicate() can't unpack into (stdout, stderr),
+    causing ValueError in every run_claude test.
+    """
+    from scripts.common import claude_runner
+    original = claude_runner._YGS_INSTALLED
+    claude_runner._YGS_INSTALLED = True
+    yield
+    claude_runner._YGS_INSTALLED = original
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

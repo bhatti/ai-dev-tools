@@ -31,7 +31,8 @@ def _run_post(tmp_path: Path, config_overrides: dict, *, has_summary: bool = Tru
     def fake_post_report(cfg, slack_text, md_text, title, filename,
                          thread_ts=None, channel=None, task_type="post"):
         posted_texts.append(slack_text)
-        assert full_text in md_text, "HTML attachment must always use full report"
+        # Heading is stripped from md_text; verify body content is present
+        assert "Full report content" in md_text, "HTML attachment must always use full report"
         assert task_type == "audit", f"Expected task_type='audit', got '{task_type}'"
         return True
 

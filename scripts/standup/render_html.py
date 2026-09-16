@@ -258,11 +258,7 @@ _HTML = """\
 
 {brief_html}
 
-<!-- ── Risk Report ───────────────────────────────────────────────────────── -->
-<h3>Risk Report</h3>
-<div class="risk-detail">
-  {risk_html}
-</div>
+{risk_section}
 
 </body>
 </html>
@@ -285,8 +281,12 @@ def main() -> None:
     signals = json.loads(signals_path.read_text())
 
     risk_report_path = workspace_dir / "risk_report.md"
-    risk_md = risk_report_path.read_text() if risk_report_path.exists() else ""
-    risk_html = _md_to_html(risk_md) if risk_md else "<p class='text-muted'>No risk report generated.</p>"
+    risk_md = risk_report_path.read_text().strip() if risk_report_path.exists() else ""
+    risk_section = (
+        f'<!-- ── Risk Report ──────────────────────────────────────────────────────── -->\n'
+        f'<h3>Risk Report</h3>\n<div class="risk-detail">\n{_md_to_html(risk_md)}\n</div>'
+        if risk_md else ""
+    )
 
     brief_path = workspace_dir / "standup_brief.md"
     brief_html = ""
@@ -304,7 +304,7 @@ def main() -> None:
         generated_at=generated_at,
         board_rows=_board_status_rows(signals),
         brief_html=brief_html,
-        risk_html=risk_html,
+        risk_section=risk_section,
     )
 
     reports_dir = workspace_dir / "reports"
