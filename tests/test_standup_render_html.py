@@ -65,26 +65,18 @@ def test_render_shared_sprint_shows_both_boards(tmp_workspace, monkeypatch):
     assert "shared" in html  # second row says "shared: ..."
 
 
-def test_render_person_rows(tmp_workspace, monkeypatch):
-    issues = [
-        {"key": "PROJ-1", "summary": "Fix bug", "status": "Done",
-         "assignee": "Alice", "is_stale": False, "url": "https://jira/PROJ-1"},
-        {"key": "PROJ-2", "summary": "New feature", "status": "In Progress",
-         "assignee": "Bob", "is_stale": False, "url": "https://jira/PROJ-2"},
-    ]
-    html = _run(tmp_workspace, monkeypatch, _make_signals(issues=issues))
+def test_render_person_rows_via_brief(tmp_workspace, monkeypatch):
+    """Per-person status comes from the brief narrative, not a separate table."""
+    brief = "*Alice* — working on PROJ-1\n*Bob* — working on PROJ-2\n"
+    html = _run_with_brief(tmp_workspace, monkeypatch, _make_signals(), brief_md=brief)
     assert "Alice" in html
     assert "Bob" in html
-    assert "PROJ-1" in html
-    assert "PROJ-2" in html
 
 
-def test_render_stale_badge(tmp_workspace, monkeypatch):
-    issues = [
-        {"key": "PROJ-9", "summary": "Stale item", "status": "In Progress",
-         "assignee": "Carol", "is_stale": True, "url": ""},
-    ]
-    html = _run(tmp_workspace, monkeypatch, _make_signals(issues=issues))
+def test_render_stale_via_brief(tmp_workspace, monkeypatch):
+    """Stale indicators surface through the synthesized brief."""
+    brief = "*Carol* — PROJ-9 stale (no update in 3 days)\n"
+    html = _run_with_brief(tmp_workspace, monkeypatch, _make_signals(), brief_md=brief)
     assert "stale" in html
 
 

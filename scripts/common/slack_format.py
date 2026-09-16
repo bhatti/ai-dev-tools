@@ -1,7 +1,6 @@
 """Markdown → Slack mrkdwn conversion and text-limit helpers.
 
-Extracted from post_audit.py so that both post_audit and post_pr_audit
-(and any future Slack-posting scripts) share the same formatting logic.
+Shared by all Slack-posting scripts (post_audit, post_pr_audit, standup post).
 """
 
 from __future__ import annotations
@@ -9,6 +8,36 @@ from __future__ import annotations
 import re
 
 SLACK_TEXT_LIMIT = 38_000
+
+
+def build_md_report_header(title: str, repo: str, branch: str,
+                            meta_items: list[str], summary_line: str) -> str:
+    """Return a markdown metadata block to prepend to HTML/MD audit report artifacts.
+
+    Produces:
+        # {title} — {repo} @ {branch}
+
+        {meta_items joined with  ·  }
+        {summary_line}
+
+        ---
+
+    """
+    heading = f"# {title} — {repo}" + (f" @ {branch}" if branch else "")
+    parts = [heading, "", "  ·  ".join(meta_items), summary_line, "", "---", ""]
+    return "\n".join(parts)
+
+
+def is_full_report(config: dict) -> bool:
+    """Return True if --full was requested via env var (API path) or SLACK_MESSAGE (Slack path).
+
+    run_*_audit.py sets AUDIT_FULL_REPORT=1 in its own process, but that env var dies with
+    the subprocess and is not inherited by the parent bash shell that later runs the post script.
+    SLACK_MESSAGE is exported by the bash routing layer and IS inherited, so we check both.
+    """
+    if config.get("AUDIT_FULL_REPORT", "").strip() == "1":
+        return True
+    return bool(re.search(r"--full\b", config.get("SLACK_MESSAGE", ""), re.IGNORECASE))
 
 
 def format_for_slack(text: str) -> str:

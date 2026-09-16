@@ -8,6 +8,7 @@ Optional env:
     SLACK_CHANNEL    — channel name (default: standup)
 
 Reads:  /workspace/standup_brief.md
+        /workspace/signals.json      (optional, for board status block)
         /workspace/risk_report.md    (optional)
         /workspace/synthesize_result.json
 Writes: /workspace/reports/report.md   combined report artifact (job artifact)
@@ -25,33 +26,48 @@ import json
 import sys
 from datetime import date
 
-import re
-
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.common.slack_format import format_for_slack
+from scripts.standup.render_html import DONE_STATUSES
 from scripts.standup.slack_client import post_report
 
 
-_SLACK_TEXT_LIMIT = 39_000  # Slack chat.postMessage text field cap is 40,000
+def _board_status_md(signals: dict) -> str:
+    """Generate a compact Markdown board-status table from signals."""
+    from datetime import date, datetime
+    sprints = signals.get("all_sprints", [])
+    issues = signals.get("issues", [])
+    if not sprints:
+        return ""
 
+    total = len(issues)
+    done_n = sum(1 for i in issues if i.get("status", "").lower() in DONE_STATUSES)
+    active = sum(1 for i in issues if i.get("status", "").lower() in ("in progress", "in review", "review"))
+    not_started = total - done_n - active
+    today = date.today()
 
-def _format_for_slack(text: str) -> str:
-    """Convert markdown to Slack mrkdwn and truncate to Slack's text limit."""
-    # **bold** → *bold*
-    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-    # __bold__ → remove
-    text = re.sub(r'__(.+?)__', r'\1', text)
-    # inline code backticks
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    # markdown headings → plain (Slack uses *bold* for emphasis, not headings)
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    # dash bullets → •
-    text = re.sub(r'^[ \t]-[ \t]+', '• ', text, flags=re.MULTILINE)
-    text = re.sub(r'^-[ \t]+', '• ', text, flags=re.MULTILINE)
-    # arrows
-    text = re.sub(r'\s*→\s*', ': ', text)
-    if len(text) > _SLACK_TEXT_LIMIT:
-        text = text[:_SLACK_TEXT_LIMIT] + "\n…(truncated)"
-    return text
+    rows = []
+    seen: set = set()
+    for s in sprints:
+        sid = s.get("id")
+        if sid in seen:
+            continue
+        seen.add(sid)
+        end_str = s.get("end_date", "")
+        days_left = "?"
+        if end_str:
+            try:
+                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                days_left = str((end_dt.date() - today).days)
+            except ValueError:
+                pass
+        rows.append(f"| {s.get('board','—')} | {s.get('name','—')} | {total} | {done_n} | {active} | {not_started} | {days_left} |")
+
+    if not rows:
+        return ""
+    header = "| Board | Sprint | Total | Done | Active | Not Started | Days Left |"
+    sep = "|-------|--------|-------|------|--------|-------------|-----------|"
+    return "\n".join([header, sep] + rows)
 
 
 def main() -> None:
@@ -101,12 +117,20 @@ def main() -> None:
 
     today = date.today().isoformat()
 
+    # Board status block for MD (mirrors HTML top section)
+    board_md = ""
+    signals_path = workspace_dir / "signals.json"
+    if signals_path.exists():
+        try:
+            board_md = _board_status_md(json.loads(signals_path.read_text()))
+        except Exception:
+            pass
+
     # Build combined Markdown artifact (job artifact — full detail)
-    combined_parts = [
-        f"# Standup Report — {today}",
-        "",
-        brief,
-    ]
+    combined_parts = [f"# Standup Report — {today}", ""]
+    if board_md:
+        combined_parts += ["## Board Status", "", board_md, ""]
+    combined_parts += [brief]
     if risk_report:
         combined_parts += ["", "---", "", "## Full Risk Report", "", risk_report]
 
@@ -124,7 +148,7 @@ def main() -> None:
     full_message = brief
     if risk_report:
         full_message = brief + "\n\n---\n\n" + risk_report
-    slack_text = _format_for_slack(full_message)
+    slack_text = format_for_slack(full_message)
     (reports_dir / "slack_message.txt").write_text(slack_text)
     thread_ts = config.get("SLACK_THREAD_TS") or None
     slack_ok = post_report(config, slack_text, report_text,

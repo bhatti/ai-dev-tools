@@ -20,24 +20,10 @@ from __future__ import annotations
 import json
 import re
 import sys
-from pathlib import Path
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.slack_format import build_artifact_links, format_for_slack
+from scripts.common.slack_format import build_artifact_links, build_md_report_header, format_for_slack, is_full_report
 from scripts.standup.slack_client import post_report
-
-
-def _is_full_report(config: dict) -> bool:
-    """Return True if --full was requested via env var (API path) or SLACK_MESSAGE (Slack path).
-
-    run_pr_audit.py sets AUDIT_FULL_REPORT=1 in its own process, but that env var dies with
-    the subprocess and is not inherited by the parent bash shell that later runs this script.
-    SLACK_MESSAGE is exported by the bash routing layer and IS inherited, so check both.
-    """
-    if config.get("AUDIT_FULL_REPORT", "").strip() == "1":
-        return True
-    slack_msg = config.get("SLACK_MESSAGE", "")
-    return bool(re.search(r"--full\b", slack_msg, re.IGNORECASE))
 
 
 def main() -> None:
@@ -47,7 +33,7 @@ def main() -> None:
 
     # --- Choose Slack body: digest by default, full report when --full was passed ---
     # HTML attachment is always the full report regardless of this flag.
-    full_report = _is_full_report(config)
+    full_report = is_full_report(config)
     full_path = reports_dir / "pr_audit_report.md"
     if not full_path.exists():
         full_path = workspace_dir / "pr_audit_report.md"
@@ -64,7 +50,7 @@ def main() -> None:
         report_text = summary_path.read_text(encoding="utf-8")
         print("[post-pr-audit] posting Slack digest (use --full for complete report)", flush=True)
 
-    # Always read full report text for HTML attachment
+    # Always read full report for HTML/MD attachment; header injected below after metadata load
     full_report_text = full_path.read_text(encoding="utf-8")
 
     # --- Read finding counts from JSON ---
@@ -124,6 +110,20 @@ def main() -> None:
         + artifact_link
         + "\n\n"
     )
+
+    # Prepend consistent metadata header to HTML/MD artifact
+    meta: list[str] = [f"**{prs_analyzed} PRs analyzed**"]
+    if date_from and date_to:
+        meta.append(f"{date_from} → {date_to}")
+    elif date_from:
+        meta.append(date_from)
+    if jiras_reviewed:
+        meta.append(f"{jiras_reviewed} Jira issues reviewed")
+    summary = f"**{spec_gaps} spec | {design_gaps} design | {skill_gaps} skill | {practice_gaps} practice gaps**"
+    md_header = build_md_report_header("PR Audit", repo or "repo", branch, meta, summary)
+    # Strip any leading `# PR Audit` heading Claude may have written to avoid duplication
+    body = re.sub(r"^#\s+PR Audit[^\n]*\n", "", full_report_text, count=1)
+    full_report_text = md_header + body
 
     # --- Format and post with HTML attachment ---
     # Slack body: digest or full depending on flag; HTML is always the full report.

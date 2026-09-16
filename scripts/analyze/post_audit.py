@@ -23,21 +23,8 @@ import sys
 from pathlib import Path
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.slack_format import build_artifact_links, format_for_slack
+from scripts.common.slack_format import build_artifact_links, build_md_report_header, format_for_slack, is_full_report
 from scripts.standup.slack_client import post_report
-
-
-def _is_full_report(config: dict) -> bool:
-    """Return True if --full was requested via env var (API path) or SLACK_MESSAGE (Slack path).
-
-    run_codebase_audit.py sets AUDIT_FULL_REPORT=1 in its own process, but that env var dies with
-    the subprocess and is not inherited by the parent bash shell that later runs this script.
-    SLACK_MESSAGE is exported by the bash routing layer and IS inherited, so check both.
-    """
-    if config.get("AUDIT_FULL_REPORT", "").strip() == "1":
-        return True
-    slack_msg = config.get("SLACK_MESSAGE", "")
-    return bool(re.search(r"--full\b", slack_msg, re.IGNORECASE))
 
 
 def main() -> None:
@@ -47,7 +34,7 @@ def main() -> None:
 
     # --- Choose Slack body: digest by default, full report when --full was passed ---
     # HTML attachment is always the full report regardless of this flag.
-    full_report = _is_full_report(config)
+    full_report = is_full_report(config)
     full_path = reports_dir / "audit_report.md"
     if not full_path.exists():
         full_path = workspace_dir / "audit_report.md"
@@ -111,6 +98,15 @@ def main() -> None:
         + artifact_link
         + "\n\n"
     )
+
+    # Prepend consistent metadata header to HTML/MD artifact
+    meta: list[str] = [f"**{commits} commits analyzed**"]
+    if commit_from and commit_to:
+        meta.append(f"`{commit_from}` ({commit_from_date}) → `{commit_to}` ({commit_to_date})")
+    summary = f"**{critical_count} critical · {high_count} high**"
+    md_header = build_md_report_header("Codebase Audit", repo or "repo", branch, meta, summary)
+    body = re.sub(r"^#\s+Codebase Audit[^\n]*\n", "", full_report_text, count=1)
+    full_report_text = md_header + body
 
     # --- Format and post with HTML attachment ---
     # Slack body: digest or full depending on flag; HTML is always the full report.

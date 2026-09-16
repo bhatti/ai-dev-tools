@@ -96,3 +96,33 @@ class TestPostAuditSlackBodySelection:
     def test_artifact_link_absent_without_config(self, tmp_path):
         result = _run_post(tmp_path, {}, has_summary=True)
         assert "by-job" not in result["posted_text"]
+
+    def test_html_md_artifact_has_commit_range(self, tmp_path):
+        """The md_text passed to post_report (becomes HTML/MD artifact) must include commit range."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "audit_report.md").write_text("## Codebase Audit\nContent.\n", encoding="utf-8")
+        (reports_dir / "slack_summary.md").write_text("Digest.\n", encoding="utf-8")
+        findings = {
+            "critical_count": 2, "high_count": 5, "repo": "org/repo", "branch": "main",
+            "commits_analyzed": 120,
+            "commit_from": "abc1234", "commit_from_date": "2026-03-01",
+            "commit_to": "def5678", "commit_to_date": "2026-09-16",
+        }
+        (reports_dir / "audit_findings.json").write_text(json.dumps(findings), encoding="utf-8")
+        config = {"WORKSPACE_DIR": str(tmp_path), "SLACK_BOT_TOKEN": "", "SLACK_CHANNEL": "C0"}
+        md_texts: list[str] = []
+        def fake_post(cfg, slack_text, md_text, title, filename, thread_ts=None, channel=None, task_type="post"):
+            md_texts.append(md_text)
+            return True
+        with patch("scripts.analyze.post_audit.load_config", return_value=config), \
+             patch("scripts.analyze.post_audit.post_report", side_effect=fake_post):
+            import scripts.analyze.post_audit as m
+            m.main()
+        assert md_texts, "post_report was not called"
+        md = md_texts[0]
+        assert "abc1234" in md
+        assert "def5678" in md
+        assert "2026-03-01" in md
+        assert "2026-09-16" in md
+        assert "2 critical · 5 high" in md

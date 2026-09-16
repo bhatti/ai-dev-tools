@@ -129,3 +129,32 @@ class TestPostPrAuditSlackBodySelection:
         assert "2026-08-15" in text
         assert "2026-09-15" in text
         assert "42 Jira issues" in text
+
+    def test_html_md_artifact_has_date_range(self, tmp_path):
+        """The md_text passed to post_report (becomes HTML/MD artifact) must include date range."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "pr_audit_report.md").write_text("## PR Audit\nContent.\n", encoding="utf-8")
+        (reports_dir / "slack_summary.md").write_text("Digest.\n", encoding="utf-8")
+        findings = {
+            "spec_gap_count": 1, "design_gap_count": 2, "skill_gap_count": 3,
+            "practice_gap_count": 0, "repo": "org/repo", "branch": "main",
+            "prs_analyzed": 20, "date_from": "2026-03-26", "date_to": "2026-09-16",
+            "jiras_reviewed": 10,
+        }
+        (reports_dir / "pr_audit_findings.json").write_text(json.dumps(findings), encoding="utf-8")
+        config = {"WORKSPACE_DIR": str(tmp_path), "SLACK_BOT_TOKEN": "", "SLACK_CHANNEL": "C0"}
+        md_texts: list[str] = []
+        def fake_post(cfg, slack_text, md_text, title, filename, thread_ts=None, channel=None, task_type="post"):
+            md_texts.append(md_text)
+            return True
+        with patch("scripts.analyze.post_pr_audit.load_config", return_value=config), \
+             patch("scripts.analyze.post_pr_audit.post_report", side_effect=fake_post):
+            import scripts.analyze.post_pr_audit as m
+            m.main()
+        assert md_texts, "post_report was not called"
+        md = md_texts[0]
+        assert "2026-03-26" in md
+        assert "2026-09-16" in md
+        assert "10 Jira issues reviewed" in md
+        assert "1 spec | 2 design | 3 skill | 0 practice gaps" in md

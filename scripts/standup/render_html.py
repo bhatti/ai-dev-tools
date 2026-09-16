@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -27,12 +26,18 @@ from scripts.common.config import load_config, get_workspace_dir
 # ---------------------------------------------------------------------------
 
 def _md_to_html(text: str) -> str:
-    """Convert the subset of Markdown used in risk_report to HTML."""
+    """Convert the subset of Markdown/mrkdwn used in standup reports to HTML."""
     lines = text.splitlines()
     out: list[str] = []
     in_table = False
-    in_ul = False
+    list_tag = ""  # "ul" or "ol" — tracks which list is open
     in_code = False
+
+    def _close_list() -> None:
+        nonlocal list_tag
+        if list_tag:
+            out.append(f"</{list_tag}>")
+            list_tag = ""
 
     for line in lines:
         # Code fences
@@ -41,9 +46,7 @@ def _md_to_html(text: str) -> str:
                 out.append("</pre></code>")
                 in_code = False
             else:
-                if in_ul:
-                    out.append("</ul>")
-                    in_ul = False
+                _close_list()
                 out.append("<code><pre>")
                 in_code = True
             continue
@@ -53,18 +56,14 @@ def _md_to_html(text: str) -> str:
 
         # Table rows
         if line.strip().startswith("|"):
-            if in_ul:
-                out.append("</ul>")
-                in_ul = False
+            _close_list()
             if not in_table:
                 out.append('<table class="table table-sm table-bordered">')
                 in_table = True
             cols = [c.strip() for c in line.strip().strip("|").split("|")]
-            # separator row
             if all(re.match(r"^[-: ]+$", c) for c in cols):
-                continue
+                continue  # separator row
             tag = "th" if not any("<td>" in r for r in out[-3:]) else "td"
-            # detect header by checking if previous non-empty lines were all th
             row_html = "".join(f"<{tag}>{_inline_md(_esc(c))}</{tag}>" for c in cols)
             out.append(f"<tr>{row_html}</tr>")
             continue
@@ -76,49 +75,46 @@ def _md_to_html(text: str) -> str:
         # Headings
         m = re.match(r"^(#{1,4})\s+(.*)", line)
         if m:
-            if in_ul:
-                out.append("</ul>")
-                in_ul = False
+            _close_list()
             level = min(len(m.group(1)) + 2, 6)
             out.append(f"<h{level}>{_inline_md(_esc(m.group(2)))}</h{level}>")
             continue
 
         # HR
         if re.match(r"^---+$", line.strip()):
-            if in_ul:
-                out.append("</ul>")
-                in_ul = False
+            _close_list()
             out.append("<hr>")
             continue
 
-        # Bullets
+        # Unordered bullet
         if re.match(r"^[-*]\s+", line):
-            if not in_ul:
+            if list_tag != "ul":
+                _close_list()
                 out.append("<ul>")
-                in_ul = True
+                list_tag = "ul"
             out.append(f"<li>{_inline_md(_esc(line[2:].strip()))}</li>")
             continue
+
+        # Ordered list
         if re.match(r"^\d+\.\s+", line):
-            if not in_ul:
+            if list_tag != "ol":
+                _close_list()
                 out.append("<ol>")
-                in_ul = True  # reuse flag
+                list_tag = "ol"
             out.append(f"<li>{_inline_md(_esc(re.sub(r'^\d+\.\s+', '', line)))}</li>")
             continue
 
-        # Close list if needed
-        if in_ul and line.strip() == "":
-            out.append("</ul>")
-            in_ul = False
-
+        # Close list on blank or non-list line
         if line.strip() == "":
+            _close_list()
             out.append("")
         else:
+            _close_list()
             out.append(f"<p>{_inline_md(_esc(line))}</p>")
 
     if in_table:
         out.append("</table>")
-    if in_ul:
-        out.append("</ul>")
+    _close_list()
     if in_code:
         out.append("</pre></code>")
 
@@ -166,16 +162,16 @@ def _inline_md(s: str) -> str:
 # Board status table from signals
 # ---------------------------------------------------------------------------
 
+DONE_STATUSES: frozenset[str] = frozenset({"done", "closed", "resolved", "won't fix", "wont fix", "rejected"})
+
+
 def _board_status_rows(signals: dict) -> str:
     sprints = signals.get("all_sprints", [])
     issues = signals.get("issues", [])
     today = date.today()
 
-    # Group issues by sprint id if issues carry sprint info; otherwise use totals
-    done_statuses = {"done", "closed", "resolved", "won't fix", "wont fix", "rejected"}
-
     total = len(issues)
-    done_n = sum(1 for i in issues if i.get("status", "").lower() in done_statuses)
+    done_n = sum(1 for i in issues if i.get("status", "").lower() in DONE_STATUSES)
     in_progress = sum(1 for i in issues if i.get("status", "").lower() in ("in progress", "in review", "review"))
     not_started = total - done_n - in_progress
 
@@ -211,50 +207,6 @@ def _board_status_rows(signals: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-person table
-# ---------------------------------------------------------------------------
-
-def _person_rows(signals: dict) -> str:
-    issues = signals.get("issues", [])
-    done_statuses = {"done", "closed", "resolved", "won't fix", "wont fix", "rejected"}
-    by_person: dict[str, dict] = defaultdict(lambda: {"done": [], "active": [], "stale": []})
-
-    for i in issues:
-        person = i.get("assignee", "Unassigned")
-        status = i.get("status", "").lower()
-        key = i.get("key", "")
-        summary = i.get("summary", "")
-        url = i.get("url", "")
-        label = f'<a href="{_esc(url)}">{_esc(key)}</a>' if url else _esc(key)
-        entry = f'{label} <span class="text-muted small">{_esc(summary[:60])}</span>'
-        if i.get("is_stale"):
-            by_person[person]["stale"].append(entry)
-        elif status in done_statuses:
-            by_person[person]["done"].append(entry)
-        else:
-            by_person[person]["active"].append(entry)
-
-    if not by_person:
-        return "<tr><td colspan='4' class='text-muted'>No issues found</td></tr>"
-
-    rows = ""
-    for person, buckets in sorted(by_person.items()):
-        done_html = "<br>".join(buckets["done"]) or '<span class="text-muted">—</span>'
-        active_html = "<br>".join(buckets["active"]) or '<span class="text-muted">—</span>'
-        stale_badge = ""
-        if buckets["stale"]:
-            stale_html = "<br>".join(buckets["stale"])
-            stale_badge = f'<br><span class="badge bg-warning text-dark">⚠️ stale</span> {stale_html}'
-        rows += (
-            f"<tr><td><strong>{_esc(person)}</strong></td>"
-            f"<td>{done_html}</td>"
-            f"<td>{active_html}{stale_badge}</td>"
-            f"<td class='text-center'>{len(buckets['done'])}/{len(issues)}</td></tr>"
-        )
-    return rows
-
-
-# ---------------------------------------------------------------------------
 # Full HTML template
 # ---------------------------------------------------------------------------
 
@@ -286,8 +238,6 @@ _HTML = """\
   <span class="text-muted small">Generated {generated_at}</span>
 </div>
 
-{brief_html}
-
 <!-- ── Board Status ──────────────────────────────────────────────────────── -->
 <h3>Board Status</h3>
 <table class="table table-bordered table-sm">
@@ -306,21 +256,7 @@ _HTML = """\
   </tbody>
 </table>
 
-<!-- ── Per-person Status ─────────────────────────────────────────────────── -->
-<h3>Per-person Status</h3>
-<table class="table table-bordered table-sm table-hover">
-  <thead class="table-secondary">
-    <tr>
-      <th style="width:14%">Person</th>
-      <th style="width:30%">Completed</th>
-      <th>In Progress / In Review</th>
-      <th class="text-center" style="width:8%">Done/Total</th>
-    </tr>
-  </thead>
-  <tbody>
-    {person_rows}
-  </tbody>
-</table>
+{brief_html}
 
 <!-- ── Risk Report ───────────────────────────────────────────────────────── -->
 <h3>Risk Report</h3>
@@ -366,9 +302,8 @@ def main() -> None:
     html = _HTML.format(
         report_date=report_date,
         generated_at=generated_at,
-        brief_html=brief_html,
         board_rows=_board_status_rows(signals),
-        person_rows=_person_rows(signals),
+        brief_html=brief_html,
         risk_html=risk_html,
     )
 
