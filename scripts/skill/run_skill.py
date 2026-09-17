@@ -34,7 +34,8 @@ from scripts.common.config import (
 )
 from scripts.common.git_utils import clone_repo, create_branch, resolve_clone_auth
 from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
-from scripts.standup.slack_client import build_mrkdwn_blocks, notify as slack_notify
+from scripts.common.slack_format import format_for_slack
+from scripts.standup.slack_client import notify as slack_notify, post_report
 
 # Reuse shared helpers from adhoc run_skill — these are stable, well-tested utilities.
 from scripts.adhoc.run_skill import (
@@ -44,8 +45,6 @@ from scripts.adhoc.run_skill import (
     _strip_for_slack,
     _system_prompt_for_skill,
 )
-
-_MAX_SLACK_CHARS = 12000
 
 
 def _clone_target_repo(
@@ -102,16 +101,25 @@ def _write_result(workspace: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _write_reports(workspace: Path, skill: str, output_text: str, status_data: dict) -> None:
+def _append_model_footer(text: str, model: str | None) -> str:
+    """Append a model footer line to report text."""
+    if model:
+        return f"{text.rstrip()}\n\n---\n*Model: {model}*\n"
+    return text
+
+
+def _write_reports(workspace: Path, skill: str, output_text: str, status_data: dict,
+                   model: str | None = None) -> None:
     """Write reports/report.md, reports/report.html, reports/result.json."""
     try:
         from scripts.common.report_renderer import render_simple_html
 
+        md_with_model = _append_model_footer(output_text, model)
         reports_dir = workspace / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / "report.md").write_text(output_text, encoding="utf-8")
+        (reports_dir / "report.md").write_text(md_with_model, encoding="utf-8")
         (reports_dir / "report.html").write_text(
-            render_simple_html(skill, output_text), encoding="utf-8"
+            render_simple_html(skill, md_with_model), encoding="utf-8"
         )
         (reports_dir / "result.json").write_text(
             json.dumps(status_data, indent=2), encoding="utf-8"
@@ -121,38 +129,29 @@ def _write_reports(workspace: Path, skill: str, output_text: str, status_data: d
         print(f"[skill] WARNING: could not write reports/: {e}", flush=True)
 
 
-def _post_to_slack(config: dict, skill: str, output_text: str, status_data: dict) -> None:
-    """Post results to Slack thread."""
-    slack_text = _strip_for_slack(output_text)
+def _post_to_slack(config: dict, skill: str, output_text: str, status_data: dict,
+                   model: str | None = None) -> None:
+    """Post results to Slack with HTML report upload (same pattern as standup/audit)."""
+    md_with_model = _append_model_footer(output_text, model)
+    slack_text = format_for_slack(_strip_for_slack(md_with_model))
 
-    slack_block_limit = 50
-    blocks = build_mrkdwn_blocks(slack_text) if slack_text else None
-    if blocks and len(blocks) > slack_block_limit:
-        blocks = blocks[: slack_block_limit - 2] + [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "…\n_(Response truncated — full report in Formicary job artifacts)_",
-                },
-            },
-            {"type": "divider"},
-        ]
+    if not slack_text and not output_text:
+        summary = status_data.get("summary", "")
+        slack_text = f"✅ `/{skill}` complete. {summary}"
 
-    fallback = slack_text
-    if len(fallback) > _MAX_SLACK_CHARS:
-        fallback = fallback[:_MAX_SLACK_CHARS] + "\n…\n_(Full report in Formicary job artifacts)_"
+    title = f"Skill: {skill}"
+    thread_ts = config.get("SLACK_THREAD_TS") or None
 
     try:
-        if blocks:
-            slack_notify(config, fallback or f"✅ `/{skill}` complete.", blocks=blocks)
-        elif fallback:
-            slack_notify(config, fallback)
-        else:
-            summary = status_data.get("summary", "")
-            slack_notify(config, f"✅ `/{skill}` complete. {summary}")
+        post_report(config, slack_text, md_with_model,
+                    title=title, filename=f"{skill}_report.html",
+                    thread_ts=thread_ts, task_type="run")
     except Exception as e:
         print(f"[skill] WARNING: Slack post failed (non-fatal): {e}", flush=True)
+        try:
+            slack_notify(config, slack_text or f"✅ `/{skill}` complete.")
+        except Exception:
+            pass
 
 
 def _find_report_content(workspace: Path) -> str | None:
@@ -329,10 +328,10 @@ def main() -> None:
 
     # Write reports.
     if output_text and output_text != json.dumps(status_data):
-        _write_reports(workspace, flags.skill, output_text, status_data)
+        _write_reports(workspace, flags.skill, output_text, status_data, model=model)
 
     # Post to Slack.
-    _post_to_slack(config, flags.skill, output_text, status_data)
+    _post_to_slack(config, flags.skill, output_text, status_data, model=model)
 
     print(f"[skill] status={status_data.get('status')}", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{model or ''}", flush=True)

@@ -2609,7 +2609,7 @@ def test_25_skill_service_awareness(base_env: dict[str, str]) -> TestResult:
 def test_26_skill_identifier_passthrough(base_env: dict[str, str]) -> TestResult:
     """Verify positional identifier (e.g. PR number) is parsed and included in prompt.
 
-    Uses SKILL_ARG from env (e.g. "review-pr cribl 48184") to test the real
+    Uses SKILL_ARG from env (e.g. "review-pr myapp 4444") to test the real
     positional parsing flow. No Claude credentials needed — we verify the
     identifier appears in context markers and stdout before Claude is invoked.
     """
