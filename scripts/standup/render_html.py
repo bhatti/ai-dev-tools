@@ -283,7 +283,6 @@ def main() -> None:
     risk_report_path = workspace_dir / "risk_report.md"
     risk_md = risk_report_path.read_text().strip() if risk_report_path.exists() else ""
     risk_section = (
-        f'<!-- ── Risk Report ──────────────────────────────────────────────────────── -->\n'
         f'<h3>Risk Report</h3>\n<div class="risk-detail">\n{_md_to_html(risk_md)}\n</div>'
         if risk_md else ""
     )
