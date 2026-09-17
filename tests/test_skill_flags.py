@@ -138,6 +138,54 @@ class TestParseSkillFlags:
         assert f.identifier == "4444"
         assert f.repo == ""
 
+    def test_passthrough_unknown_flags(self):
+        """Unknown --flags trigger passthrough: remainder becomes instructions verbatim."""
+        f = parse_skill_flags(
+            "run-tests unit --workers 4 --dry-run --max-failures 10 --branch my-feature"
+        )
+        assert f.skill == "run-tests"
+        assert f.branch == "my-feature"
+        assert f.repo == ""
+        assert f.identifier == ""
+        assert f.instructions == "unit --workers 4 --dry-run --max-failures 10"
+
+    def test_passthrough_boolean_unknown_flag(self):
+        """Boolean unknown flags (no value) also trigger passthrough mode."""
+        f = parse_skill_flags("my-skill do-thing --dry-run --branch feat")
+        assert f.skill == "my-skill"
+        assert f.branch == "feat"
+        assert f.repo == ""
+        assert f.instructions == "do-thing --dry-run"
+
+    def test_passthrough_no_known_flags(self):
+        """Unknown flags with no known framework flags — all become instructions."""
+        f = parse_skill_flags("my-skill --dry-run --count 5")
+        assert f.skill == "my-skill"
+        assert f.repo == ""
+        assert f.branch == ""
+        assert f.instructions == "--dry-run --count 5"
+
+    def test_passthrough_with_tracker_flag(self):
+        """Known --tracker is extracted; unknown flags still become instructions."""
+        f = parse_skill_flags("my-skill --dry-run --tracker github")
+        assert f.skill == "my-skill"
+        assert f.tracker == "github"
+        assert f.repo == ""
+        assert f.instructions == "--dry-run"
+
+    def test_passthrough_flag_with_known_prefix(self):
+        """--reponame is not the known --repo flag and must trigger passthrough."""
+        f = parse_skill_flags("my-skill --reponame foo")
+        assert f.skill == "my-skill"
+        assert f.repo == ""
+        assert f.instructions == "--reponame foo"
+
+    def test_passthrough_double_dash_instructions_merge(self):
+        """-- separator instructions are appended after passthrough remainder."""
+        f = parse_skill_flags("my-skill --dry-run -- run all tests")
+        assert f.skill == "my-skill"
+        assert f.instructions == "--dry-run run all tests"
+
 
 # ─── resolve_tracker ──────────────────────────────────────────────────────────
 

@@ -3,23 +3,32 @@
 The RAW_ARGS string comes from the Slack router and has the format:
     <skill-name> [positional-args...] [--flags...] [-- additional instructions]
 
-Positional args (before any --flag):
+Two parsing modes:
+
+Positional shorthand (no unrecognized --flags present):
   - First non-numeric token → repo (if --repo not set)
   - First numeric token → identifier (PR number, issue ID)
   - Remaining tokens → prepended to instructions
+  Examples:
+    review-pr myapp 4444                          → repo=myapp, id=4444
+    review-pr myapp 4444 --branch release         → repo=myapp, id=4444, branch=release
+    analyze myapp --branch dev -- focus on tests  → repo=myapp, instructions="focus on tests"
 
-Examples:
-    review-pr myapp 4444                             → repo=myapp, id=4444
-    review-pr myapp 4444 --branch release            → repo=myapp, id=4444, branch=release
-    analyze myapp --branch dev -- focus on coverage   → repo=myapp, instructions="focus on coverage"
-    ask what is the deployment process                → instructions="what is the deployment process"
-    security-review --repo https://github.com/o/r    → repo=URL (explicit flag)
+Passthrough mode (any unrecognized --flag detected):
+  All tokens not consumed by a known framework flag (--repo/--branch/--tracker/
+  --service/--model) are passed verbatim as instructions. This lets skills
+  receive their own CLI-style flags naturally.
+  Examples:
+    run-tests unit --workers 4 --dry-run --branch feat
+      → instructions="unit --workers 4 --dry-run", branch=feat
+    my-skill --dry-run --count 5
+      → instructions="--dry-run --count 5"
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -40,15 +49,29 @@ _FLAG_PATTERN = re.compile(
 
 _NUMERIC = re.compile(r"^\d+$")
 
+# Matches any --flag that is NOT one of the known framework flags.
+# Presence of an unknown flag triggers passthrough mode (no positional parsing).
+_UNKNOWN_FLAG_RE = re.compile(
+    r"--(?!(?:repo|branch|tracker|service|model)(?:\s|$))\w"
+)
+
 
 def parse_skill_flags(raw: str) -> SkillFlags:
     """Parse a RAW_ARGS string into a SkillFlags dataclass.
 
-    Supports both explicit flags (--repo, --branch) and positional shorthand.
-    Positional tokens after the skill name are interpreted as:
+    Two modes depending on whether unknown --flags are present:
+
+    Passthrough mode (any unrecognized --flag found):
+      All tokens that are not a known framework flag (--repo/--branch/--tracker/
+      --service/--model) are passed verbatim as instructions. This lets skills
+      receive their own CLI-style flags naturally, e.g.:
+        run-tests unit --workers 4 --dry-run --branch feat
+
+    Positional shorthand (no unrecognized --flags):
       - First non-numeric word → repo (unless --repo is also present)
       - First numeric word → identifier (PR/issue number)
       - Remaining words → prepended to instructions
+      e.g.:  review-pr myapp 4444 --branch release
     """
     raw = (raw or "").strip()
     if not raw:
@@ -72,7 +95,7 @@ def parse_skill_flags(raw: str) -> SkillFlags:
 
     flags = SkillFlags(skill=skill, instructions=instructions)
 
-    # Extract explicit --key value flags first.
+    # Extract explicit known --key value flags.
     flag_spans: list[tuple[int, int]] = []
     for m in _FLAG_PATTERN.finditer(rest):
         key = m.group("key")
@@ -89,19 +112,24 @@ def parse_skill_flags(raw: str) -> SkillFlags:
         elif key == "model":
             flags.model = val
 
-    # Collect positional tokens (not consumed by --flags).
-    positional: list[str] = []
+    # Build the remaining string after removing known-flag spans.
+    remaining = ""
     if rest:
         consumed = set()
         for start, end in flag_spans:
             for i in range(start, end):
                 consumed.add(i)
-        remaining = "".join(c if i not in consumed else " " for i, c in enumerate(rest))
-        positional = remaining.split()
+        remaining = "".join(c if i not in consumed else " " for i, c in enumerate(rest)).strip()
 
-    # Interpret positional args: first non-numeric → repo, first numeric → identifier.
+    # Passthrough mode: unknown --flags present → treat remainder as instructions verbatim.
+    if _UNKNOWN_FLAG_RE.search(remaining):
+        if remaining:
+            flags.instructions = f"{remaining} {flags.instructions}".strip() if flags.instructions else remaining
+        return flags
+
+    # Positional shorthand: first non-numeric → repo, first numeric → identifier.
     extra_words: list[str] = []
-    for token in positional:
+    for token in remaining.split():
         if token == "--":
             continue
         if _NUMERIC.match(token) and not flags.identifier:
