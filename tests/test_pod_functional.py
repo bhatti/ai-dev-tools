@@ -2606,6 +2606,161 @@ def test_25_skill_service_awareness(base_env: dict[str, str]) -> TestResult:
     return _pass(result, "service awareness verified: SERVICE_IMAGE detected and logged")
 
 
+def test_26_skill_identifier_passthrough(base_env: dict[str, str]) -> TestResult:
+    """Verify positional identifier (e.g. PR number) is parsed and included in prompt.
+
+    Uses SKILL_ARG from env (e.g. "review-pr cribl 48184") to test the real
+    positional parsing flow. No Claude credentials needed — we verify the
+    identifier appears in context markers and stdout before Claude is invoked.
+    """
+    result = TestResult("skill-identifier-passthrough")
+
+    skill_arg = os.environ.get("SKILL_ARG", "").strip()
+    if not skill_arg:
+        result.passed = True
+        result.message = "SKIPPED — SKILL_ARG not set in env (set in ~/.zshrc)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/skill_id_test"
+    env["WORKSPACE_DIR"] = ws
+    env["RAW_ARGS"] = skill_arg
+    env["DEFAULT_TRACKER"] = "jira"
+    env.pop("SLACK_BOT_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLAUDE_CODE_USE_BEDROCK", None)
+
+    with pod_fixture("skill-id") as pod:
+        step = exec_step(pod, "id-parse",
+                         f"mkdir -p {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill 2>&1 || true",
+                         env, timeout=120)
+        result.steps.append(step)
+
+        combined = step.stdout + step.stderr
+
+        # Verify SKILL context marker was emitted.
+        ctx_err = _check_keys(step, ["SKILL"])
+        if ctx_err:
+            return _fail(result, step, f"context markers missing: {ctx_err}")
+
+        # Verify IDENTIFIER context marker was emitted (from the numeric positional arg).
+        if "IDENTIFIER" not in step.context:
+            return _fail(result, step,
+                         f"IDENTIFIER context marker not emitted. stdout: {combined[-500:]}")
+
+        identifier = step.context["IDENTIFIER"]
+        if not identifier or not identifier.isdigit():
+            return _fail(result, step,
+                         f"IDENTIFIER={identifier!r} — expected numeric value")
+
+        # Verify the identifier appears in the log line.
+        if f"identifier={identifier}" not in combined:
+            return _fail(result, step,
+                         f"'identifier={identifier}' not in stdout. got: {combined[-500:]}")
+
+    skill = step.context.get("SKILL", "?")
+    return _pass(result,
+                 f"SKILL={skill} IDENTIFIER={identifier} "
+                 f"parsed from SKILL_ARG={skill_arg!r}")
+
+
+def test_27_skill_e2e_with_identifier(base_env: dict[str, str]) -> TestResult:
+    """End-to-end skill invocation with positional identifier (PR number).
+
+    Uses SKILL_ARG and EXTRA_SKILLS_REPOS from env. Requires Claude credentials.
+    Verifies the skill actually receives the identifier and produces output.
+    """
+    result = TestResult("skill-e2e-identifier")
+
+    skill_arg = os.environ.get("SKILL_ARG", "").strip()
+    extra_skills = os.environ.get("EXTRA_SKILLS_REPOS", "").strip()
+    if not skill_arg:
+        result.passed = True
+        result.message = "SKIPPED — SKILL_ARG not set in env (set in ~/.zshrc)"
+        return result
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials (set CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY)"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/skill_e2e_id"
+    env["WORKSPACE_DIR"] = ws
+    env["RAW_ARGS"] = skill_arg
+    env["DEFAULT_TRACKER"] = "jira"
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_ADHOC"] = "30"
+    if extra_skills:
+        env["EXTRA_SKILLS_REPOS"] = extra_skills
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("skill-e2e-id") as pod:
+        step = exec_step(pod, "skill-e2e",
+                         f"mkdir -p {ws}/reports {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill",
+                         env, timeout=600)
+        result.steps.append(step)
+
+        if not step.ok:
+            return _fail(result, step, f"run_skill exit code {step.returncode}")
+
+        err = _check_keys(step, ["SKILL", "IDENTIFIER"])
+        if err:
+            return _fail(result, step, f"context markers missing: {err}")
+
+        identifier = step.context.get("IDENTIFIER", "")
+        if not identifier:
+            return _fail(result, step, "IDENTIFIER is empty — positional arg not parsed")
+
+        # Verify artifact files.
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"rj = os.path.join(ws, 'skill_result.json')\n"
+            f"if not os.path.exists(rj):\n"
+            f"    issues.append('skill_result.json missing')\n"
+            f"else:\n"
+            f"    try:\n"
+            f"        d = json.loads(open(rj).read())\n"
+            f"        print(f'::add-task-context SKILL_STATUS::{{d.get(\"status\", \"?\")}}')\n"
+            f"    except Exception as e:\n"
+            f"        issues.append(f'skill_result.json parse error: {{e}}')\n"
+            f"md = os.path.join(ws, 'reports', 'report.md')\n"
+            f"if not os.path.exists(md):\n"
+            f"    issues.append('reports/report.md missing')\n"
+            f"elif os.path.getsize(md) < 50:\n"
+            f"    issues.append(f'reports/report.md too small ({{os.path.getsize(md)}} bytes)')\n"
+            f"else:\n"
+            f"    print(f'::add-task-context REPORT_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"if issues:\n"
+            f"    print('FILE ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"else:\n"
+            f"    print('::add-task-context FILES_VERIFIED::yes')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-e2e", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"file verification failed: {verify_step.stderr[-300:]}")
+
+    skill = step.context.get("SKILL", "?")
+    report_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    skill_status = verify_step.context.get("SKILL_STATUS", "?")
+    return _pass(result,
+                 f"SKILL={skill} IDENTIFIER={identifier} "
+                 f"status={skill_status} report={report_bytes}B "
+                 f"elapsed={step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -2634,6 +2789,8 @@ ALL_TESTS: dict[str, callable] = {
     "skill-flag-parsing":     test_23_skill_flag_parsing,
     "skill-integ-tests":      test_24_skill_integ_tests,
     "skill-service-awareness": test_25_skill_service_awareness,
+    "skill-identifier-passthrough": test_26_skill_identifier_passthrough,
+    "skill-e2e-identifier":   test_27_skill_e2e_with_identifier,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

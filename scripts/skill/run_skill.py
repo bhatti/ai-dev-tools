@@ -269,6 +269,8 @@ def main() -> None:
 
     # Build the prompt.
     extra_instructions = flags.instructions
+    if flags.identifier:
+        extra_instructions = f"Identifier: {flags.identifier}\n{extra_instructions}".strip()
     if service_info:
         extra_instructions = service_info + "\n" + extra_instructions
     if codebase_dir:
