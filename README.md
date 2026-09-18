@@ -452,6 +452,30 @@ Run **any** YGS skill against **any** repo with full flag parsing, smart default
 @bot skill ygs-qa myapp -- run E2E tests
 ```
 
+Some skills need a different container environment — a specific language runtime, extra system
+libraries, or more memory. Use the appropriate Slack trigger or pass `RunImage` via the API.
+
+**Via Slack** — use the `skill-node` trigger for Node.js projects:
+```
+@bot skill-node edge-flaky-test all --team dm --runs 20 --dry-run --branch edge-flaky-test-skill
+@bot skill-node my-node-skill --repo https://github.com/org/my-repo --branch main
+```
+
+> **Why separate triggers?** The container image is selected at job submission time (before the
+> container starts), so it cannot be a runtime flag inside the message. Each Slack route can
+> hardcode a different `RunImage` via its `params` config — add new triggers for new base images
+> as needed (e.g. `skill-java`, `skill-python39`). See `setup-slack-admin.sh`.
+
+**Via API** — pass `RunImage` to use any OCI image:
+```bash
+curl -sk -X POST "${FORMICARY_URL}/api/v1/jobs/requests" \
+  -H "Content-Type: application/json" \
+  -d '{"job_type":"ai-skill","params":{
+    "RawArgs":"my-skill --repo myorg/myrepo -- run integration tests",
+    "RunImage":"node:22-bookworm"
+  }}'
+```
+
 ### Via API (with optional service sidecar)
 
 ```bash
@@ -480,6 +504,18 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 | `--service-cmd <cmd>` | Documents the sidecar command in the prompt; actual command must be set via `ServiceCommand` job variable at submission time | Image default |
 | `--service-args <args>` | Extra args described in the prompt; actual args via `ServiceArgs` job variable | None |
 | `-- <text>` | Additional instructions passed to the skill | None |
+
+### Container Image (`RunImage`)
+
+The `run` task defaults to `plexobject/ai-dev-tools:latest`. Override it when your skill
+requires a different runtime environment (specific OS, language version, or native libraries).
+
+| How | When to use |
+|-----|-------------|
+| `@bot skill <name>` | Default image — works for most skills |
+| `@bot skill-node <name>` | `node:22-bookworm` pre-configured — for skills with native Node.js modules |
+| API `RunImage` param | Any OCI image — full control |
+| New Slack route + `params.RunImage` | Add to `setup-slack-admin.sh` for any fixed environment |
 
 ### Service Sidecars
 
