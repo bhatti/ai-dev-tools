@@ -126,6 +126,7 @@ Format: *Name* — <what they're working on> [BLOCKED: reason if blocked]
 Bullet list of risks ranked by severity. One line each.
 
 Write standup_brief.md with the STANDUP_BRIEF content and risk_report.md with the RISK_REPORT content.
+Do NOT include any heading line in these files — write only the content (bullets, text), no "# Risk Report" or "#### STANDUP_BRIEF" prefix.
 
 Output ONLY this JSON on the last line:
 {{"status":"DONE","risk_count":<N>,"discussion_questions":<N>,"silence_count":<N>}}

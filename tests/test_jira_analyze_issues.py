@@ -139,8 +139,8 @@ _MOCK_ISSUE = {
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.common.jira_api.get_issue")
 @patch("scripts.jira.analyze_issues.run_analysis")
-@patch("scripts.jira.analyze_issues.notify")
-def test_main_analyze_by_keys(mock_notify, mock_claude, mock_get_issue,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_main_analyze_by_keys(mock_post, mock_claude, mock_get_issue,
                                mock_attach, mock_prs, mock_fetch_full,
                                mock_skill, mock_arch):
     mock_get_issue.return_value = _MOCK_ISSUE
@@ -149,20 +149,20 @@ def test_main_analyze_by_keys(mock_notify, mock_claude, mock_get_issue,
     runner = CliRunner()
     result = runner.invoke(main, ["--issues", "PROJ-42"], env=_BASE_ENV)
     assert result.exit_code == 0
-    mock_notify.assert_called_once()
-    text = mock_notify.call_args[0][1]
+    mock_post.assert_called_once()
+    text = mock_post.call_args[0][1]
     assert "PROJ-42" in text
     assert "race condition" in text
 
 
 @patch("scripts.jira.query_issues.resolve_field_id", return_value=None)
 @patch("scripts.common.jira_api.search_issues", return_value=[])
-@patch("scripts.jira.analyze_issues.notify")
-def test_main_no_results(mock_notify, mock_search, mock_resolve):
+@patch("scripts.jira.analyze_issues.post_report")
+def test_main_no_results(mock_post, mock_search, mock_resolve):
     runner = CliRunner()
     result = runner.invoke(main, ["--query", "nonexistent"], env=_BASE_ENV)
     assert result.exit_code == 2
-    mock_notify.assert_called_once()
+    mock_post.assert_called_once()
 
 
 @patch("scripts.jira.analyze_issues.try_git_archaeology", return_value=(None, None))
@@ -172,8 +172,8 @@ def test_main_no_results(mock_notify, mock_search, mock_resolve):
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.common.jira_api.get_issue")
 @patch("scripts.jira.analyze_issues.run_skill_analysis")
-@patch("scripts.jira.analyze_issues.notify")
-def test_relevant_skill_invoked_for_query(mock_notify, mock_skill_analysis, mock_get_issue,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_relevant_skill_invoked_for_query(mock_post, mock_skill_analysis, mock_get_issue,
                                            mock_attach, mock_prs, mock_fetch_full,
                                            mock_resolve_skill, mock_arch):
     from pathlib import Path
@@ -195,8 +195,8 @@ def test_relevant_skill_invoked_for_query(mock_notify, mock_skill_analysis, mock
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.jira.analyze_issues.run_analysis")
 @patch("scripts.common.jira_api.get_issue")
-@patch("scripts.jira.analyze_issues.notify")
-def test_no_skill_falls_back_to_git_archaeology(mock_notify, mock_get_issue, mock_claude,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_no_skill_falls_back_to_git_archaeology(mock_post, mock_get_issue, mock_claude,
                                                  mock_attach, mock_prs, mock_fetch_full,
                                                  mock_markers, mock_skill, mock_arch):
     mock_get_issue.return_value = _MOCK_ISSUE
@@ -214,8 +214,8 @@ def test_no_skill_falls_back_to_git_archaeology(mock_notify, mock_get_issue, moc
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.jira.analyze_issues.run_analysis")
 @patch("scripts.common.jira_api.get_issue")
-@patch("scripts.jira.analyze_issues.notify")
-def test_no_git_archaeology_when_no_bb_config(mock_notify, mock_get_issue, mock_claude,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_no_git_archaeology_when_no_bb_config(mock_post, mock_get_issue, mock_claude,
                                                mock_attach, mock_prs, mock_fetch_full,
                                                mock_skill, mock_arch):
     mock_get_issue.return_value = _MOCK_ISSUE
@@ -233,8 +233,8 @@ def test_no_git_archaeology_when_no_bb_config(mock_notify, mock_get_issue, mock_
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.common.jira_api.get_issue")
 @patch("scripts.jira.analyze_issues.run_skill_analysis")
-@patch("scripts.jira.analyze_issues.notify")
-def test_direct_ygs_analyze_skill_lookup(mock_notify, mock_skill_analysis, mock_get_issue,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_direct_ygs_analyze_skill_lookup(mock_post, mock_skill_analysis, mock_get_issue,
                                           mock_attach, mock_prs, mock_fetch_full,
                                           mock_resolve_skill, mock_arch):
     """resolve_skill_for_analyze returns ygs-analyze — SKILL_USED::ygs-analyze emitted."""
@@ -256,8 +256,8 @@ def test_direct_ygs_analyze_skill_lookup(mock_notify, mock_skill_analysis, mock_
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.jira.analyze_issues.run_analysis")
 @patch("scripts.common.jira_api.get_issue")
-@patch("scripts.jira.analyze_issues.notify")
-def test_richer_task_context_emitted(mock_notify, mock_get_issue, mock_claude,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_richer_task_context_emitted(mock_post, mock_get_issue, mock_claude,
                                       mock_attach, mock_prs, mock_fetch_full,
                                       mock_skill, mock_arch):
     """Verify tracker, model, issue count, and new enrichment context keys are emitted."""
@@ -282,8 +282,8 @@ def test_richer_task_context_emitted(mock_notify, mock_get_issue, mock_claude,
 @patch("scripts.jira.analyze_issues.fetch_jira_attachment_text", return_value=None)
 @patch("scripts.jira.analyze_issues.run_analysis")
 @patch("scripts.common.jira_api.get_issue")
-@patch("scripts.jira.analyze_issues.notify")
-def test_analysis_type_basic_when_no_skill_no_git(mock_notify, mock_get_issue, mock_claude,
+@patch("scripts.jira.analyze_issues.post_report")
+def test_analysis_type_basic_when_no_skill_no_git(mock_post, mock_get_issue, mock_claude,
                                                     mock_attach, mock_prs, mock_fetch_full,
                                                     mock_skill, mock_arch):
     """When no skill and no git context, ANALYSIS_TYPE::basic is emitted."""

@@ -27,7 +27,7 @@ import sys
 from datetime import date
 
 from scripts.common.config import load_config, get_workspace_dir
-from scripts.common.slack_format import format_for_slack
+from scripts.common.slack_format import format_for_slack, strip_section_heading
 from scripts.standup.render_html import DONE_STATUSES
 from scripts.standup.slack_client import post_report
 
@@ -95,9 +95,9 @@ def main() -> None:
             )
             sys.exit(1)
 
-    brief = brief_path.read_text().strip()
+    brief = strip_section_heading(brief_path.read_text().strip())
     risk_report_path = workspace_dir / "risk_report.md"
-    risk_report = risk_report_path.read_text().strip() if risk_report_path.exists() else ""
+    risk_report = strip_section_heading(risk_report_path.read_text().strip()) if risk_report_path.exists() else ""
 
     synth_result = {}
     synth_path = workspace_dir / "synthesize_result.json"

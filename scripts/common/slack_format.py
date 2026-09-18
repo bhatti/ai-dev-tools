@@ -77,6 +77,26 @@ def format_for_slack(text: str) -> str:
     return text
 
 
+_SECTION_HEADING_FIRST_LINE = re.compile(
+    r"^#{1,6}\s+(?:standup_brief|standup brief|risk_report|risk report|standup_report|standup report|full risk report|full_risk_report)",
+    re.IGNORECASE,
+)
+
+
+def strip_section_heading(text: str) -> str:
+    """Remove the first line if it is a Markdown section heading for a known standup section.
+
+    Handles headings with extra detail, e.g.:
+      '# Risk Report — DistMgmt Sprint 202 — 2026-09-18'
+    Only the first line is inspected so body headings are never accidentally removed.
+    """
+    text = text.strip()
+    first, _, rest = text.partition("\n")
+    if _SECTION_HEADING_FIRST_LINE.match(first):
+        return rest.strip()
+    return text
+
+
 def build_artifact_links(config: dict, task_type: str, report_filename: str) -> tuple[str, str]:
     """Return (html_url, job_url) for Slack artifact links.
 

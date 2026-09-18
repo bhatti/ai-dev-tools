@@ -280,7 +280,7 @@ class TestMainEnvWrites:
 
         from scripts.analyze import run_pr_audit
         with patch("scripts.analyze.run_pr_audit.validate_claude_config"), \
-             patch("scripts.analyze.run_pr_audit._ensure_ygs_skills"), \
+             patch("scripts.analyze.run_pr_audit.ensure_ygs_skills"), \
              patch("scripts.analyze.run_pr_audit.resolve_repo_url", return_value=None), \
              patch("scripts.analyze.run_pr_audit.compute_repo_label", return_value="ws/repo"):
             with pytest.raises(SystemExit):

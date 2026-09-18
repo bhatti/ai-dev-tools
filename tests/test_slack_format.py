@@ -1,6 +1,6 @@
 """Tests for scripts/common/slack_format.py — artifact link helpers."""
 
-from scripts.common.slack_format import build_artifact_links, format_for_slack
+from scripts.common.slack_format import build_artifact_links, format_for_slack, strip_section_heading
 
 
 class TestBuildArtifactLinks:
@@ -71,3 +71,44 @@ class TestFormatForSlack:
         result = format_for_slack(long_text)
         assert len(result) < 40_000
         assert "truncated" in result
+
+
+class TestStripSectionHeading:
+    def test_strips_risk_report_heading(self):
+        text = "# Risk Report\n• item1\n• item2"
+        assert strip_section_heading(text) == "• item1\n• item2"
+
+    def test_strips_risk_report_with_sprint_info(self):
+        text = "# Risk Report — DistMgmt Sprint 202 — 2026-09-18\n• item1"
+        assert strip_section_heading(text) == "• item1"
+
+    def test_strips_risk_report_h4(self):
+        text = "#### RISK_REPORT\n• item"
+        assert strip_section_heading(text) == "• item"
+
+    def test_strips_standup_brief_heading(self):
+        text = "## Standup Brief\n*Alice* — working on X"
+        assert strip_section_heading(text) == "*Alice* — working on X"
+
+    def test_strips_standup_brief_underscore(self):
+        text = "#### STANDUP_BRIEF\n*Alice* — working on X"
+        assert strip_section_heading(text) == "*Alice* — working on X"
+
+    def test_preserves_body_headings(self):
+        text = "• item1\n## Risk Report\n• item2"
+        assert strip_section_heading(text) == text
+
+    def test_noop_when_no_heading(self):
+        text = "• item1\n• item2"
+        assert strip_section_heading(text) == text
+
+    def test_noop_on_unrelated_heading(self):
+        text = "# Sprint Summary\n• item1"
+        assert strip_section_heading(text) == "# Sprint Summary\n• item1"
+
+    def test_strips_full_risk_report(self):
+        text = "## Full Risk Report\n• risk1"
+        assert strip_section_heading(text) == "• risk1"
+
+    def test_empty_string(self):
+        assert strip_section_heading("") == ""

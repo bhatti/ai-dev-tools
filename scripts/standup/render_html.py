@@ -19,6 +19,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.common.slack_format import strip_section_heading
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +282,7 @@ def main() -> None:
     signals = json.loads(signals_path.read_text())
 
     risk_report_path = workspace_dir / "risk_report.md"
-    risk_md = risk_report_path.read_text().strip() if risk_report_path.exists() else ""
+    risk_md = strip_section_heading(risk_report_path.read_text().strip()) if risk_report_path.exists() else ""
     risk_section = (
         f'<h3>Risk Report</h3>\n<div class="risk-detail">\n{_md_to_html(risk_md)}\n</div>'
         if risk_md else ""
@@ -290,7 +291,7 @@ def main() -> None:
     brief_path = workspace_dir / "standup_brief.md"
     brief_html = ""
     if brief_path.exists():
-        brief_md = brief_path.read_text().strip()
+        brief_md = strip_section_heading(brief_path.read_text().strip())
         if brief_md:
             brief_html = f'<div class="brief-section">\n{_md_to_html(brief_md)}\n</div>'
             print(f"[render_html] included standup_brief.md ({len(brief_md)} chars)", flush=True)
