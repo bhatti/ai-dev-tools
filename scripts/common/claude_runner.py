@@ -300,8 +300,9 @@ def _ensure_extra_skills(skills_base: Path) -> None:
                 _force_skills_cli = True
                 name = name[len("skills-cli:"):]
             if name.startswith("http://") or name.startswith("https://") or name.startswith("git@"):
-                # Already a full URL — wrap as a minimal dict
-                entry = {"url": name}
+                # Normalize Bitbucket/GitHub web browse URLs to git clone URL dicts.
+                from scripts.common.git_utils import normalize_repo_web_url
+                entry = normalize_repo_web_url(name)
                 if _force_skills_cli:
                     entry["type"] = "skills-cli"
             elif "/" in name:
@@ -350,10 +351,9 @@ def _ensure_extra_skills(skills_base: Path) -> None:
         sparse = bool(repo.get("sparse", True))
         token_env = repo.get("token_env", "")
 
-        # Inject credentials into URL for private repos (never log the substituted URL).
+        # Resolve credentials — passed to clone helpers which embed them safely.
         # Explicit token_env/username_env fields take precedence; otherwise auto-detect
         # from well-known env vars for bitbucket.org and github.com.
-        clone_url = url
         token_env = repo.get("token_env", "")
         username_env = repo.get("username_env", "")
         if not token_env:
@@ -363,49 +363,27 @@ def _ensure_extra_skills(skills_base: Path) -> None:
                 token_env = "GH_TOKEN"
         token = os.environ.get(token_env, "") if token_env else ""
         username = os.environ.get(username_env, "") if username_env else ""
-        if token:
-            if username:
-                # Bitbucket / basic-auth: https://user:token@host/...
-                clone_url = url.replace("https://", f"https://{username}:{token}@")
-            else:
-                # GitHub token: https://token@github.com/...
-                clone_url = url.replace("https://", f"https://{token}@")
 
         slug = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
         dest = skills_base / f"_extra_{slug}"
-        already_exists = dest.exists() and (dest / ".git").exists()
-        if not already_exists:
+        if not (dest.exists() and (dest / ".git").exists()):
             _t0 = _time.monotonic()
-            if sparse:
-                print(f"[ygs] sparse-cloning {url} ({skills_dir} only)...", flush=True)
-                try:
-                    r = subprocess.run(
-                        ["git", "clone", "--depth", "1", "--filter=blob:none",
-                         "--sparse", "--branch", branch, clone_url, str(dest)],
-                        capture_output=True, text=True, timeout=60,
+            label = "sparse-clone" if sparse else "clone"
+            print(f"[ygs] {label} extra skills repo {url} ({skills_dir or 'full'})...", flush=True)
+            try:
+                from scripts.common.git_utils import sparse_clone_repo
+                if sparse:
+                    sparse_clone_repo(
+                        url, dest, branch=branch, sparse_dir=skills_dir,
+                        http_token=token, http_username=username or "x-token-auth",
                     )
-                    if r.returncode != 0:
-                        print(f"[ygs] WARNING: sparse clone of {url} failed: {r.stderr.strip()}", file=sys.stderr, flush=True)
-                        continue
-                    r2 = subprocess.run(
-                        ["git", "-C", str(dest), "sparse-checkout", "set", skills_dir],
-                        capture_output=True, text=True, timeout=60,
-                    )
-                    if r2.returncode != 0:
-                        print(f"[ygs] WARNING: sparse-checkout set failed: {r2.stderr.strip()}", file=sys.stderr, flush=True)
-                        continue
-                    print(f"[ygs] sparse clone of {url} in {_time.monotonic() - _t0:.0f}s", flush=True)
-                except subprocess.TimeoutExpired:
-                    print(f"[ygs] WARNING: sparse clone of {url} timed out", file=sys.stderr, flush=True)
-                    continue
-            else:
-                print(f"[ygs] cloning extra skills repo {url}...", flush=True)
-                try:
+                else:
                     clone_repo(url, dest, depth=1, http_token=token, http_username=username or "x-token-auth")
-                    print(f"[ygs] cloned {url} in {_time.monotonic() - _t0:.0f}s", flush=True)
-                except Exception as exc:
-                    print(f"[ygs] WARNING: clone of {url} failed: {exc}", file=sys.stderr, flush=True)
-                    continue
+                print(f"[ygs] {label} of {url} done in {_time.monotonic() - _t0:.0f}s", flush=True)
+            except Exception as exc:
+                msg = getattr(exc, "stderr", "") or str(exc)
+                print(f"[ygs] WARNING: {label} of {url} failed: {msg.strip()}", file=sys.stderr, flush=True)
+                continue
 
         # Resolve skills_dir: explicit value wins; otherwise try common conventions
         if skills_dir:

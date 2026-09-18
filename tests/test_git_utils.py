@@ -10,7 +10,9 @@ from scripts.common.git_utils import (
     create_branch,
     get_commit_count,
     make_branch_name,
+    normalize_repo_web_url,
     resolve_clone_auth,
+    sparse_clone_repo,
 )
 
 
@@ -217,3 +219,108 @@ def test_resolve_clone_auth_auto_detect_tracker():
     token, username, ssh_key = resolve_clone_auth(config)
     assert token == "ghp_test"
     assert username == "x-access-token"
+
+
+# ── normalize_repo_web_url ────────────────────────────────────────────────────
+
+class TestNormalizeRepoWebUrl:
+    def test_bitbucket_src_url_no_path(self):
+        result = normalize_repo_web_url("https://bitbucket.org/cribl/cribl/src/dev/")
+        assert result == {"url": "https://bitbucket.org/cribl/cribl.git", "branch": "dev"}
+
+    def test_bitbucket_src_url_with_path(self):
+        result = normalize_repo_web_url("https://bitbucket.org/cribl/cribl/src/main/.claude/skills")
+        assert result == {
+            "url": "https://bitbucket.org/cribl/cribl.git",
+            "branch": "main",
+            "skills_dir": ".claude/skills",
+        }
+
+    def test_github_tree_url_no_path(self):
+        result = normalize_repo_web_url("https://github.com/org/repo/tree/feature-branch")
+        assert result == {"url": "https://github.com/org/repo.git", "branch": "feature-branch"}
+
+    def test_github_tree_url_with_path(self):
+        result = normalize_repo_web_url("https://github.com/org/repo/tree/main/skills/ygs")
+        assert result == {
+            "url": "https://github.com/org/repo.git",
+            "branch": "main",
+            "skills_dir": "skills/ygs",
+        }
+
+    def test_github_blob_url(self):
+        result = normalize_repo_web_url("https://github.com/org/repo/blob/main/README.md")
+        assert result == {
+            "url": "https://github.com/org/repo.git",
+            "branch": "main",
+            "skills_dir": "README.md",
+        }
+
+    def test_plain_git_url_unchanged(self):
+        result = normalize_repo_web_url("https://bitbucket.org/cribl/cribl.git")
+        assert result == {"url": "https://bitbucket.org/cribl/cribl.git"}
+
+    def test_github_git_url_unchanged(self):
+        result = normalize_repo_web_url("https://github.com/org/repo.git")
+        assert result == {"url": "https://github.com/org/repo.git"}
+
+    def test_non_hosting_url_unchanged(self):
+        result = normalize_repo_web_url("https://example.com/my/repo.git")
+        assert result == {"url": "https://example.com/my/repo.git"}
+
+
+# ── sparse_clone_repo ─────────────────────────────────────────────────────────
+
+class TestSparseCloneRepo:
+    def test_skips_if_dest_already_exists(self, tmp_path):
+        dest = tmp_path / "repo"
+        dest.mkdir()
+        (dest / ".git").mkdir()
+        # No subprocess calls expected — should return immediately
+        sparse_clone_repo("https://example.com/repo.git", dest)  # must not raise
+
+    def test_calls_git_clone_with_sparse_flags(self, tmp_path):
+        dest = tmp_path / "repo"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            sparse_clone_repo(
+                "https://bitbucket.org/org/repo.git",
+                dest,
+                branch="dev",
+                sparse_dir=".claude/skills",
+            )
+        calls = mock_run.call_args_list
+        # First call: git clone
+        clone_args = calls[0][0][0]
+        assert "clone" in clone_args
+        assert "--sparse" in clone_args
+        assert "--depth" in clone_args
+        assert "dev" in clone_args
+        # Second call: sparse-checkout set
+        checkout_args = calls[1][0][0]
+        assert "sparse-checkout" in checkout_args
+        assert ".claude/skills" in checkout_args
+
+    def test_embeds_token_in_clone_url(self, tmp_path):
+        dest = tmp_path / "repo"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            sparse_clone_repo(
+                "https://bitbucket.org/org/repo.git",
+                dest,
+                http_token="ATATT_secret",
+                http_username="x-token-auth",
+                sparse_dir="",
+            )
+        clone_call = mock_run.call_args_list[0][0][0]
+        clone_url_arg = next(a for a in clone_call if "ATATT_secret" in a)
+        assert "x-token-auth" in clone_url_arg
+        assert "ATATT_secret" in clone_url_arg
+
+    def test_raises_on_clone_failure(self, tmp_path):
+        import subprocess
+        dest = tmp_path / "repo"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=128, stderr="fatal: not found")
+            with pytest.raises(subprocess.CalledProcessError):
+                sparse_clone_repo("https://example.com/repo.git", dest)

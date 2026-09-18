@@ -352,3 +352,107 @@ def detect_bitbucket_url(workspace: str, repo: str, use_ssh: bool = True) -> str
     if use_ssh:
         return f"git@bitbucket.org:{workspace}/{repo}.git"
     return f"https://bitbucket.org/{workspace}/{repo}.git"
+
+
+# Patterns for Bitbucket and GitHub web browse URLs.
+_BB_WEB_RE = re.compile(
+    r"https?://bitbucket\.org/([^/]+)/([^/]+)/src/([^/]+)(/.+)?"
+)
+_GH_WEB_RE = re.compile(
+    r"https?://github\.com/([^/]+)/([^/]+)/(?:tree|blob)/([^/]+)(/.+)?"
+)
+
+
+def normalize_repo_web_url(url: str) -> dict:
+    """Convert a Bitbucket/GitHub web browse URL to a git clone URL dict.
+
+    Returns a dict with ``url`` (git clone URL), and optionally ``branch``
+    and ``skills_dir`` when they are encoded in the web URL.
+
+    Examples::
+
+        https://bitbucket.org/org/repo/src/dev/
+          → {"url": "https://bitbucket.org/org/repo.git", "branch": "dev"}
+
+        https://github.com/org/repo/tree/main/.claude/skills
+          → {"url": "https://github.com/org/repo.git", "branch": "main",
+             "skills_dir": ".claude/skills"}
+
+        https://bitbucket.org/org/repo.git  (already a git URL)
+          → {"url": "https://bitbucket.org/org/repo.git"}
+    """
+    m = _BB_WEB_RE.match(url)
+    if m:
+        org, repo, branch, path = m.groups()
+        result: dict = {"url": f"https://bitbucket.org/{org}/{repo}.git", "branch": branch}
+        if path:
+            result["skills_dir"] = path.lstrip("/").rstrip("/")
+        return result
+    m = _GH_WEB_RE.match(url)
+    if m:
+        org, repo, branch, path = m.groups()
+        result = {"url": f"https://github.com/{org}/{repo}.git", "branch": branch}
+        if path:
+            result["skills_dir"] = path.lstrip("/").rstrip("/")
+        return result
+    return {"url": url}
+
+
+def sparse_clone_repo(
+    url: str,
+    dest: Path,
+    branch: str = "main",
+    sparse_dir: str = "",
+    http_token: str = "",
+    http_username: str = "x-token-auth",
+    timeout: int = 120,
+) -> None:
+    """Shallow sparse-clone *url* into *dest*, limiting checkout to *sparse_dir*.
+
+    If *dest* already exists and contains a ``.git`` directory the clone is
+    skipped (idempotent).  Raises ``subprocess.CalledProcessError`` on
+    failure; the caller is responsible for catching and logging.
+
+    Args:
+        url: HTTPS git clone URL (no embedded credentials).
+        dest: Local destination path.
+        branch: Branch/tag to clone.
+        sparse_dir: Repo-relative sub-tree to materialise (e.g. ``.claude/skills``).
+                    Empty string → no sparse-checkout filter applied.
+        http_token: Auth token embedded in the URL (Atlassian ATATT or GitHub PAT).
+        http_username: HTTP basic-auth username (``x-token-auth`` for Atlassian tokens).
+        timeout: Per-command timeout in seconds.
+    """
+    dest = Path(dest)
+    if dest.exists() and (dest / ".git").exists():
+        return
+
+    clone_url = _embed_credentials(url, http_username, http_token) if http_token else url
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+    result = subprocess.run(
+        ["git", "clone", "--depth", "1", "--filter=blob:none",
+         "--sparse", "--branch", branch, clone_url, str(dest)],
+        capture_output=True, text=True, timeout=timeout, env=env,
+    )
+    if result.returncode != 0:
+        safe = _redact_url(clone_url)
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            f"git clone --depth 1 --sparse {safe} {dest}",
+            result.stdout,
+            result.stderr,
+        )
+
+    if sparse_dir:
+        r2 = subprocess.run(
+            ["git", "-C", str(dest), "sparse-checkout", "set", sparse_dir],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r2.returncode != 0:
+            raise subprocess.CalledProcessError(
+                r2.returncode,
+                ["git", "-C", str(dest), "sparse-checkout", "set", sparse_dir],
+                r2.stdout, r2.stderr,
+            )
