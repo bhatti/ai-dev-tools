@@ -476,11 +476,41 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 | `--tracker github\|jira` | Override tracker auto-detection | Auto-detected from URL or `DEFAULT_TRACKER` |
 | `--model <id>` | Model override (shortnames: `haiku`, `sonnet`, `opus`) | Org config default |
 | `--service <image:tag>` | Service sidecar image (requires API submission with `ServiceImage` param) | None |
+| `--service-port <port>` | Port the sidecar listens on; skill accesses it at `localhost:<port>` | `8080` |
+| `--service-cmd <cmd>` | Documents the sidecar command in the prompt; actual command must be set via `ServiceCommand` job variable at submission time | Image default |
+| `--service-args <args>` | Extra args described in the prompt; actual args via `ServiceArgs` job variable | None |
 | `-- <text>` | Additional instructions passed to the skill | None |
 
 ### Service Sidecars
 
-When `ServiceImage` is set (via API `params`), a sidecar container runs alongside the skill task. The skill accesses it at `localhost:<ServicePort>`. Customizable via job variables: `ServiceName`, `ServicePort`, `ServiceCommand`, `ServiceMemoryLimit`, `ServiceCpuRequest`.
+When `ServiceImage` is set (via API `params`), a sidecar container runs alongside the skill task. The skill accesses it at `localhost:<ServicePort>`. Customizable via job variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ServiceImage` | Container image (e.g. `nginx:alpine`, `plexobject/formicary:latest`) | — |
+| `ServiceName` | Sidecar container name | `service` |
+| `ServicePort` | Port exposed to the skill task | `9000` |
+| `ServiceCommand` | Full command override | Image entrypoint |
+| `ServiceArgs` | Extra args appended to `ServiceCommand` | None |
+| `ServiceEntrypoint` | Override container entrypoint | Image default |
+| `ServiceMemoryLimit` | Memory limit for sidecar | `2G` |
+| `ServiceCpuRequest` | CPU request for sidecar | `250m` |
+
+**Formicary as a service**: you can run formicary itself as a sidecar to exercise integration tests against a live leader. Auth is disabled by default (no credentials needed):
+
+```bash
+# Via API
+curl -X POST .../api/v1/jobs/requests \
+  -d '{"job_type":"ai-skill","params":{
+    "RawArgs":"integ-tests --repo https://github.com/org/repo -- run tests",
+    "ServiceImage":"plexobject/formicary:latest",
+    "ServicePort":"7777",
+    "ServiceCommand":"formicary queen",
+    "ServiceArgs":"--config /tmp/empty.yaml"
+  }}'
+```
+
+The `integ-tests` YGS skill will automatically check `SERVICE_PORT` for a health endpoint and include the result in its report.
 
 ### How it works
 
@@ -489,7 +519,7 @@ When `ServiceImage` is set (via API `params`), a sidecar container runs alongsid
 3. Clones repo (with tracker-appropriate auth), installs YGS skills + extras
 4. Loads skill SKILL.md, builds prompt with repo context + service info + instructions
 5. Invokes Claude, writes reports (`skill_result.json`, `reports/report.{md,html}`)
-6. Posts results to Slack thread
+6. `scripts/skill/post.py` (post task) reads reports and posts HTML report + artifact link to Slack
 
 ---
 

@@ -160,6 +160,7 @@ _SCRIPTS_TO_COPY = [
     "scripts/skill/__init__.py",
     "scripts/skill/flags.py",
     "scripts/skill/run_skill.py",
+    "scripts/skill/post.py",
 ]
 
 # Directories to copy wholesale (e.g. .claude/skills for skill pod tests).
@@ -2761,6 +2762,61 @@ def test_27_skill_e2e_with_identifier(base_env: dict[str, str]) -> TestResult:
                  f"elapsed={step.elapsed:.0f}s")
 
 
+def test_28_skill_post(base_env: dict[str, str]) -> TestResult:
+    """Verify scripts.skill.post reads skill_result.json + reports/report.md and exits 0.
+
+    Creates fixture files in workspace, then runs post.py. Does NOT require a live
+    Slack token — we omit SLACK_BOT_TOKEN so the post falls back to the fallback path
+    (which logs rather than hard-fails). Verifies exit 0.
+    """
+    result = TestResult("skill-post")
+
+    env = dict(base_env)
+    ws = "/workspace/skill_post_test"
+    env["WORKSPACE_DIR"] = ws
+    env.pop("SLACK_BOT_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLAUDE_CODE_USE_BEDROCK", None)
+
+    # Provide minimal Formicary vars so fallback notify has something to link.
+    env["FORMICARY_URL"] = env.get("FORMICARY_URL", "http://localhost:7777")
+    env["JOB_ID"] = "test-job-99"
+
+    setup_cmd = (
+        f"mkdir -p {ws}/reports && "
+        f"python3 - <<'PYEOF'\n"
+        f"import json, pathlib\n"
+        f"ws = pathlib.Path('{ws}')\n"
+        f"(ws / 'skill_result.json').write_text(json.dumps({{'skill': 'ygs-ask', 'status': 'DONE', 'model': 'haiku'}}))\n"
+        f"(ws / 'reports' / 'report.md').write_text('# Test Report\\n\\nAll checks passed.\\n\\n- item1 OK\\n- item2 OK\\n')\n"
+        f"PYEOF"
+    )
+
+    with pod_fixture("skill-post") as pod:
+        # Step 1 — create fixture files
+        setup_step = exec_step(pod, "setup-fixtures", setup_cmd, env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"fixture setup failed: {setup_step.stderr[-300:]}")
+
+        # Step 2 — run post.py
+        post_step = exec_step(pod, "run-post",
+                              "python3 -m scripts.skill.post",
+                              env, timeout=60)
+        result.steps.append(post_step)
+
+        combined = post_step.stdout + post_step.stderr
+        if post_step.returncode != 0:
+            return _fail(result, post_step, f"post.py exited {post_step.returncode}: {combined[-500:]}")
+
+        # Verify it logged the expected output (either posted or fell back).
+        if "[skill-post]" not in combined:
+            return _fail(result, post_step,
+                         f"expected [skill-post] log line, got: {combined[-500:]}")
+
+    return _pass(result, "skill-post exited 0 and logged output")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -2791,6 +2847,7 @@ ALL_TESTS: dict[str, callable] = {
     "skill-service-awareness": test_25_skill_service_awareness,
     "skill-identifier-passthrough": test_26_skill_identifier_passthrough,
     "skill-e2e-identifier":   test_27_skill_e2e_with_identifier,
+    "skill-post":             test_28_skill_post,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

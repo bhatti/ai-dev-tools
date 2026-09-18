@@ -35,7 +35,7 @@ from scripts.common.config import (
 from scripts.common.git_utils import clone_repo, create_branch, resolve_clone_auth
 from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
 from scripts.common.slack_format import format_for_slack
-from scripts.standup.slack_client import notify as slack_notify, post_report
+from scripts.standup.slack_client import notify as slack_notify
 
 # Reuse shared helpers from adhoc run_skill — these are stable, well-tested utilities.
 from scripts.adhoc.run_skill import (
@@ -129,30 +129,6 @@ def _write_reports(workspace: Path, skill: str, output_text: str, status_data: d
         print(f"[skill] WARNING: could not write reports/: {e}", flush=True)
 
 
-def _post_to_slack(config: dict, skill: str, output_text: str, status_data: dict,
-                   model: str | None = None) -> None:
-    """Post results to Slack with HTML report upload (same pattern as standup/audit)."""
-    md_with_model = _append_model_footer(output_text, model)
-    slack_text = format_for_slack(_strip_for_slack(md_with_model))
-
-    if not slack_text and not output_text:
-        summary = status_data.get("summary", "")
-        slack_text = f"✅ `/{skill}` complete. {summary}"
-
-    title = f"Skill: {skill}"
-    thread_ts = config.get("SLACK_THREAD_TS") or None
-
-    try:
-        post_report(config, slack_text, md_with_model,
-                    title=title, filename=f"{skill}_report.html",
-                    thread_ts=thread_ts, task_type="run")
-    except Exception as e:
-        print(f"[skill] WARNING: Slack post failed (non-fatal): {e}", flush=True)
-        try:
-            slack_notify(config, slack_text or f"✅ `/{skill}` complete.")
-        except Exception:
-            pass
-
 
 def _find_report_content(workspace: Path) -> str | None:
     """Check for report files written by Claude. Returns content or None."""
@@ -244,15 +220,23 @@ def main() -> None:
     service_image = os.getenv("SERVICE_IMAGE", "").strip()
     service_name = os.getenv("SERVICE_NAME", "skill-service").strip()
     service_port = os.getenv("SERVICE_PORT", "9000").strip()
+    service_command = os.getenv("SERVICE_COMMAND", "").strip()
+    service_args = os.getenv("SERVICE_ARGS", "").strip()
     service_info = ""
     if service_image and service_image not in ("<no value>", "{{.ServiceImage}}"):
+        cmd_desc = ""
+        if service_command or service_args:
+            full_cmd = f"{service_command} {service_args}".strip()
+            cmd_desc = f"\n- Command: `{full_cmd}`"
         service_info = (
             f"\n\n## Background Service\n\n"
             f"A background service is running alongside this task:\n"
             f"- Image: {service_image}\n"
             f"- Hostname: localhost (or {service_name})\n"
             f"- Port: {service_port}\n"
-            f"- Access via: http://localhost:{service_port}\n"
+            f"- Access via: http://localhost:{service_port}"
+            f"{cmd_desc}\n"
+            f"\nEnv var SERVICE_PORT is set to {service_port}; use it for health checks.\n"
         )
         print(f"[skill] service running: {service_image} at localhost:{service_port}", flush=True)
     elif flags.service:
@@ -338,9 +322,8 @@ def main() -> None:
     if output_text and output_text != json.dumps(status_data):
         _write_reports(workspace, flags.skill, output_text, status_data, model=model)
 
-    # Post partial or full output to Slack before checking status so the user
-    # always sees what was produced, even when the run is incomplete.
-    _post_to_slack(config, flags.skill, output_text, status_data, model=model)
+    # Slack posting is handled by the post task (scripts.skill.post) which runs
+    # after this task completes and has access to the report artifacts.
 
     # Use result.status (authoritative runner status) not status_data which is
     # Claude's JSON output and may not reflect MAX_TURNS_REACHED correctly.

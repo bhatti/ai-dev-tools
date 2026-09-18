@@ -360,3 +360,40 @@ class TestResolveRepo:
         flags = SkillFlags(repo="git@github.com:org/repo.git")
         url, branch = resolve_repo(flags, {}, "github")
         assert url == "git@github.com:org/repo.git"
+
+
+# ─── service flags ───────────────────────────────────────────────────────────
+
+class TestServiceFlags:
+    def test_service_image_parsed(self):
+        flags = parse_skill_flags("ygs-ask --service nginx:alpine")
+        assert flags.service == "nginx:alpine"
+
+    def test_service_port_parsed(self):
+        flags = parse_skill_flags("ygs-ask --service nginx:alpine --service-port 8080")
+        assert flags.service_port == "8080"
+
+    def test_service_cmd_single_word(self):
+        flags = parse_skill_flags("ygs-ask --service-cmd formicary")
+        assert flags.service_cmd == "formicary"
+
+    def test_service_cmd_quoted_multi_word(self):
+        # --service-cmd "formicary queen" should capture the full quoted string.
+        flags = parse_skill_flags('integ-tests --service-cmd "formicary queen" --service-port 7777')
+        assert flags.service_cmd == "formicary queen"
+        assert flags.service_port == "7777"
+
+    def test_service_args_parsed(self):
+        flags = parse_skill_flags("integ-tests --service-args --standalone")
+        assert flags.service_args == "--standalone"
+
+    def test_service_args_quoted(self):
+        flags = parse_skill_flags('integ-tests --service-args "--standalone --no-auth"')
+        assert flags.service_args == "--standalone --no-auth"
+
+    def test_service_cmd_does_not_bleed_into_repo(self):
+        # Without quotes, "queen" is a second token; should NOT become repo.
+        # With quotes, the whole value is captured and repo stays empty.
+        flags = parse_skill_flags('integ-tests --service-cmd "formicary queen"')
+        assert flags.service_cmd == "formicary queen"
+        assert flags.repo == ""
