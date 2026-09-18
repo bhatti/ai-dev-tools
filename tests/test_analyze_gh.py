@@ -51,7 +51,7 @@ def test_no_issues_calls_post_report_and_exits_2(
     mock_post.assert_called_once()
     _, kwargs = mock_post.call_args
     assert kwargs.get("title") == "No issues found"
-    assert kwargs.get("task_type") == "run"
+    assert kwargs.get("task_type") == "query"
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def test_post_report_called_with_safe_filename_and_run_task_type(
     assert result.exit_code == 0
     mock_post.assert_called_once()
     _, kwargs = mock_post.call_args
-    assert kwargs.get("task_type") == "run"
+    assert kwargs.get("task_type") == "query"
     fname = kwargs.get("filename", "")
     assert fname.endswith(".html")
     assert re.fullmatch(r"[a-zA-Z0-9_\-.]+", fname), f"unsafe filename: {fname}"

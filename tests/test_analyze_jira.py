@@ -53,7 +53,7 @@ def test_no_issues_calls_post_report_and_exits_2(
     mock_post.assert_called_once()
     call_kwargs = mock_post.call_args
     assert call_kwargs.kwargs.get("title") == "No issues found"
-    assert call_kwargs.kwargs.get("task_type") == "run"
+    assert call_kwargs.kwargs.get("task_type") == "query"
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def test_post_report_called_with_mrkdwn_and_task_type(
     assert result.exit_code == 0
     mock_post.assert_called_once()
     _, kwargs = mock_post.call_args
-    assert kwargs.get("task_type") == "run"
+    assert kwargs.get("task_type") == "query"
     # filename must be filesystem-safe (no spaces/special chars)
     fname = kwargs.get("filename", "")
     assert fname.endswith(".html")

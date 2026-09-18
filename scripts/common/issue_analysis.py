@@ -71,13 +71,25 @@ Format *your analysis output* as Slack mrkdwn: `*bold*` not `**bold**`, no `#` h
 
 
 def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path,
-                       git_context: str | None = None) -> str:
-    """Invoke a skill's SKILL.md instructions for analysis via Claude. DRY shared version."""
+                       git_context: str | None = None,
+                       git_repo_path: Optional[Path] = None) -> str:
+    """Invoke a skill's SKILL.md instructions for analysis via Claude. DRY shared version.
+
+    Returns content from reports/report.md when the skill writes it (preferred),
+    falling back to result.output (skill may return a JSON status terminator).
+    """
     workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
     skill_md = pathlib.Path(skill_path).read_text(encoding="utf-8")
     prompt = f"{skill_md}\n\n## Issue Context to Analyze\n\n{issues_text}"
     if git_context:
         prompt += f"\n\n## Git Repository Context\n\n{git_context}"
+    if git_repo_path:
+        prompt += (
+            f"\n\n## Git Repository (Cloned — Read Files Directly)\n\n"
+            f"The repository is cloned at: `{git_repo_path}`\n"
+            f"Use Read, Grep, Glob, LS tools to investigate actual source files for "
+            f"deeper root cause analysis."
+        )
     result = run_claude(
         prompt,
         working_dir=workspace,
@@ -87,10 +99,17 @@ def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_pa
         allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
         system_prompt=SYSTEM_PROMPTS["plan"],
     )
+    # Skill writes analysis to reports/report.md; result.output is a JSON status terminator.
+    report_path = workspace / "reports" / "report.md"
+    if report_path.exists():
+        content = report_path.read_text(encoding="utf-8").strip()
+        if content:
+            return content
     return result.output.strip()
 
 
-def run_analysis(config: dict, issues_text: str, git_context: str | None = None) -> str:
+def run_analysis(config: dict, issues_text: str, git_context: str | None = None,
+                 git_repo_path: Optional[Path] = None) -> str:
     """Run Claude on pre-formatted issues text; return the analysis string."""
     workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
     log_dir = workspace / "logs"
@@ -98,6 +117,13 @@ def run_analysis(config: dict, issues_text: str, git_context: str | None = None)
     prompt = prompt_template.format(issues_text=issues_text)
     if git_context:
         prompt += f"\n\n{git_context}"
+    if git_repo_path:
+        prompt += (
+            f"\n\n## Git Repository (Cloned — Read Files Directly)\n\n"
+            f"The repository is cloned at: `{git_repo_path}`\n"
+            f"Use Read, Grep, Glob, LS tools to investigate actual source files for "
+            f"deeper root cause analysis."
+        )
     result = run_claude(
         prompt,
         working_dir=workspace,
@@ -199,6 +225,7 @@ def try_git_archaeology(
         print(f"::add-task-context REPO_DETECTED::{repo_detected_from}", flush=True)
         print(f"::add-task-context REPO_ORG::{repo_org}", flush=True)
         print(f"::add-task-context REPO_NAME::{repo_name}", flush=True)
+        print(f"::add-task-context REPO_CLONED_PATH::{repo_path}", flush=True)
 
         # Format keys for git log grep: Jira uses "PROJ-123", GH uses "#123"
         if is_jira_bb:
@@ -271,6 +298,8 @@ def emit_git_context_markers(
         parts.append(f"{stats['commits_found']} related commits")
     if stats["top_hot_file"]:
         parts.append(f"hottest: `{stats['top_hot_file']}`")
+    if git_repo_path:
+        parts.append(f"repo at `{git_repo_path}`")
     return f"📂 *Git context:* {', '.join(parts)}\n" if parts else ""
 
 

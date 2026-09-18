@@ -90,27 +90,27 @@ _MOCK_ISSUE = {
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=None)
 @patch("scripts.common.gh_api.fetch_issues_by_numbers")
 @patch("scripts.gh.analyze_issues.run_analysis")
-@patch("scripts.gh.analyze_issues.notify")
-def test_main_analyze_by_numbers(mock_notify, mock_analysis, mock_fetch, mock_fetch_full,
+@patch("scripts.gh.analyze_issues.post_report")
+def test_main_analyze_by_numbers(mock_post, mock_analysis, mock_fetch, mock_fetch_full,
                                   mock_skill, mock_arch):
     mock_fetch.return_value = [_MOCK_ISSUE]
     mock_analysis.return_value = "Root cause: race condition"
     runner = CliRunner()
     result = runner.invoke(main, ["--issues", "42"], env=_BASE_ENV)
     assert result.exit_code == 0
-    mock_notify.assert_called_once()
-    text = mock_notify.call_args[0][1]
+    mock_post.assert_called_once()
+    text = mock_post.call_args[0][1]
     assert "#42" in text
     assert "race condition" in text
 
 
 @patch("scripts.gh.analyze_issues._search_issues", return_value=[])
-@patch("scripts.gh.analyze_issues.notify")
-def test_main_no_results(mock_notify, mock_search):
+@patch("scripts.gh.analyze_issues.post_report")
+def test_main_no_results(mock_post, mock_search):
     runner = CliRunner()
     result = runner.invoke(main, ["--query", "nonexistent"], env=_BASE_ENV)
     assert result.exit_code == 2
-    mock_notify.assert_called_once()
+    mock_post.assert_called_once()
 
 
 @patch("scripts.gh.analyze_issues.try_git_archaeology")
@@ -119,9 +119,9 @@ def test_main_no_results(mock_notify, mock_search):
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=None)
 @patch("scripts.common.gh_api.fetch_issues_by_numbers")
 @patch("scripts.gh.analyze_issues.run_analysis")
-@patch("scripts.gh.analyze_issues.notify")
+@patch("scripts.gh.analyze_issues.post_report")
 def test_git_archaeology_called_when_gh_config_present(
-    mock_notify, mock_analysis, mock_fetch, mock_fetch_full,
+    mock_post, mock_analysis, mock_fetch, mock_fetch_full,
     mock_markers, mock_skill, mock_arch
 ):
     mock_fetch.return_value = [dict(_MOCK_ISSUE, number=123, title="Auth bug")]
@@ -140,8 +140,8 @@ def test_git_archaeology_called_when_gh_config_present(
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=None)
 @patch("scripts.common.gh_api.fetch_issues_by_numbers")
 @patch("scripts.gh.analyze_issues.run_skill_analysis")
-@patch("scripts.gh.analyze_issues.notify")
-def test_skill_invoked_for_gh_query(mock_notify, mock_skill_analysis, mock_fetch,
+@patch("scripts.gh.analyze_issues.post_report")
+def test_skill_invoked_for_gh_query(mock_post, mock_skill_analysis, mock_fetch,
                                      mock_fetch_full, mock_resolve_skill, mock_arch):
     from pathlib import Path
     mock_fetch.return_value = [dict(_MOCK_ISSUE, number=55, title="Flaky integration test")]
@@ -158,8 +158,8 @@ def test_skill_invoked_for_gh_query(mock_notify, mock_skill_analysis, mock_fetch
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=None)
 @patch("scripts.common.gh_api.fetch_issues_by_numbers")
 @patch("scripts.gh.analyze_issues.run_skill_analysis")
-@patch("scripts.gh.analyze_issues.notify")
-def test_direct_ygs_analyze_skill_lookup_gh(mock_notify, mock_skill_analysis, mock_fetch,
+@patch("scripts.gh.analyze_issues.post_report")
+def test_direct_ygs_analyze_skill_lookup_gh(mock_post, mock_skill_analysis, mock_fetch,
                                              mock_fetch_full, mock_resolve_skill, mock_arch):
     from pathlib import Path
     mock_fetch.return_value = [dict(_MOCK_ISSUE, number=99, title="crash on startup")]
@@ -177,8 +177,8 @@ def test_direct_ygs_analyze_skill_lookup_gh(mock_notify, mock_skill_analysis, mo
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=None)
 @patch("scripts.common.gh_api.fetch_issues_by_numbers")
 @patch("scripts.gh.analyze_issues.run_analysis")
-@patch("scripts.gh.analyze_issues.notify")
-def test_analysis_type_basic_when_no_skill_no_git_gh(mock_notify, mock_analysis, mock_fetch,
+@patch("scripts.gh.analyze_issues.post_report")
+def test_analysis_type_basic_when_no_skill_no_git_gh(mock_post, mock_analysis, mock_fetch,
                                                        mock_fetch_full, mock_skill, mock_arch):
     mock_fetch.return_value = [dict(_MOCK_ISSUE, number=7, title="minor issue")]
     mock_analysis.return_value = "basic analysis"
@@ -194,8 +194,8 @@ def test_analysis_type_basic_when_no_skill_no_git_gh(mock_notify, mock_analysis,
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=None)
 @patch("scripts.common.gh_api.fetch_issues_by_numbers")
 @patch("scripts.gh.analyze_issues.run_analysis")
-@patch("scripts.gh.analyze_issues.notify")
-def test_richer_task_context_emitted_gh(mock_notify, mock_analysis, mock_fetch,
+@patch("scripts.gh.analyze_issues.post_report")
+def test_richer_task_context_emitted_gh(mock_post, mock_analysis, mock_fetch,
                                          mock_fetch_full, mock_skill, mock_arch):
     mock_fetch.return_value = [dict(_MOCK_ISSUE, number=5, title="context test")]
     mock_analysis.return_value = "result"

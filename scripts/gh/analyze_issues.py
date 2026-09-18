@@ -121,7 +121,7 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
         print(msg)
         write_analysis_output(config, [], msg)
         post_report(config, msg, msg, title="No issues found", filename="analysis_empty.html",
-                    task_type="run")
+                    task_type="query")
         sys.exit(2)
 
     print(f"[gh-analyze] analyzing {len(raw_issues)} issue(s) — enriching with body/comments/PRs ...",
@@ -153,9 +153,11 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
             skill_name, skill_path = skill_result
             print(f"[gh-analyze] using skill '{skill_name}' for analysis", flush=True)
             analysis = run_skill_analysis(config, issues_text, skill_name, skill_path,
-                                          git_context=git_context)
+                                          git_context=git_context,
+                                          git_repo_path=git_repo_path)
         else:
-            analysis = run_analysis(config, issues_text, git_context=git_context)
+            analysis = run_analysis(config, issues_text, git_context=git_context,
+                                    git_repo_path=git_repo_path)
     except RuntimeError as e:
         print(f"ERROR: claude failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -165,15 +167,16 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
     git_header_line = emit_git_context_markers(config, git_context, git_repo_path, git_tracker)
 
     ids_str = ", ".join(ids)
-    header = f"*GitHub analysis of {len(enriched)} issue(s): {ids_str}*\n{git_header_line}\n"
-    md_analysis = header + analysis
-    slack_text = format_for_slack(md_analysis)
+    # md_text uses Markdown heading (for HTML rendering); slack_text uses mrkdwn bold
+    md_text = f"# GitHub analysis of {len(enriched)} issue(s): {ids_str}\n{git_header_line}\n{analysis}"
+    slack_header = f"*GitHub analysis of {len(enriched)} issue(s): {ids_str}*\n{git_header_line}\n"
+    slack_text = format_for_slack(slack_header + analysis)
 
     print(slack_text, flush=True)
     write_analysis_output(config, ids, analysis, write_html=not bool(skill_result))
     title = f"Analysis: {ids_str}"
     filename = re.sub(r"[^a-zA-Z0-9_\-.]", "_", f"analysis_{'_'.join(ids)}.html")
-    post_report(config, slack_text, md_analysis, title=title, filename=filename, task_type="run")
+    post_report(config, slack_text, md_text, title=title, filename=filename, task_type="query")
 
     print(f"::add-task-context SELECTED_TRACKER::github", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)
