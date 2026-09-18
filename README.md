@@ -452,19 +452,10 @@ Run **any** YGS skill against **any** repo with full flag parsing, smart default
 @bot skill ygs-qa myapp -- run E2E tests
 ```
 
-Some skills need a different container environment — a specific language runtime, extra system
-libraries, or more memory. Use the appropriate Slack trigger or pass `RunImage` via the API.
-
-**Via Slack** — use the `skill-node` trigger for Node.js projects:
-```
-@bot skill-node edge-flaky-test all --team dm --runs 20 --dry-run --branch edge-flaky-test-skill
-@bot skill-node my-node-skill --repo https://github.com/org/my-repo --branch main
-```
-
-> **Why separate triggers?** The container image is selected at job submission time (before the
-> container starts), so it cannot be a runtime flag inside the message. Each Slack route can
-> hardcode a different `RunImage` via its `params` config — add new triggers for new base images
-> as needed (e.g. `skill-java`, `skill-python39`). See `setup-slack-admin.sh`.
+The default image (`plexobject/ai-dev-tools:latest`) is based on `python:3.12-bookworm` with
+Node 22 included, so skills that use native npm packages (esbuild, @swc/core, etc.) work
+out of the box. For rare cases requiring a completely different runtime (e.g. Java, a specific
+Node patch version), pass `RunImage` via the API:
 
 **Via API** — pass `RunImage` to use any OCI image:
 ```bash
@@ -472,7 +463,7 @@ curl -sk -X POST "${FORMICARY_URL}/api/v1/jobs/requests" \
   -H "Content-Type: application/json" \
   -d '{"job_type":"ai-skill","params":{
     "RawArgs":"my-skill --repo myorg/myrepo -- run integration tests",
-    "RunImage":"node:22-bookworm"
+    "RunImage":"eclipse-temurin:21-jdk-bookworm"
   }}'
 ```
 
@@ -507,15 +498,14 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 
 ### Container Image (`RunImage`)
 
-The `run` task defaults to `plexobject/ai-dev-tools:latest`. Override it when your skill
-requires a different runtime environment (specific OS, language version, or native libraries).
+The `run` task defaults to `plexobject/ai-dev-tools:latest` (`python:3.12-bookworm` + Node 22).
+Override `RunImage` only when a skill requires a completely different runtime:
 
 | How | When to use |
 |-----|-------------|
-| `@bot skill <name>` | Default image — works for most skills |
-| `@bot skill-node <name>` | `node:22-bookworm` pre-configured — for skills with native Node.js modules |
-| API `RunImage` param | Any OCI image — full control |
-| New Slack route + `params.RunImage` | Add to `setup-slack-admin.sh` for any fixed environment |
+| `@bot skill <name>` | Default — Python 3.12 + Node 22 on Debian bookworm |
+| API `RunImage` param | Any OCI image (Java, specific Node patch, etc.) |
+| New Slack route + `params.RunImage` | Add to `setup-slack-admin.sh` for a fixed alternate environment |
 
 ### Service Sidecars
 

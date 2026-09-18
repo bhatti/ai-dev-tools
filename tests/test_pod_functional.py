@@ -161,6 +161,16 @@ _SCRIPTS_TO_COPY = [
     "scripts/skill/flags.py",
     "scripts/skill/run_skill.py",
     "scripts/skill/post.py",
+    # scripts/common files added after initial list — keep in sync with scripts/common/
+    "scripts/common/__init__.py",
+    "scripts/common/bootstrap.py",
+    "scripts/common/entrypoint.py",
+    "scripts/common/idempotency.py",
+    "scripts/common/label_utils.py",
+    "scripts/common/pr_utils.py",
+    "scripts/common/setup_tracker.py",
+    "scripts/common/text_utils.py",
+    "requirements.txt",
 ]
 
 # Directories to copy wholesale (e.g. .claude/skills for skill pod tests).
@@ -219,8 +229,8 @@ def _kubectl(*args: str, timeout: int = 30, check: bool = True) -> subprocess.Co
     )
 
 
-def _create_pod(name: str) -> None:
-    manifest = _POD_MANIFEST.format(name=name, namespace=NAMESPACE, image=IMAGE)
+def _create_pod(name: str, image: str = IMAGE) -> None:
+    manifest = _POD_MANIFEST.format(name=name, namespace=NAMESPACE, image=image)
     with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
         f.write(manifest)
         path = f.name
@@ -275,11 +285,11 @@ def _copy_scripts(pod_name: str) -> None:
 # ── pod fixture ────────────────────────────────────────────────────────────────
 
 @contextlib.contextmanager
-def pod_fixture(test_name: str):
+def pod_fixture(test_name: str, image: str = IMAGE):
     """Context manager: create pod, copy scripts, yield pod_name, delete on exit."""
     name = f"ai-dev-{test_name.replace('_', '-')[:20]}-{uuid.uuid4().hex[:6]}"
     print(f"\n  [pod] creating {name} for test '{test_name}' ...", flush=True)
-    _create_pod(name)
+    _create_pod(name, image=image)
     try:
         _copy_scripts(name)
         yield name
@@ -2817,6 +2827,77 @@ def test_28_skill_post(base_env: dict[str, str]) -> TestResult:
     return _pass(result, "skill-post exited 0 and logged output")
 
 
+def test_29_skill_node_image(base_env: dict[str, str]) -> TestResult:
+    """Verify scripts.skill.run_skill works inside python:3.12-bookworm.
+
+    Runs a pod with the same Debian bookworm base we now ship in the production image,
+    installs Python deps from requirements.txt (copied by _copy_scripts), then invokes
+    run_skill. Catches any Alpine→bookworm regressions before a docker build.
+
+    Requires Claude credentials. Skipped if neither CLAUDE_CODE_USE_BEDROCK nor
+    ANTHROPIC_API_KEY is set.
+    """
+    result = TestResult("skill-node-image")
+
+    has_bedrock = base_env.get("CLAUDE_CODE_USE_BEDROCK", "") == "1"
+    has_api_key = bool(base_env.get("ANTHROPIC_API_KEY", ""))
+    if not (has_bedrock or has_api_key):
+        result.passed = True
+        result.message = "SKIPPED — no Claude credentials"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/skill_node"
+    env["WORKSPACE_DIR"] = ws
+    haiku = base_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    env["AI_MODEL"] = haiku
+    env["MAX_TURNS_ADHOC"] = "20"
+    env["RAW_ARGS"] = "ygs-ask -- What is 2+2?"
+    env["DEFAULT_TRACKER"] = "github"
+    env["GH_ORG"] = GH_ORG
+    env["GH_REPO"] = GH_REPO
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("skill-bookworm", image="python:3.12-bookworm") as pod:
+        # Install Python deps from requirements.txt (copied by _copy_scripts into /app/)
+        install_step = exec_step(
+            pod, "pip-install",
+            "pip install --quiet -r /app/requirements.txt 2>&1 | tail -5",
+            env, timeout=120,
+        )
+        result.steps.append(install_step)
+        if not install_step.ok:
+            return _fail(result, install_step,
+                         f"pip install failed: {install_step.stderr[-300:]}")
+
+        run_step = exec_step(
+            pod, "skill-bookworm-run",
+            f"mkdir -p {ws}/reports {ws}/logs && "
+            "PYTHONPATH=/app python3 -m scripts.skill.run_skill",
+            env, timeout=300,
+        )
+        result.steps.append(run_step)
+
+        # The python:3.12-bookworm image doesn't have the claude CLI installed (no npm/node),
+        # so exit 1 is expected. What matters is that all Python modules imported correctly and
+        # the skill was loaded — proven by the context markers.
+        err = _check_keys(run_step, ["SKILL", "SKILL_LOADED", "SELECTED_TRACKER"])
+        if err:
+            return _fail(result, run_step, f"context markers missing: {err}")
+
+        combined = run_step.stdout + run_step.stderr
+        if run_step.returncode != 0 and "claude" not in combined.lower():
+            return _fail(result, run_step,
+                         f"run_skill in python:3.12-bookworm unexpected failure (exit {run_step.returncode}): "
+                         f"{combined[-500:]}")
+
+    model = run_step.context.get("SELECTED_MODEL", "?")
+    return _pass(result,
+                 f"python:3.12-bookworm — SKILL={run_step.context.get('SKILL')} "
+                 f"LOADED={run_step.context.get('SKILL_LOADED')} MODEL={model} "
+                 f"elapsed={run_step.elapsed:.0f}s")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -2848,6 +2929,7 @@ ALL_TESTS: dict[str, callable] = {
     "skill-identifier-passthrough": test_26_skill_identifier_passthrough,
     "skill-e2e-identifier":   test_27_skill_e2e_with_identifier,
     "skill-post":             test_28_skill_post,
+    "skill-node-image":       test_29_skill_node_image,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

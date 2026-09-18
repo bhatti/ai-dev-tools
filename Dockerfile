@@ -1,20 +1,27 @@
-# AI Dev Tools — minimal container with all AI coding tools pre-installed
-FROM python:3.12-alpine
+# AI Dev Tools — Python 3.12 + Node 22 on Debian bookworm (glibc).
+# python:3.12-bookworm as the primary base; Node 22 installed via nodesource so native
+# npm packages (esbuild, @swc/core, etc.) work with glibc without any musl shims.
+FROM python:3.12-bookworm
 
-# System packages: git, node/npm, SSH, utilities
-RUN apk add --no-cache \
-    bash \
+# Node 22 via nodesource (official Debian channel)
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && mkdir -p /etc/apt/keyrings \
+  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+  && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+     > /etc/apt/sources.list.d/nodesource.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# Remaining system packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     jq \
-    curl \
-    tar \
     unzip \
     openssh-client \
-    ca-certificates \
-    nodejs \
-    npm \
-    shadow \
-  && rm -rf /var/cache/apk/*
+  && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user — claude refuses --dangerously-skip-permissions as root
 RUN useradd -m -u 1000 -s /bin/bash agent
@@ -25,20 +32,24 @@ RUN mkdir -p /home/agent/.ssh && chmod 700 /home/agent/.ssh \
      > /home/agent/.ssh/config \
   && chown -R agent:agent /home/agent/.ssh
 
-# gh CLI (GitHub CLI)
+# gh CLI (GitHub CLI) — architecture-aware
 ARG GH_VERSION=2.62.0
-RUN curl -fsSL \
-    "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+RUN ARCH=$(dpkg --print-architecture) \
+  && GH_ARCH=$([ "$ARCH" = "arm64" ] && echo "linux_arm64" || echo "linux_amd64") \
+  && curl -fsSL \
+    "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_${GH_ARCH}.tar.gz" \
   | tar xz -C /usr/local --strip-components=1 \
-      "gh_${GH_VERSION}_linux_amd64/bin/gh" \
+      "gh_${GH_VERSION}_${GH_ARCH}/bin/gh" \
   && gh --version
 
-# jira CLI (ankitpokhrel/jira-cli)
+# jira CLI (ankitpokhrel/jira-cli) — architecture-aware
 ARG JIRA_CLI_VERSION=1.5.2
-RUN curl -fsSL \
-    "https://github.com/ankitpokhrel/jira-cli/releases/download/v${JIRA_CLI_VERSION}/jira_${JIRA_CLI_VERSION}_linux_x86_64.tar.gz" \
+RUN ARCH=$(dpkg --print-architecture) \
+  && JIRA_ARCH=$([ "$ARCH" = "arm64" ] && echo "linux_arm64" || echo "linux_x86_64") \
+  && curl -fsSL \
+    "https://github.com/ankitpokhrel/jira-cli/releases/download/v${JIRA_CLI_VERSION}/jira_${JIRA_CLI_VERSION}_${JIRA_ARCH}.tar.gz" \
   | tar xz -C /tmp \
-  && mv /tmp/jira_${JIRA_CLI_VERSION}_linux_x86_64/bin/jira /usr/local/bin/jira \
+  && mv /tmp/jira_${JIRA_CLI_VERSION}_${JIRA_ARCH}/bin/jira /usr/local/bin/jira \
   && chmod +x /usr/local/bin/jira \
   && jira version
 
@@ -69,4 +80,4 @@ ENV PYTHONPATH=/app
 ENV HOME=/home/agent
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["python", "--version"]
+CMD ["python3", "--version"]
