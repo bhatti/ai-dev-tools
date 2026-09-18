@@ -186,6 +186,34 @@ class TestParseSkillFlags:
         assert f.skill == "my-skill"
         assert f.instructions == "--dry-run run all tests"
 
+    # ── --turns flag ──
+
+    def test_turns_flag_extracted(self):
+        f = parse_skill_flags("my-skill --turns 200")
+        assert f.skill == "my-skill"
+        assert f.turns == "200"
+        assert f.repo == ""
+
+    def test_turns_flag_does_not_trigger_passthrough(self):
+        """--turns is a known framework flag, should not trigger passthrough mode."""
+        f = parse_skill_flags("my-skill some-target --turns 150 --branch feat")
+        assert f.turns == "150"
+        assert f.branch == "feat"
+        assert f.repo == "some-target"
+        assert f.instructions == ""
+
+    def test_turns_flag_combined_with_unknown_flags(self):
+        """--turns extracted cleanly when other unknown flags trigger passthrough."""
+        f = parse_skill_flags("my-skill --turns 200 --dry-run --branch feat")
+        assert f.turns == "200"
+        assert f.branch == "feat"
+        assert f.instructions == "--dry-run"
+
+    def test_turns_flag_invalid_value_stored_as_string(self):
+        """Invalid --turns value is stored as-is; caller validates at use time."""
+        f = parse_skill_flags("my-skill --turns abc")
+        assert f.turns == "abc"
+
 
 # ─── resolve_tracker ──────────────────────────────────────────────────────────
 

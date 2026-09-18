@@ -464,9 +464,13 @@ def _detect_intent(prompt: str, skill: str) -> str:
     return skill
 
 
-def _system_prompt_for_skill(skill: str) -> str:
-    """Return the appropriate system prompt key for a given skill name."""
-    key = _SKILL_SYSTEM_PROMPT_MAP.get(skill, "adhoc")
+def _system_prompt_for_skill(skill: str, default: str = "adhoc") -> str:
+    """Return the appropriate system prompt for a given skill name.
+
+    The `default` lets callers use a different fallback — e.g. "skill" for the
+    ai-skill route which executes CLI-style tasks rather than answering questions.
+    """
+    key = _SKILL_SYSTEM_PROMPT_MAP.get(skill, default)
     return SYSTEM_PROMPTS[key]
 
 

@@ -56,10 +56,57 @@ def test_adhoc_prompt_exists():
     assert len(SYSTEM_PROMPTS["adhoc"]) > 50
 
 
+def test_skill_prompt_exists():
+    """SYSTEM_PROMPTS must have a 'skill' key for the ai-skill execution route."""
+    assert "skill" in SYSTEM_PROMPTS
+    assert len(SYSTEM_PROMPTS["skill"]) > 50
+
+
+def test_skill_prompt_used_as_default_for_unknown_skills():
+    """ai-skill route uses 'skill' prompt as fallback, not 'adhoc'."""
+    assert _system_prompt_for_skill("some-custom-skill", default="skill") == SYSTEM_PROMPTS["skill"]
+
+
+def test_adhoc_default_unchanged():
+    """Without a default override the existing adhoc fallback is preserved."""
+    assert _system_prompt_for_skill("some-custom-skill") == SYSTEM_PROMPTS["adhoc"]
+
+
 def test_all_mapped_skills_have_valid_prompt_keys():
     """Every skill in _SKILL_SYSTEM_PROMPT_MAP maps to a real SYSTEM_PROMPTS key."""
     for skill, key in _SKILL_SYSTEM_PROMPT_MAP.items():
         assert key in SYSTEM_PROMPTS, f"Skill {skill!r} maps to unknown key {key!r}"
+
+
+# ---------------------------------------------------------------------------
+# --turns flag: max_turns resolution (unit-tests the logic from run_skill.main)
+# ---------------------------------------------------------------------------
+
+def _resolve_max_turns(turns_flag: str, config: dict, default: int = 100) -> int:
+    """Replicate the --turns resolution logic from skill/run_skill.main() for testing."""
+    default_turns = int(config.get("MAX_TURNS_ADHOC", config.get("MAX_TURNS_IMPLEMENT", str(default))))
+    if turns_flag:
+        try:
+            return int(turns_flag)
+        except ValueError:
+            return default_turns
+    return default_turns
+
+
+def test_turns_flag_overrides_config():
+    assert _resolve_max_turns("200", {"MAX_TURNS_ADHOC": "50"}) == 200
+
+
+def test_turns_flag_invalid_falls_back_to_config():
+    assert _resolve_max_turns("abc", {"MAX_TURNS_ADHOC": "75"}) == 75
+
+
+def test_turns_empty_uses_config():
+    assert _resolve_max_turns("", {"MAX_TURNS_ADHOC": "80"}) == 80
+
+
+def test_turns_empty_uses_hardcoded_default():
+    assert _resolve_max_turns("", {}) == 100
 
 
 # ---------------------------------------------------------------------------

@@ -289,9 +289,17 @@ def main() -> None:
     # Validate Claude credentials.
     validate_claude_config(config)
 
-    # Resolve model.
+    # Resolve model and turns.
     model = _resolve_model(config, flags)
-    max_turns = int(config.get("MAX_TURNS_ADHOC", config.get("MAX_TURNS_IMPLEMENT", "50")))
+    default_turns = int(config.get("MAX_TURNS_ADHOC", config.get("MAX_TURNS_IMPLEMENT", "100")))
+    if flags.turns:
+        try:
+            max_turns = int(flags.turns)
+        except ValueError:
+            print(f"[skill] WARNING: invalid --turns value {flags.turns!r}, using default {default_turns}", flush=True)
+            max_turns = default_turns
+    else:
+        max_turns = default_turns
     log_path = logs_dir / "skill.log"
 
     # Invoke Claude.
@@ -303,7 +311,7 @@ def main() -> None:
             max_turns=max_turns,
             log_file=log_path,
             allowed_tools="Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS,Skill",
-            system_prompt=_system_prompt_for_skill(flags.skill),
+            system_prompt=_system_prompt_for_skill(flags.skill, default="skill"),
             primary_skill=flags.skill,
         )
     except RuntimeError as e:
@@ -330,11 +338,22 @@ def main() -> None:
     if output_text and output_text != json.dumps(status_data):
         _write_reports(workspace, flags.skill, output_text, status_data, model=model)
 
-    # Post to Slack.
+    # Post partial or full output to Slack before checking status so the user
+    # always sees what was produced, even when the run is incomplete.
     _post_to_slack(config, flags.skill, output_text, status_data, model=model)
 
-    print(f"[skill] status={status_data.get('status')}", flush=True)
+    # Use result.status (authoritative runner status) not status_data which is
+    # Claude's JSON output and may not reflect MAX_TURNS_REACHED correctly.
+    final_status = result.status
+    print(f"[skill] status={final_status}", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{model or ''}", flush=True)
+
+    # Treat MAX_TURNS_REACHED as a job failure so Formicary marks it failed
+    # and triggers notify-error (the on_failed task).
+    if final_status in ("MAX_TURNS_REACHED", "ERROR"):
+        print(f"[skill] FAILURE: {final_status} — marking job failed", file=sys.stderr, flush=True)
+        sys.exit(1)
+
     sys.exit(0)
 
 

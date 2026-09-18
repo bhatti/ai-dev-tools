@@ -39,12 +39,13 @@ class SkillFlags:
     tracker: str = ""
     service: str = ""
     model: str = ""
+    turns: str = ""
     identifier: str = ""
     instructions: str = ""
 
 
 _FLAG_PATTERN = re.compile(
-    r"--(?P<key>repo|branch|tracker|service|model)\s+(?P<val>\S+)"
+    r"--(?P<key>repo|branch|tracker|service|model|turns)\s+(?P<val>\S+)"
 )
 
 _NUMERIC = re.compile(r"^\d+$")
@@ -52,7 +53,7 @@ _NUMERIC = re.compile(r"^\d+$")
 # Matches any --flag that is NOT one of the known framework flags.
 # Presence of an unknown flag triggers passthrough mode (no positional parsing).
 _UNKNOWN_FLAG_RE = re.compile(
-    r"--(?!(?:repo|branch|tracker|service|model)(?:\s|$))\w"
+    r"--(?!(?:repo|branch|tracker|service|model|turns)(?:\s|$))\w"
 )
 
 
@@ -111,6 +112,8 @@ def parse_skill_flags(raw: str) -> SkillFlags:
             flags.service = val
         elif key == "model":
             flags.model = val
+        elif key == "turns":
+            flags.turns = val
 
     # Build the remaining string after removing known-flag spans.
     remaining = ""
