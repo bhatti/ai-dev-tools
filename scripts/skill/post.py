@@ -60,7 +60,7 @@ def main() -> None:
 
     thread_ts = config.get("SLACK_THREAD_TS") or None
     title = f"Skill: {skill}"
-    filename = f"{skill}_report.html"
+    filename = "report.html"  # actual artifact path is reports/report.html
 
     if report_text:
         slack_text = format_for_slack(report_text)
