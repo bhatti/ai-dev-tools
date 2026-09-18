@@ -25,7 +25,7 @@ from pathlib import Path
 import click
 
 from scripts.common.artifacts import read_text
-from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, get_issue_dir, load_config, validate_claude_config
 from scripts.common.skills import apply_project_skills, inline_shared_refs as _inline_shared_refs
 from scripts.review.post_findings import render_report_md, render_report_html
@@ -258,7 +258,7 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
     print(f"[review] pr_url={pr_url} skill={skill}", flush=True)
 
     _clone_repo_skills(pr_url, workspace)
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
 
     # Symlink repo skills into ~/.claude/skills/ so Claude can invoke them with /skill-name
     repo_dir = workspace / "repo"
@@ -384,7 +384,7 @@ def _run_self_review(config: dict, issue_id: str | None, skill: str, base_branch
 
     print(f"[self-review] issue={issue_id} base_branch={branch} skill={review_skill}", flush=True)
 
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
 
     skill_md = _load_skill_md(review_skill)
     print(f"::add-task-context SKILL::{review_skill}", flush=True)

@@ -20,6 +20,7 @@ Exit codes: 0=success, 2=no issues found, 1=error
 """
 from __future__ import annotations
 
+import re
 import sys
 
 import click
@@ -40,7 +41,9 @@ from scripts.common.issue_fetcher import (
 )
 from scripts.common.jira_api import extract_adf_text, extract_jira_keys, resolve_jira_issues
 from scripts.jira.query_issues import _build_jql
-from scripts.standup.slack_client import build_mrkdwn_blocks, notify
+from scripts.common.claude_runner import ensure_ygs_skills
+from scripts.common.slack_format import format_for_slack
+from scripts.standup.slack_client import post_report
 
 _TRACKER = "jira"
 
@@ -165,7 +168,8 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
         msg = "No Jira issues found to analyze."
         print(msg)
         write_analysis_output(config, [], msg)
-        notify(config, msg, blocks=build_mrkdwn_blocks(msg))
+        post_report(config, msg, msg, title="No issues found", filename="analysis_empty.html",
+                    task_type="run")
         sys.exit(2)
 
     print(f"[analyze] analyzing {len(raw_issues)} issue(s) — enriching with links/attachments ...",
@@ -216,6 +220,10 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
 
     issues_text = _format_for_analysis(enriched, base_url, linked_prs_map, attachment_texts,
                                         config)
+
+    # Ensure YGS skills are installed before skill resolution so ygs-analyze is discoverable.
+    ensure_ygs_skills()
+
     skill_result = resolve_skill_for_analyze(user_prompt, query, issues_text, config,
                                               log_prefix="[analyze]")
     keys_for_archaeology = [i.get("key") for i in enriched if i.get("key")]
@@ -247,11 +255,14 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     keys_list = [i.get("key", "?") for i in enriched]
     keys_str = ", ".join(keys_list)
     header = f"*Analysis of {len(enriched)} issue(s): {keys_str}*\n{git_header_line}\n"
-    full_text = header + analysis
+    md_analysis = header + analysis
+    slack_text = format_for_slack(md_analysis)
 
-    print(full_text, flush=True)
-    write_analysis_output(config, keys_list, analysis)
-    notify(config, full_text, blocks=build_mrkdwn_blocks(full_text))
+    print(slack_text, flush=True)
+    write_analysis_output(config, keys_list, analysis, write_html=not bool(skill_result))
+    title = f"Analysis: {keys_str}"
+    filename = re.sub(r"[^a-zA-Z0-9_\-.]", "_", f"analysis_{'_'.join(keys_list)}.html")
+    post_report(config, slack_text, md_analysis, title=title, filename=filename, task_type="run")
 
     print(f"::add-task-context SELECTED_TRACKER::jira", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)

@@ -16,6 +16,7 @@ Exit codes: 0=success, 2=no issues found, 1=error
 """
 from __future__ import annotations
 
+import re
 import sys
 
 import click
@@ -32,7 +33,9 @@ from scripts.common.issue_analysis import (
 )
 from scripts.common.issue_fetcher import fetch_gh_issue_full
 from scripts.gh.query_issues import _search_issues
-from scripts.standup.slack_client import build_mrkdwn_blocks, notify
+from scripts.common.claude_runner import ensure_ygs_skills
+from scripts.common.slack_format import format_for_slack
+from scripts.standup.slack_client import post_report
 
 _TRACKER = "github"
 
@@ -117,7 +120,8 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
         msg = "No GitHub issues found to analyze."
         print(msg)
         write_analysis_output(config, [], msg)
-        notify(config, msg, blocks=build_mrkdwn_blocks(msg))
+        post_report(config, msg, msg, title="No issues found", filename="analysis_empty.html",
+                    task_type="run")
         sys.exit(2)
 
     print(f"[gh-analyze] analyzing {len(raw_issues)} issue(s) — enriching with body/comments/PRs ...",
@@ -135,6 +139,9 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
 
     issues_text = _format_for_analysis(enriched)
     ids = [f"#{i.get('number', '?')}" for i in enriched]
+
+    ensure_ygs_skills()
+
     skill_result = resolve_skill_for_analyze(user_prompt, query, issues_text, config,
                                               log_prefix="[gh-analyze]")
 
@@ -159,11 +166,14 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
 
     ids_str = ", ".join(ids)
     header = f"*GitHub analysis of {len(enriched)} issue(s): {ids_str}*\n{git_header_line}\n"
-    full_text = header + analysis
+    md_analysis = header + analysis
+    slack_text = format_for_slack(md_analysis)
 
-    print(full_text, flush=True)
-    write_analysis_output(config, ids, analysis)
-    notify(config, full_text, blocks=build_mrkdwn_blocks(full_text))
+    print(slack_text, flush=True)
+    write_analysis_output(config, ids, analysis, write_html=not bool(skill_result))
+    title = f"Analysis: {ids_str}"
+    filename = re.sub(r"[^a-zA-Z0-9_\-.]", "_", f"analysis_{'_'.join(ids)}.html")
+    post_report(config, slack_text, md_analysis, title=title, filename=filename, task_type="run")
 
     print(f"::add-task-context SELECTED_TRACKER::github", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)

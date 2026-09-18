@@ -24,7 +24,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import load_config, get_workspace_dir, validate_claude_config
 
 
@@ -221,7 +221,7 @@ def main() -> None:
     print(f"[synthesize] tracker={tracker} issues={len(signals.get('issues', []))} prs={len(signals.get('open_prs', []))}", flush=True)
 
     # Ensure YGS skills are cloned before _build_prompt() tries to load SKILL.md
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
     _skill_md = _load_skill_md("ygs-standup")
     print("::add-task-context SKILL::ygs-standup", flush=True)
     print(f"::add-task-context SKILL_LOADED::{'yes' if _skill_md else 'no'}", flush=True)

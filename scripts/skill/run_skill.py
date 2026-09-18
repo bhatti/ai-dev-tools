@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from scripts.common.claude_runner import (
-    _ensure_ygs_skills,
+    ensure_ygs_skills,
     run_claude,
 )
 from scripts.common.config import (
@@ -197,7 +197,7 @@ def main() -> None:
             config["CODEBASE_DIR"] = codebase_dir
 
     # Install skills (YGS + EXTRA_SKILLS_REPOS + project overrides from CODEBASE_DIR).
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
 
     # Load the requested skill.
     skill_md = _load_skill_md(flags.skill)

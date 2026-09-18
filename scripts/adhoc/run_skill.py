@@ -24,7 +24,7 @@ import re
 import click
 import requests
 
-from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills, _KNOWN_SKILLS
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills, _KNOWN_SKILLS
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
 from scripts.standup.slack_client import build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify
 
@@ -494,7 +494,7 @@ def main(skill: str, prompt_text: str) -> None:
     print(f"[adhoc] skill={skill} prompt={prompt_text[:80]}...", flush=True)
 
     # Ensure YGS skills are installed before attempting to load SKILL.md
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
     skill_md = _load_skill_md(skill)
     if skill_md:
         print(f"[adhoc] loaded SKILL.md for {skill} ({len(skill_md)} chars)", flush=True)

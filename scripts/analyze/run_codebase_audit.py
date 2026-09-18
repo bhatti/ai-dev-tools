@@ -32,7 +32,7 @@ from pathlib import Path
 
 import click
 
-from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, _ensure_ygs_skills
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
 from scripts.common.git_archaeology import build_audit_context, get_repo_info
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
@@ -347,7 +347,7 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
     print(f"::add-task-context AUDIT_MAX_CODE_SIZE::{max_code_size}", flush=True)
     print(f"::add-task-context AUDIT_FULL_REPORT::{config.get('AUDIT_FULL_REPORT', '')}", flush=True)
 
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
 
     # ── Clone repo if URL given, else use CODEBASE_DIR ──────────────────────
     repo_path: Path

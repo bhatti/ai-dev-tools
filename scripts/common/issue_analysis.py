@@ -62,6 +62,7 @@ Across all bugs in this batch, identify:
 - **Effort estimate**: XS (<1d) / S (1-2d) / M (3-5d) / L (1-2w) / XL (>2w)
 
 Be concise. Use bullet points. Focus on actionable guidance. Cite issue keys and commit hashes.
+Format *your analysis output* as Slack mrkdwn: `*bold*` not `**bold**`, no `#` headings, no pipe tables.
 
 ## Issues
 
@@ -101,9 +102,9 @@ def run_analysis(config: dict, issues_text: str, git_context: str | None = None)
         prompt,
         working_dir=workspace,
         model=config.get("AI_MODEL"),
-        max_turns=5,
+        max_turns=20,
         log_file=log_dir / "analyze.log",
-        allowed_tools=None,
+        allowed_tools="Bash,Read,Grep,Glob,LS",
         system_prompt=SYSTEM_PROMPTS["plan"],
     )
     return result.output.strip()
@@ -273,8 +274,13 @@ def emit_git_context_markers(
     return f"📂 *Git context:* {', '.join(parts)}\n" if parts else ""
 
 
-def write_analysis_output(config: dict, issue_ids: list[str], analysis: str) -> None:
-    """Write reports/result.json, reports/report.md, reports/report.html."""
+def write_analysis_output(config: dict, issue_ids: list[str], analysis: str,
+                           write_html: bool = True) -> None:
+    """Write reports/result.json always; optionally report.md + report.html.
+
+    Pass write_html=False when a skill already wrote its own reports/ files to
+    avoid overwriting the skill's richer output with the fallback renderer.
+    """
     workspace = get_workspace_dir(config)
     reports = workspace / "reports"
     reports.mkdir(parents=True, exist_ok=True)
@@ -282,10 +288,13 @@ def write_analysis_output(config: dict, issue_ids: list[str], analysis: str) -> 
     result = {"count": len(issue_ids), "keys": issue_ids, "analysis": analysis}
     (reports / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    header = f"# Analysis of {len(issue_ids)} issue(s): {', '.join(issue_ids)}\n\n"
-    md_text = header + analysis
-    (reports / "report.md").write_text(md_text, encoding="utf-8")
-
-    title = f"Analysis of {len(issue_ids)} issue(s)"
-    (reports / "report.html").write_text(render_simple_html(title, md_text), encoding="utf-8")
-    print("[analyze] wrote reports/result.json, reports/report.md, reports/report.html", flush=True)
+    if write_html:
+        header = f"# Analysis of {len(issue_ids)} issue(s): {', '.join(issue_ids)}\n\n"
+        md_text = header + analysis
+        (reports / "report.md").write_text(md_text, encoding="utf-8")
+        title = f"Analysis of {len(issue_ids)} issue(s)"
+        (reports / "report.html").write_text(render_simple_html(title, md_text), encoding="utf-8")
+        print("[analyze] wrote reports/result.json, reports/report.md, reports/report.html",
+              flush=True)
+    else:
+        print("[analyze] wrote reports/result.json (skill owns reports/report.*)", flush=True)

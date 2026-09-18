@@ -44,12 +44,12 @@ from scripts.common.git_utils import clone_repo
 _YGS_INSTALLED: bool = False
 # Markdown list of installed skills injected into every run_claude() system prompt.
 _SKILLS_INVENTORY: str = ""
-# Set of known skill names for SKILLS_INVOKED detection; populated by _ensure_ygs_skills()
+# Set of known skill names for SKILLS_INVOKED detection; populated by ensure_ygs_skills()
 # and extended by _ensure_extra_skills().
 _KNOWN_SKILLS: set[str] = set()
 
 
-def _ensure_ygs_skills() -> None:
+def ensure_ygs_skills() -> None:
     """Clone you-got-skills and symlink skills into ~/.claude/skills/ if not already done.
 
     Formicary overrides the container ENTRYPOINT with its own shell, so the
@@ -627,7 +627,7 @@ def run_claude(
                    Defaults to _DEFAULT_SYSTEM_PROMPT (short, Bedrock-safe).
     max_turns: defaults to 50; callers should override for task-specific limits.
     """
-    _ensure_ygs_skills()
+    ensure_ygs_skills()
 
     sp = system_prompt or _DEFAULT_SYSTEM_PROMPT
     if _SKILLS_INVENTORY:
