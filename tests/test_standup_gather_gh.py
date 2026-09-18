@@ -161,7 +161,7 @@ def test_get_open_prs_with_approval(mock_run, gh_config):
             "title": "Fix bug",
             "author": {"login": "bob"},
             "createdAt": "2026-07-16T08:00:00Z",
-            "reviews": [{"state": "APPROVED"}],
+            "reviews": [{"state": "APPROVED", "author": {"login": "alice"}}],
             "reviewRequests": [],
             "url": "https://github.com/org/repo/pull/11",
             "headRefName": "fix/bug",
@@ -170,6 +170,60 @@ def test_get_open_prs_with_approval(mock_run, gh_config):
     mock_run.return_value = MagicMock(stdout=json.dumps(prs_data), returncode=0)
     prs = get_open_prs(gh_config)
     assert prs[0]["has_approval"] is True
+    assert prs[0]["approved_logins"] == ["alice"]
+    assert prs[0]["approval_count"] == 1
+
+
+@patch("scripts.standup.gather_gh._run")
+def test_get_open_prs_approval_overridden_by_changes_requested(mock_run, gh_config):
+    """If a reviewer approves then requests changes, they must NOT appear in approved_logins."""
+    prs_data = [
+        {
+            "number": 12,
+            "title": "Needs revision",
+            "author": {"login": "carol"},
+            "createdAt": "2026-07-16T08:00:00Z",
+            "reviews": [
+                {"state": "APPROVED", "author": {"login": "alice"}},
+                {"state": "CHANGES_REQUESTED", "author": {"login": "alice"}},
+            ],
+            "reviewRequests": [],
+            "url": "https://github.com/org/repo/pull/12",
+            "headRefName": "fix/revision",
+            "statusCheckRollup": [],
+        }
+    ]
+    mock_run.return_value = MagicMock(stdout=json.dumps(prs_data), returncode=0)
+    prs = get_open_prs(gh_config)
+    assert "alice" not in prs[0]["approved_logins"]
+    assert prs[0]["approval_count"] == 0
+
+
+@patch("scripts.standup.gather_gh._run")
+def test_get_open_prs_multiple_reviewers_last_state_wins(mock_run, gh_config):
+    """Two reviewers: one approved (latest), one changed mind to changes_requested."""
+    prs_data = [
+        {
+            "number": 13,
+            "title": "Multi reviewer",
+            "author": {"login": "dave"},
+            "createdAt": "2026-07-16T08:00:00Z",
+            "reviews": [
+                {"state": "APPROVED", "author": {"login": "alice"}},
+                {"state": "APPROVED", "author": {"login": "bob"}},
+                {"state": "CHANGES_REQUESTED", "author": {"login": "bob"}},
+            ],
+            "reviewRequests": [],
+            "url": "https://github.com/org/repo/pull/13",
+            "headRefName": "fix/multi",
+            "statusCheckRollup": [],
+        }
+    ]
+    mock_run.return_value = MagicMock(stdout=json.dumps(prs_data), returncode=0)
+    prs = get_open_prs(gh_config)
+    assert "alice" in prs[0]["approved_logins"]
+    assert "bob" not in prs[0]["approved_logins"]
+    assert prs[0]["approval_count"] == 1
 
 
 @patch("scripts.standup.gather_gh._run")

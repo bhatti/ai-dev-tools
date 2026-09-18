@@ -89,6 +89,30 @@ def get_open_issues(config: dict) -> list[dict]:
     return issues
 
 
+_CI_FAILURE_STATES = frozenset({"FAILURE", "ERROR", "ACTION_REQUIRED", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"})
+_CI_PENDING_STATES = frozenset({"IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED"})
+
+
+def _compute_gh_ci_status(rollup: list) -> str:
+    """Compute overall CI status from a GitHub statusCheckRollup array.
+
+    Returns "success", "failure", "pending", or "none".
+    Checks are a mix of CheckRun (__typename=CheckRun, conclusion/status fields)
+    and StatusContext (__typename=StatusContext, state field).
+    """
+    if not rollup:
+        return "none"
+    for c in rollup:
+        s = (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
+        if s in _CI_FAILURE_STATES:
+            return "failure"
+    for c in rollup:
+        s = (c.get("status") or c.get("state") or "").upper()
+        if s in _CI_PENDING_STATES:
+            return "pending"
+    return "success"
+
+
 def get_open_prs(config: dict) -> list[dict]:
     """Return open PRs relevant to the team — authored by or requesting review from team members.
 
@@ -105,7 +129,7 @@ def get_open_prs(config: dict) -> list[dict]:
             "-R", f"{org}/{repo}",
             "--state", "open",
             "--limit", "100",
-            "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName,labels",
+            "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName,labels,statusCheckRollup",
         ])
     except subprocess.CalledProcessError as e:
         print(f"[gather_gh] gh pr list failed (exit {e.returncode}): {e.stderr}", file=sys.stderr, flush=True)
@@ -143,6 +167,14 @@ def get_open_prs(config: dict) -> list[dict]:
         review_states = [r.get("state", "") for r in pr.get("reviews", [])]
         has_approval = "APPROVED" in review_states
 
+        # Track each reviewer's latest state; later reviews override earlier ones.
+        last_state: dict[str, str] = {}
+        for r in pr.get("reviews", []):
+            login = (r.get("author") or {}).get("login", "")
+            if login:
+                last_state[login] = r.get("state", "")
+        approved_logins = [login for login, state in last_state.items() if state == "APPROVED"]
+
         prs.append({
             "id": pr["number"],
             "title": pr.get("title", ""),
@@ -152,6 +184,9 @@ def get_open_prs(config: dict) -> list[dict]:
             "reviewers": reviewers,
             "has_approval": has_approval,
             "review_states": review_states,
+            "approved_logins": approved_logins,
+            "approval_count": len(approved_logins),
+            "ci_status": _compute_gh_ci_status(pr.get("statusCheckRollup") or []),
             "url": pr.get("url", ""),
             "branch": pr.get("headRefName", ""),
             "labels": [lbl["name"] for lbl in pr.get("labels", []) if isinstance(lbl, dict)],

@@ -205,6 +205,8 @@ def _build_pr_entry_from_devstatus(pr: dict, issue: dict, config: dict) -> dict:
         "reviewers": pending_reviewers,
         "approved_by": approved_by,
         "changes_requested_by": [],
+        "approval_count": len(approved_by),
+        "ci_status": "none",  # BB CI status requires per-commit lookup; deferred
     }
 
 
@@ -329,6 +331,8 @@ def _gather_jira(config: dict, workspace_dir: Path | None = None) -> dict:
             "reviewers": pr.get("reviewers", []),
             "approved_by": [],
             "changes_requested_by": [],
+            "approval_count": 0,
+            "ci_status": "none",
         })
 
     print(
@@ -364,7 +368,11 @@ def _gather_github(config: dict) -> dict:
         changes_requested_by: list[str] = []
         pending_reviewers: list[str] = pr.get("reviewers", [])
 
-        if "APPROVED" in review_states:
+        # Use actual approver logins when available (from gather_gh); fall back to count string.
+        approved_logins = pr.get("approved_logins") or []
+        if approved_logins:
+            approved_by = approved_logins
+        elif "APPROVED" in review_states:
             approved_by = [f"{review_states.count('APPROVED')} approved"]
         if "CHANGES_REQUESTED" in review_states:
             changes_requested_by = ["changes requested"]
@@ -390,6 +398,8 @@ def _gather_github(config: dict) -> dict:
             "reviewers": pending_reviewers,
             "approved_by": approved_by,
             "changes_requested_by": changes_requested_by,
+            "approval_count": pr.get("approval_count", len(approved_by) if approved_by else 0),
+            "ci_status": pr.get("ci_status", "none"),
         })
 
     return {

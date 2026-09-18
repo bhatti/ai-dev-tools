@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from scripts.standup.gather_gh import _compute_gh_ci_status
 from scripts.standup.gather_pr_queue import (
     _gather_github,
     _gather_jira,
@@ -353,3 +354,59 @@ def test_priority_and_labels_from_signals_json(mock_prs, tmp_path):
     pr = result["prs"][0]
     assert pr["priority"] == "Critical"
     assert "2609-release" in pr["labels"]
+
+
+# ---------------------------------------------------------------------------
+# _compute_gh_ci_status
+# ---------------------------------------------------------------------------
+
+class TestComputeGhCiStatus:
+    def test_empty_rollup(self):
+        assert _compute_gh_ci_status([]) == "none"
+
+    def test_none_rollup(self):
+        assert _compute_gh_ci_status(None) == "none"  # type: ignore[arg-type]
+
+    def test_all_success(self):
+        rollup = [
+            {"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED"},
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+        ]
+        assert _compute_gh_ci_status(rollup) == "success"
+
+    def test_any_failure_conclusion(self):
+        rollup = [
+            {"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED"},
+            {"__typename": "CheckRun", "conclusion": "FAILURE", "status": "COMPLETED"},
+        ]
+        assert _compute_gh_ci_status(rollup) == "failure"
+
+    def test_status_context_error(self):
+        rollup = [{"__typename": "StatusContext", "state": "ERROR"}]
+        assert _compute_gh_ci_status(rollup) == "failure"
+
+    def test_action_required(self):
+        rollup = [{"__typename": "CheckRun", "conclusion": "ACTION_REQUIRED", "status": "COMPLETED"}]
+        assert _compute_gh_ci_status(rollup) == "failure"
+
+    def test_pending_no_failure(self):
+        rollup = [
+            {"__typename": "CheckRun", "conclusion": None, "status": "IN_PROGRESS"},
+            {"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        ]
+        assert _compute_gh_ci_status(rollup) == "pending"
+
+    def test_failure_overrides_pending(self):
+        rollup = [
+            {"__typename": "CheckRun", "conclusion": None, "status": "IN_PROGRESS"},
+            {"__typename": "CheckRun", "conclusion": "FAILURE", "status": "COMPLETED"},
+        ]
+        assert _compute_gh_ci_status(rollup) == "failure"
+
+    def test_queued_is_pending(self):
+        rollup = [{"__typename": "CheckRun", "conclusion": None, "status": "QUEUED"}]
+        assert _compute_gh_ci_status(rollup) == "pending"
+
+    def test_neutral_counts_as_success(self):
+        rollup = [{"__typename": "CheckRun", "conclusion": "NEUTRAL", "status": "COMPLETED"}]
+        assert _compute_gh_ci_status(rollup) == "success"

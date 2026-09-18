@@ -251,6 +251,16 @@ def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
 
 
 _PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
+_PR_CI_EMOJI = {"success": "✅", "failure": "❌", "pending": "⏳", "none": ""}
+_PR_GROUP_ORDER = [
+    "CI FAILING",
+    "READY TO MERGE",
+    "APPROVED — WAITING ON CI",
+    "APPROVED (1 review)",
+    "STALE / AT RISK (>5d)",
+    "NEEDS REVIEW (>1d)",
+    "IN REVIEW",
+]
 
 
 def build_pr_blocks(title: str, pr_data: dict) -> list:
@@ -271,35 +281,38 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "_No open PRs found._"}})
         return blocks
 
-    # Group PRs: approved, needs review, stale, in review
     def _group(pr: dict) -> str:
+        ci = pr.get("ci_status", "none")
+        # approval_count preferred; fall back to len(approved_by) for backward compat
+        n = pr.get("approval_count")
+        if n is None:
+            n = len(pr.get("approved_by") or [])
         days = pr.get("age_days", 0)
-        approved = pr.get("approved_by") or []
-        if approved and days <= 5:
-            return "APPROVED — READY TO MERGE"
-        if days > 5 and not approved:
-            return "STALE / AT RISK (>5d, no approvals)"
-        if not approved and days > 1:
-            return "NEEDS REVIEW (>1d, no approvals)"
+        if ci == "failure":
+            return "CI FAILING"
+        if n >= 2 and ci in ("success", "none"):
+            return "READY TO MERGE"
+        if n >= 2 and ci == "pending":
+            return "APPROVED — WAITING ON CI"
+        if n >= 1:
+            return "APPROVED (1 review)"
+        if days > 5:
+            return "STALE / AT RISK (>5d)"
+        if days > 1:
+            return "NEEDS REVIEW (>1d)"
         return "IN REVIEW"
 
-    group_order = [
-        "APPROVED — READY TO MERGE",
-        "NEEDS REVIEW (>1d, no approvals)",
-        "STALE / AT RISK (>5d, no approvals)",
-        "IN REVIEW",
-    ]
-    grouped: dict[str, list] = {g: [] for g in group_order}
+    grouped: dict[str, list] = {g: [] for g in _PR_GROUP_ORDER}
     for pr in prs:
         grouped[_group(pr)].append(pr)
 
-    for group_name in group_order:
+    for group_name in _PR_GROUP_ORDER:
         group_prs = grouped[group_name]
         if not group_prs:
             continue
         blocks.append({
             "type": "header",
-            "text": {"type": "plain_text", "text": group_name, "emoji": False},
+            "text": {"type": "plain_text", "text": group_name, "emoji": True},
         })
         for pr in group_prs:
             jira_key = pr.get("jira_key", "")
@@ -311,6 +324,7 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
             days = pr.get("age_days", 0)
             approved_by = pr.get("approved_by") or []
             pending = pr.get("reviewers") or []
+            ci_icon = _PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
 
             # Build clickable links
             jira_link = f"<{jira_url}|{jira_key}>" if jira_url and jira_key else jira_key
@@ -334,7 +348,8 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
             if labels:
                 reviewer_info += f"  •  {' '.join(f'`{l}`' for l in labels)}"
 
-            line = f"{priority_emoji}{jira_link}  {pr_link}  @{author} ({days}d)  {title_text}"
+            ci_prefix = f"{ci_icon} " if ci_icon else ""
+            line = f"{ci_prefix}{priority_emoji}{jira_link}  {pr_link}  @{author} ({days}d)  {title_text}"
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},
