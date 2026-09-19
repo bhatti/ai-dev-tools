@@ -105,9 +105,15 @@ def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_pa
     if report_path.exists():
         content = report_path.read_text(encoding="utf-8").strip()
         if content:
-            # Strip trailing "Full report at reports/report.md" line added by some skill versions
+            # Strip trailing artifact-pointer lines added by some skill versions
+            # e.g. "Full report at reports/report.md", "Full analysis at reports/report.md"
             content = re.sub(
-                r'\n+Full report at reports/report\.md\.?\s*$', '', content, flags=re.IGNORECASE
+                r'\n+Full (?:report|analysis) at reports/[^\n]+\.?\s*$', '',
+                content, flags=re.IGNORECASE,
+            ).strip()
+            # Strip any stray ::add-task-context lines (with or without leading echo/quotes)
+            content = re.sub(
+                r'\n[^\n]*::add-task-context[^\n]*', '', content, flags=re.IGNORECASE,
             ).strip()
             return content
     return result.output.strip()

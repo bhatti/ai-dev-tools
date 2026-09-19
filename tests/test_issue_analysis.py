@@ -66,22 +66,26 @@ def test_write_analysis_output_skill_path_no_report_md(tmp_path):
     assert not (tmp_path / "reports" / "report.html").exists()
 
 
-@pytest.mark.parametrize("signoff", [
-    "Full report at reports/report.md.",          # with period
-    "Full report at reports/report.md",           # without period
-    "FULL REPORT AT REPORTS/REPORT.MD.",          # uppercase
-    "Full report at reports/report.md.  ",        # trailing spaces
-    "\n\nFull report at reports/report.md.",      # extra newlines before
+@pytest.mark.parametrize("trailing,forbidden", [
+    ("Full report at reports/report.md.",        "Full report"),
+    ("Full report at reports/report.md",         "Full report"),
+    ("Full analysis at reports/report.md.",      "Full analysis"),  # actual skill variant
+    ("FULL ANALYSIS AT REPORTS/REPORT.MD.",      "FULL ANALYSIS"),
+    ("Full report at reports/report.md.  ",      "Full report"),
+    ("\n\nFull report at reports/report.md.",    "Full report"),
+    # echo leak variants
+    ('echo "::add-task-context ANALYSIS_COMPLETE::yes"', "add-task-context"),
+    ("::add-task-context BUGS_ANALYZED::0",      "add-task-context"),
 ])
 @patch("scripts.common.issue_analysis.run_claude")
-def test_run_skill_analysis_strips_trailing_signoff(mock_run_claude, tmp_path, signoff):
-    """Trailing 'Full report at reports/report.md' variants are stripped from skill output."""
+def test_run_skill_analysis_strips_trailing_signoff(mock_run_claude, tmp_path, trailing, forbidden):
+    """Trailing signoff lines and leaked task-context markers are stripped from skill output."""
     from scripts.common.issue_analysis import run_skill_analysis
 
     reports = tmp_path / "reports"
     reports.mkdir(parents=True)
     (reports / "report.md").write_text(
-        f"## Analysis\n\nRace condition.\n{signoff}",
+        f"## Analysis\n\nRace condition.\n{trailing}",
         encoding="utf-8",
     )
     skill_md = tmp_path / "SKILL.md"
@@ -91,7 +95,7 @@ def test_run_skill_analysis_strips_trailing_signoff(mock_run_claude, tmp_path, s
 
     result = run_skill_analysis(config, "issue text", "ygs-analyze", skill_md)
 
-    assert "Full report" not in result
+    assert forbidden.lower() not in result.lower()
     assert "Race condition" in result
 
 
