@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def test_write_analysis_output_creates_artifacts(tmp_path):
     from scripts.common.issue_analysis import write_analysis_output
@@ -64,15 +66,22 @@ def test_write_analysis_output_skill_path_no_report_md(tmp_path):
     assert not (tmp_path / "reports" / "report.html").exists()
 
 
+@pytest.mark.parametrize("signoff", [
+    "Full report at reports/report.md.",          # with period
+    "Full report at reports/report.md",           # without period
+    "FULL REPORT AT REPORTS/REPORT.MD.",          # uppercase
+    "Full report at reports/report.md.  ",        # trailing spaces
+    "\n\nFull report at reports/report.md.",      # extra newlines before
+])
 @patch("scripts.common.issue_analysis.run_claude")
-def test_run_skill_analysis_strips_trailing_signoff(mock_run_claude, tmp_path):
-    """Trailing 'Full report at reports/report.md' line is stripped from skill output."""
+def test_run_skill_analysis_strips_trailing_signoff(mock_run_claude, tmp_path, signoff):
+    """Trailing 'Full report at reports/report.md' variants are stripped from skill output."""
     from scripts.common.issue_analysis import run_skill_analysis
 
     reports = tmp_path / "reports"
     reports.mkdir(parents=True)
     (reports / "report.md").write_text(
-        "## Analysis\n\nRace condition.\n\nFull report at reports/report.md.",
+        f"## Analysis\n\nRace condition.\n{signoff}",
         encoding="utf-8",
     )
     skill_md = tmp_path / "SKILL.md"
