@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -104,6 +105,10 @@ def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_pa
     if report_path.exists():
         content = report_path.read_text(encoding="utf-8").strip()
         if content:
+            # Strip trailing "Full report at reports/report.md" line added by some skill versions
+            content = re.sub(
+                r'\n+Full report at reports/report\.md\.?\s*$', '', content, flags=re.IGNORECASE
+            ).strip()
             return content
     return result.output.strip()
 
@@ -326,4 +331,14 @@ def write_analysis_output(config: dict, issue_ids: list[str], analysis: str,
         print("[analyze] wrote reports/result.json, reports/report.md, reports/report.html",
               flush=True)
     else:
-        print("[analyze] wrote reports/result.json (skill owns reports/report.*)", flush=True)
+        # Skill owns report.md — render report.html from it so artifact fallback URL resolves
+        skill_md_path = reports / "report.md"
+        if skill_md_path.exists():
+            skill_md = skill_md_path.read_text(encoding="utf-8")
+            title = f"Analysis of {len(issue_ids)} issue(s)" if issue_ids else "Analysis"
+            (reports / "report.html").write_text(render_simple_html(title, skill_md),
+                                                  encoding="utf-8")
+            print("[analyze] wrote reports/result.json, reports/report.html "
+                  "(skill owns reports/report.md)", flush=True)
+        else:
+            print("[analyze] wrote reports/result.json (skill owns reports/report.*)", flush=True)

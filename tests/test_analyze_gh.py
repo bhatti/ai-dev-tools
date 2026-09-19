@@ -92,7 +92,7 @@ def test_skill_path_skips_html_write(
 @patch("scripts.gh.analyze_issues.fetch_gh_issue_full", return_value=_FAKE_ISSUE)
 @patch("scripts.gh.analyze_issues.resolve_github_issues", return_value=[_FAKE_ISSUE])
 @patch("scripts.gh.analyze_issues.load_config", return_value=_BASE_CONFIG)
-def test_post_report_called_with_safe_filename_and_run_task_type(
+def test_post_report_called_with_safe_filename_and_query_task_type(
     mock_cfg, mock_resolve, mock_full, mock_ygs, mock_skill_res,
     mock_skill_run, mock_arch, mock_emit, mock_write, mock_post
 ):
@@ -102,9 +102,7 @@ def test_post_report_called_with_safe_filename_and_run_task_type(
     mock_post.assert_called_once()
     _, kwargs = mock_post.call_args
     assert kwargs.get("task_type") == "query"
-    fname = kwargs.get("filename", "")
-    assert fname.endswith(".html")
-    assert re.fullmatch(r"[a-zA-Z0-9_\-.]+", fname), f"unsafe filename: {fname}"
+    assert kwargs.get("filename") == "report.html"
 
 
 # ---------------------------------------------------------------------------

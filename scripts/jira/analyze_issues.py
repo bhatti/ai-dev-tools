@@ -264,8 +264,7 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     print(slack_text, flush=True)
     write_analysis_output(config, keys_list, analysis, write_html=not bool(skill_result))
     title = f"Analysis: {keys_str}"
-    filename = re.sub(r"[^a-zA-Z0-9_\-.]", "_", f"analysis_{'_'.join(keys_list)}.html")
-    post_report(config, slack_text, md_text, title=title, filename=filename, task_type="query")
+    post_report(config, slack_text, md_text, title=title, filename="report.html", task_type="query")
 
     print(f"::add-task-context SELECTED_TRACKER::jira", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)

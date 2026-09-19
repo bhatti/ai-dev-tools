@@ -111,11 +111,7 @@ def test_post_report_called_with_mrkdwn_and_task_type(
     mock_post.assert_called_once()
     _, kwargs = mock_post.call_args
     assert kwargs.get("task_type") == "query"
-    # filename must be filesystem-safe (no spaces/special chars)
-    fname = kwargs.get("filename", "")
-    assert fname.endswith(".html")
-    import re
-    assert re.fullmatch(r"[a-zA-Z0-9_\-.]+", fname), f"unsafe filename: {fname}"
+    assert kwargs.get("filename") == "report.html"
 
 
 # ---------------------------------------------------------------------------

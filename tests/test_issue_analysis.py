@@ -36,6 +36,56 @@ def test_write_analysis_output_empty_ids(tmp_path):
     assert result["keys"] == []
 
 
+def test_write_analysis_output_skill_path_renders_html_from_report_md(tmp_path):
+    """When write_html=False and skill already wrote report.md, render report.html from it."""
+    from scripts.common.issue_analysis import write_analysis_output
+
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "report.md").write_text("## Root Cause\n\nRace condition in lock.", encoding="utf-8")
+
+    config = {"WORKSPACE_DIR": str(tmp_path)}
+    write_analysis_output(config, ["PROJ-3"], "ignored", write_html=False)
+
+    assert (reports / "result.json").exists()
+    html = (reports / "report.html").read_text()
+    assert "<html" in html.lower()
+    assert "Root Cause" in html
+
+
+def test_write_analysis_output_skill_path_no_report_md(tmp_path):
+    """When write_html=False and no report.md, only result.json is written."""
+    from scripts.common.issue_analysis import write_analysis_output
+
+    config = {"WORKSPACE_DIR": str(tmp_path)}
+    write_analysis_output(config, ["PROJ-4"], "ignored", write_html=False)
+
+    assert (tmp_path / "reports" / "result.json").exists()
+    assert not (tmp_path / "reports" / "report.html").exists()
+
+
+@patch("scripts.common.issue_analysis.run_claude")
+def test_run_skill_analysis_strips_trailing_signoff(mock_run_claude, tmp_path):
+    """Trailing 'Full report at reports/report.md' line is stripped from skill output."""
+    from scripts.common.issue_analysis import run_skill_analysis
+
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "report.md").write_text(
+        "## Analysis\n\nRace condition.\n\nFull report at reports/report.md.",
+        encoding="utf-8",
+    )
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("# Skill", encoding="utf-8")
+    mock_run_claude.return_value = MagicMock(output='{"status":"DONE"}', status="DONE")
+    config = {"WORKSPACE_DIR": str(tmp_path)}
+
+    result = run_skill_analysis(config, "issue text", "ygs-analyze", skill_md)
+
+    assert "Full report" not in result
+    assert "Race condition" in result
+
+
 @patch("scripts.common.issue_analysis.run_claude")
 def test_run_analysis_returns_output(mock_run_claude, tmp_path):
     from scripts.common.issue_analysis import run_analysis

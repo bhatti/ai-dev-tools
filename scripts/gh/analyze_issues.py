@@ -175,8 +175,7 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
     print(slack_text, flush=True)
     write_analysis_output(config, ids, analysis, write_html=not bool(skill_result))
     title = f"Analysis: {ids_str}"
-    filename = re.sub(r"[^a-zA-Z0-9_\-.]", "_", f"analysis_{'_'.join(ids)}.html")
-    post_report(config, slack_text, md_text, title=title, filename=filename, task_type="query")
+    post_report(config, slack_text, md_text, title=title, filename="report.html", task_type="query")
 
     print(f"::add-task-context SELECTED_TRACKER::github", flush=True)
     print(f"::add-task-context SELECTED_MODEL::{config.get('AI_MODEL', '')}", flush=True)
