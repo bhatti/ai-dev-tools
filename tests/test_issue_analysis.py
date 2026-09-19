@@ -127,3 +127,54 @@ def test_run_analysis_uses_custom_prompt_template(mock_run_claude, tmp_path):
     prompt_used = mock_run_claude.call_args[0][0]
     assert "Custom template" in prompt_used
     assert "issue text here" in prompt_used
+
+
+@patch("scripts.common.issue_analysis.run_claude")
+def test_run_skill_analysis_cloned_repo_before_git_context(mock_run_claude, tmp_path):
+    """Cloned-repo section must appear before git-log context in the prompt.
+
+    Claude reads prompts sequentially — if git context (which may say "no recent commits
+    touched X") comes first, it draws wrong conclusions before reaching the cloned repo
+    instructions. This ordering is the fix for shallow/wrong analysis.
+    """
+    from scripts.common.issue_analysis import run_skill_analysis
+
+    mock_run_claude.return_value = MagicMock(output='{"status":"DONE"}', status="DONE")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "report.md").write_text("## Analysis\n\nDetailed findings.", encoding="utf-8")
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("# Skill instructions", encoding="utf-8")
+    config = {"WORKSPACE_DIR": str(tmp_path)}
+    repo_path = Path("/workspace/repo_cache")
+
+    run_skill_analysis(config, "issue text", "ygs-analyze", skill_md,
+                       git_context="## git log output", git_repo_path=repo_path)
+
+    prompt = mock_run_claude.call_args[0][0]
+    repo_pos = prompt.find("Git Repository (Cloned")
+    git_pos = prompt.find("git log output")
+    assert repo_pos != -1, "cloned-repo section missing from prompt"
+    assert git_pos != -1, "git context missing from prompt"
+    assert repo_pos < git_pos, (
+        f"cloned-repo section (pos {repo_pos}) must appear before git-log context "
+        f"(pos {git_pos}) so Claude greps files before reading git history"
+    )
+
+
+@patch("scripts.common.issue_analysis.run_claude")
+def test_run_analysis_cloned_repo_before_git_context(mock_run_claude, tmp_path):
+    """Same ordering guarantee for the fallback run_analysis path."""
+    from scripts.common.issue_analysis import run_analysis
+
+    mock_run_claude.return_value = MagicMock(output="analysis", status="DONE")
+    config = {"WORKSPACE_DIR": str(tmp_path)}
+
+    run_analysis(config, "issue text", git_context="## git log output",
+                 git_repo_path=Path("/workspace/repo_cache"))
+
+    prompt = mock_run_claude.call_args[0][0]
+    repo_pos = prompt.find("Git Repository (Cloned")
+    git_pos = prompt.find("git log output")
+    assert repo_pos != -1 and git_pos != -1
+    assert repo_pos < git_pos, "cloned-repo section must precede git-log context"

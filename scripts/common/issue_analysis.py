@@ -82,23 +82,26 @@ def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_pa
     workspace = pathlib.Path(config.get("WORKSPACE_DIR", "/tmp"))
     skill_md = pathlib.Path(skill_path).read_text(encoding="utf-8")
     prompt = f"{skill_md}\n\n## Issue Context to Analyze\n\n{issues_text}"
-    if git_context:
-        prompt += f"\n\n## Git Repository Context\n\n{git_context}"
+    # Cloned-repo section MUST come before git-log context so Claude does the Phase 0 grep
+    # (file reads from actual source) before reading the git history blob and drawing conclusions.
     if git_repo_path:
         prompt += (
             f"\n\n## Git Repository (Cloned — Read Files Directly)\n\n"
             f"The repository is cloned at: `{git_repo_path}`\n"
-            f"Use Read, Grep, Glob, LS tools to investigate actual source files for "
-            f"deeper root cause analysis."
+            f"**Start Phase 0 NOW — grep the repo for keywords from the issue before reading "
+            f"git history. Do not assess implementation state from git commit recency.**\n"
+            f"Use Bash (grep/find), Read, Glob, LS tools to read actual source files."
         )
+    if git_context:
+        prompt += f"\n\n## Git Repository Context (commit history — use for blame only)\n\n{git_context}"
     result = run_claude(
         prompt,
         working_dir=workspace,
         model=config.get("AI_MODEL"),
-        max_turns=20,
+        max_turns=100,
         log_file=workspace / "logs" / "analyze.log",
         allowed_tools="Bash,Read,Write,Edit,Glob,Grep,LS",
-        system_prompt=SYSTEM_PROMPTS["plan"],
+        system_prompt=SYSTEM_PROMPTS["implement"],
     )
     # Skill writes analysis to reports/report.md; result.output is a JSON status terminator.
     report_path = workspace / "reports" / "report.md"
@@ -126,15 +129,16 @@ def run_analysis(config: dict, issues_text: str, git_context: str | None = None,
     log_dir = workspace / "logs"
     prompt_template = config.get("ANALYSIS_PROMPT") or DEFAULT_ANALYSIS_PROMPT
     prompt = prompt_template.format(issues_text=issues_text)
-    if git_context:
-        prompt += f"\n\n{git_context}"
+    # Cloned-repo section before git-log so file reads happen before git history is read
     if git_repo_path:
         prompt += (
             f"\n\n## Git Repository (Cloned — Read Files Directly)\n\n"
             f"The repository is cloned at: `{git_repo_path}`\n"
-            f"Use Read, Grep, Glob, LS tools to investigate actual source files for "
-            f"deeper root cause analysis."
+            f"Grep the repo for keywords from the issue title/description before reading "
+            f"git history. Use Bash, Read, Glob, LS tools to read actual source files."
         )
+    if git_context:
+        prompt += f"\n\n{git_context}"
     result = run_claude(
         prompt,
         working_dir=workspace,

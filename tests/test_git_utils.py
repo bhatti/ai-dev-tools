@@ -225,13 +225,13 @@ def test_resolve_clone_auth_auto_detect_tracker():
 
 class TestNormalizeRepoWebUrl:
     def test_bitbucket_src_url_no_path(self):
-        result = normalize_repo_web_url("https://bitbucket.org/cribl/cribl/src/dev/")
-        assert result == {"url": "https://bitbucket.org/cribl/cribl.git", "branch": "dev"}
+        result = normalize_repo_web_url("https://bitbucket.org/example-org/example-repo/src/dev/")
+        assert result == {"url": "https://bitbucket.org/example-org/example-repo.git", "branch": "dev"}
 
     def test_bitbucket_src_url_with_path(self):
-        result = normalize_repo_web_url("https://bitbucket.org/cribl/cribl/src/main/.claude/skills")
+        result = normalize_repo_web_url("https://bitbucket.org/example-org/example-repo/src/main/.claude/skills")
         assert result == {
-            "url": "https://bitbucket.org/cribl/cribl.git",
+            "url": "https://bitbucket.org/example-org/example-repo.git",
             "branch": "main",
             "skills_dir": ".claude/skills",
         }
@@ -257,8 +257,8 @@ class TestNormalizeRepoWebUrl:
         }
 
     def test_plain_git_url_unchanged(self):
-        result = normalize_repo_web_url("https://bitbucket.org/cribl/cribl.git")
-        assert result == {"url": "https://bitbucket.org/cribl/cribl.git"}
+        result = normalize_repo_web_url("https://bitbucket.org/example-org/example-repo.git")
+        assert result == {"url": "https://bitbucket.org/example-org/example-repo.git"}
 
     def test_github_git_url_unchanged(self):
         result = normalize_repo_web_url("https://github.com/org/repo.git")

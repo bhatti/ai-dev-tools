@@ -412,25 +412,55 @@ class TestResult:
 
 def exec_step(pod_name: str, label: str, cmd: str, env: dict[str, str],
               timeout: int = 300) -> StepResult:
-    """Run a bash command in the pod; capture stdout/stderr; parse context markers."""
-    # Export env vars safely: json.dumps handles quoting/escaping for bash
+    """Run a bash command in the pod; stream stdout live; parse context markers."""
     env_lines = "\n".join(f"export {k}={json.dumps(v)}" for k, v in env.items())
     script = f"set -uo pipefail\n{env_lines}\ncd /app\n{cmd}"
     print(f"    [{label}] running ...", flush=True)
     t0 = time.time()
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         ["kubectl", "-n", NAMESPACE, "exec", pod_name, "--", "bash", "-c", script],
-        capture_output=True, text=True, timeout=timeout,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def _drain_stderr() -> None:
+        assert proc.stderr
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            sys.stderr.write(f"    [{label}] {line}")
+            sys.stderr.flush()
+
+    import threading
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    assert proc.stdout
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            sys.stdout.write(f"    [{label}] {line}")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+    try:
+        proc.wait(timeout=max(0, timeout - int(time.time() - t0)))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    stderr_thread.join(timeout=5)
+
     elapsed = time.time() - t0
-    ctx = _parse_context(proc.stdout or "")
+    stdout = "".join(stdout_lines)
+    stderr = "".join(stderr_lines)
+    ctx = _parse_context(stdout)
     print(f"    [{label}] exit={proc.returncode} elapsed={elapsed:.0f}s "
           f"context_keys={list(ctx.keys())}", flush=True)
     return StepResult(
         label=label,
-        returncode=proc.returncode,
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        returncode=proc.returncode or 0,
+        stdout=stdout,
+        stderr=stderr,
         elapsed=elapsed,
         context=ctx,
     )
@@ -571,7 +601,8 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
             result.steps.append(verify_step)
 
     if not step.ok:
-        return _fail(result, step, f"exit code {step.returncode}")
+        return _fail(result, step,
+                     f"exit code {step.returncode}\nstdout tail:\n{step.stdout[-1000:]}")
     if not step.has_results:
         return _pass(result, f"no issues found for {ISSUE_ID} (exit 2)")
 
@@ -594,10 +625,40 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
     if verify_step and not verify_step.ok:
         return _fail(result, verify_step,
                      f"reports/report.md missing or too small (want >300 bytes, "
-                     f"got {verify_step.context.get('REPORT_MD_BYTES', 0)} bytes)")
+                     f"got {verify_step.context.get('REPORT_MD_BYTES', 0)} bytes)\n"
+                     f"analyze stdout tail:\n{step.stdout[-2000:]}")
+
+    # Verify report.md has no leaked markers, report.html exists, and when a repo was cloned
+    # the report cites at least one file path (proving Phase 0 grep ran on actual source files)
+    if step.has_results:
+        repo_cloned = step.context.get("REPO_CLONED_PATH", "")
+        verify_content_cmd = (
+            f"python3 -c \""
+            f"import sys, re, os; "
+            f"t=open('{ws}/reports/report.md').read(); "
+            f"bad=re.search(r'add-task-context|Full report at|Full analysis at', t, re.I); "
+            f"html_ok=os.path.exists('{ws}/reports/report.html'); "
+            f"# When repo was cloned, report must cite at least one src file path (e.g. src/foo.ts:42);"
+            f"# absence means Phase 0 grep never ran and analysis is git-history-only (wrong)."
+            f"repo_cloned={repr(bool(repo_cloned))}; "
+            f"has_path=bool(re.search(r'[a-zA-Z0-9_/\\\\-]+\\.[a-z]{{1,5}}(?::\\d+)?', t)); "
+            f"path_ok = (not repo_cloned) or has_path; "
+            f"print(f'report.html={{\\\"OK\\\" if html_ok else \\\"MISSING\\\"}}',"
+            f"      f'file_paths={{\\\"yes\\\" if has_path else \\\"NONE - Phase0 may not have run\\\"}}'); "
+            f"sys.exit(0 if not bad and html_ok and path_ok else 1)"
+            f"\""
+        )
+        content_step = exec_step(pod, "verify-report-content", verify_content_cmd, env, timeout=15)
+        result.steps.append(content_step)
+        if not content_step.ok:
+            return _fail(result, content_step,
+                         "report.md has leaked markers, report.html missing, or no file paths "
+                         "(Phase 0 grep did not run on cloned repo)")
 
     report_sz = verify_step.context.get("REPORT_MD_BYTES", "?") if verify_step else "?"
+    skill_used = step.context.get("SKILL_USED", "none")
     return _pass(result, f"ANALYSIS_TYPE={step.context.get('ANALYSIS_TYPE')} "
+                         f"SKILL_USED={skill_used} "
                          f"GIT_ARCHAEOLOGY={git_arch} "
                          f"ISSUE_COUNT={step.context.get('ISSUE_COUNT')} "
                          f"ISSUE_LINKS_COUNT={step.context.get('ISSUE_LINKS_COUNT')} "
