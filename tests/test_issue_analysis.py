@@ -7,6 +7,86 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_format_jira_issues_includes_comments_and_attachments():
+    from scripts.common.issue_analysis import format_jira_issues_for_analysis
+
+    issue = {
+        "key": "PROJ-1",
+        "fields": {
+            "summary": "SSE streaming",
+            "status": {"name": "Open"},
+            "priority": {"name": "High"},
+            "assignee": {"displayName": "Alice"},
+            "description": None,
+            "issuelinks": [
+                {"type": {"name": "Blocks"}, "outwardIssue": {"key": "PROJ-2", "fields": {"summary": "HTTP/2"}}}
+            ],
+            "comment": {
+                "comments": [
+                    {"author": {"displayName": "Bob"}, "created": "2024-01-15T10:00:00",
+                     "body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Confirmed in prod"}]}]}},
+                ]
+            },
+            "attachment": [],
+        },
+    }
+    result = format_jira_issues_for_analysis(
+        [issue],
+        base_url="https://company.atlassian.net",
+        linked_prs_map={"PROJ-1": [{"id": "42", "name": "fix-sse", "status": "MERGED", "url": "https://bb.org/pr/42"}]},
+        attachment_texts={"PROJ-1": "spec content here"},
+    )
+    assert "PROJ-1" in result
+    assert "SSE streaming" in result
+    assert "PROJ-2 (Blocks)" in result
+    assert "Confirmed in prod" in result         # comment body
+    assert "Bob" in result                       # comment author
+    assert "spec content here" in result         # attachment text
+    assert "fix-sse" in result                   # linked PR
+
+
+def test_format_jira_issues_caps_at_20_comments():
+    from scripts.common.issue_analysis import format_jira_issues_for_analysis
+
+    comments = [
+        {"author": {"displayName": f"User{i}"}, "created": "2024-01-01",
+         "body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": f"msg {i}"}]}]}}
+        for i in range(25)
+    ]
+    issue = {
+        "key": "PROJ-5", "fields": {
+            "summary": "Many comments", "status": {"name": "Open"}, "priority": {"name": "Low"},
+            "assignee": None, "description": None, "issuelinks": [],
+            "comment": {"comments": comments}, "attachment": [],
+        }
+    }
+    result = format_jira_issues_for_analysis([issue], "https://x.atlassian.net", {}, {})
+    # comments 5-24 included (last 20), 0-4 dropped
+    assert "msg 24" in result
+    assert "msg 0" not in result
+
+
+def test_format_gh_issues_includes_all_comments():
+    from scripts.common.issue_analysis import format_gh_issues_for_analysis
+
+    issue = {
+        "number": 99, "title": "SSE endpoint", "url": "https://github.com/org/repo/issues/99",
+        "state": "open", "assignees": [{"login": "alice"}], "labels": [],
+        "body": "Implement SSE for workers page",
+        "comments": [
+            {"author": {"login": "bob"}, "body": "Keep-alive is in Captures.ts line 30"},
+            {"author": {"login": "alice"}, "body": "Blocked on http2 gate in useSSE.ts:11"},
+        ],
+        "linked_prs": [],
+    }
+    result = format_gh_issues_for_analysis([issue])
+    assert "#99" in result
+    assert "SSE endpoint" in result
+    assert "Keep-alive is in Captures.ts" in result
+    assert "Blocked on http2 gate" in result
+    assert "Comments (2)" in result
+
+
 def test_write_analysis_output_creates_artifacts(tmp_path):
     from scripts.common.issue_analysis import write_analysis_output
 

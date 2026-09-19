@@ -4,7 +4,8 @@ from unittest.mock import ANY, MagicMock, patch
 from click.testing import CliRunner
 
 from scripts.common.gh_api import extract_github_numbers
-from scripts.gh.analyze_issues import _format_for_analysis, main
+from scripts.common.issue_analysis import format_gh_issues_for_analysis as _format_for_analysis
+from scripts.gh.analyze_issues import main
 
 
 def test_extract_numbers_bare():

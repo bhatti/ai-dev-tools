@@ -4,7 +4,8 @@ from unittest.mock import ANY, MagicMock, patch
 from click.testing import CliRunner
 
 from scripts.common.jira_api import extract_adf_text, extract_jira_keys
-from scripts.jira.analyze_issues import _format_for_analysis, main
+from scripts.common.issue_analysis import format_jira_issues_for_analysis as _format_for_analysis
+from scripts.jira.analyze_issues import main
 
 
 def test_extract_keys_bare_keys():
@@ -60,7 +61,7 @@ def test_format_for_analysis_includes_key():
             "attachment": [],
         },
     }]
-    text = _format_for_analysis(issues, "https://company.atlassian.net", {}, {}, {})
+    text = _format_for_analysis(issues, "https://company.atlassian.net", {}, {})
     assert "PROJ-99" in text
     assert "Flaky Test" in text
     assert "company.atlassian.net/browse/PROJ-99" in text
@@ -86,7 +87,7 @@ def test_format_for_analysis_includes_linked_issues():
             }],
         },
     }]
-    text = _format_for_analysis(issues, "https://company.atlassian.net", {}, {}, {})
+    text = _format_for_analysis(issues, "https://company.atlassian.net", {}, {})
     assert "PROJ-200" in text
     assert "Blocks" in text
 
@@ -106,7 +107,7 @@ def test_format_for_analysis_includes_linked_prs():
         },
     }]
     prs_map = {"PROJ-101": [{"id": "42", "name": "Fix bug", "url": "https://bb/pr/42", "status": "MERGED"}]}
-    text = _format_for_analysis(issues, "https://company.atlassian.net", prs_map, {}, {})
+    text = _format_for_analysis(issues, "https://company.atlassian.net", prs_map, {})
     assert "#42" in text
     assert "Fix bug" in text
 

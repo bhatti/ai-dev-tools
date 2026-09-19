@@ -28,6 +28,7 @@ import click
 from scripts.common.config import load_config
 from scripts.common.issue_analysis import (
     emit_git_context_markers,
+    format_jira_issues_for_analysis,
     resolve_skill_for_analyze,
     run_analysis,
     run_skill_analysis,
@@ -39,7 +40,7 @@ from scripts.common.issue_fetcher import (
     fetch_jira_issue_full,
     get_jira_linked_prs,
 )
-from scripts.common.jira_api import extract_adf_text, extract_jira_keys, resolve_jira_issues
+from scripts.common.jira_api import extract_jira_keys, resolve_jira_issues
 from scripts.jira.query_issues import _build_jql
 from scripts.common.claude_runner import ensure_ygs_skills
 from scripts.common.slack_format import format_for_slack
@@ -68,65 +69,6 @@ def _patch_config_from_issue_body(issue: dict | None, config: dict) -> None:
         config.setdefault("GH_REPO", repo)
         print(f"[analyze] auto-detected GH repo from issue body: {org}/{repo}", flush=True)
 
-
-def _format_for_analysis(
-    issues: list[dict],
-    base_url: str,
-    linked_prs_map: dict,
-    attachment_texts: dict,
-    config: dict,
-) -> str:
-    lines = []
-    for issue in issues:
-        key = issue.get("key", "?")
-        fields = issue.get("fields", {})
-        summary = fields.get("summary", "(no title)")
-        status = (fields.get("status") or {}).get("name", "?")
-        priority = (fields.get("priority") or {}).get("name", "None")
-        assignee = (fields.get("assignee") or {}).get("displayName") or "Unassigned"
-        description = extract_adf_text(fields.get("description"))
-        url = f"{base_url.rstrip('/')}/browse/{key}"
-
-        lines.append(f"### {key}: {summary}")
-        lines.append(f"- URL: {url}")
-        lines.append(f"- Status: {status} | Priority: {priority} | Assignee: {assignee}")
-        if description and description.strip():
-            lines.append(f"- Description: {description.strip()}")
-
-        # Linked issues
-        issue_links = fields.get("issuelinks") or []
-        if issue_links:
-            link_summaries = []
-            for link in issue_links:
-                rel_type = (link.get("type") or {}).get("name", "Related")
-                for direction in ("inwardIssue", "outwardIssue"):
-                    linked = link.get(direction)
-                    if linked:
-                        lkey = linked.get("key", "?")
-                        lsummary = (linked.get("fields") or {}).get("summary", "")
-                        link_summaries.append(f"{lkey} ({rel_type}): {lsummary}")
-            if link_summaries:
-                lines.append(f"- Linked issues: {'; '.join(link_summaries)}")
-
-        # Text attachments
-        attach_text = attachment_texts.get(key, "")
-        if attach_text:
-            lines.append(f"- Attachment content:\n{attach_text.strip()}")
-
-        # Linked PRs
-        prs = linked_prs_map.get(key, [])
-        if prs:
-            pr_summaries = []
-            for pr in prs:
-                pr_id = pr.get("id", pr.get("number", "?"))
-                pr_name = pr.get("name", pr.get("title", ""))
-                pr_url = pr.get("url", "")
-                pr_status = pr.get("status", pr.get("state", ""))
-                pr_summaries.append(f"#{pr_id} {pr_name} ({pr_status}) {pr_url}")
-            lines.append(f"- Linked PRs: {'; '.join(pr_summaries)}")
-
-        lines.append("")
-    return "\n".join(lines)
 
 
 @click.command()
@@ -211,15 +153,20 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     total_link_count = sum(
         len((i.get("fields") or {}).get("issuelinks") or []) for i in enriched
     )
+    total_comment_count = sum(
+        len((i.get("fields") or {}).get("comment", {}).get("comments") or [])
+        for i in enriched
+    )
     print(f"[analyze] enriched: {total_link_count} issue links, "
-          f"{total_pr_count} PRs, {total_attach_count} attachments", flush=True)
+          f"{total_pr_count} PRs, {total_attach_count} attachments, "
+          f"{total_comment_count} comments", flush=True)
 
     # Auto-detect repo from issue body if no repo configured in env
     if not (config.get("BITBUCKET_WORKSPACE") or config.get("GH_ORG")):
         _patch_config_from_issue_body(enriched[0] if enriched else None, config)
 
-    issues_text = _format_for_analysis(enriched, base_url, linked_prs_map, attachment_texts,
-                                        config)
+    issues_text = format_jira_issues_for_analysis(enriched, base_url, linked_prs_map,
+                                                   attachment_texts)
 
     # Ensure YGS skills are installed before skill resolution so ygs-analyze is discoverable.
     ensure_ygs_skills()
@@ -272,6 +219,7 @@ def main(issues: str | None, query: str | None, max_results: int, issue_type: st
     print(f"::add-task-context ISSUE_LINKS_COUNT::{total_link_count}", flush=True)
     print(f"::add-task-context PR_LINKS_COUNT::{total_pr_count}", flush=True)
     print(f"::add-task-context ATTACHMENTS_COUNT::{total_attach_count}", flush=True)
+    print(f"::add-task-context COMMENTS_COUNT::{total_comment_count}", flush=True)
     if skill_result:
         print(f"::add-task-context SKILL_USED::{skill_result[0]}", flush=True)
         print(f"::add-task-context ANALYSIS_TYPE::skill", flush=True)

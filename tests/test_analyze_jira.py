@@ -32,6 +32,7 @@ _FAKE_ISSUE = {
         "description": None,
         "issuelinks": [],
         "attachment": [],
+        "comment": {"comments": []},
     },
 }
 

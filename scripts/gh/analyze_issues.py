@@ -16,7 +16,6 @@ Exit codes: 0=success, 2=no issues found, 1=error
 """
 from __future__ import annotations
 
-import re
 import sys
 
 import click
@@ -25,6 +24,7 @@ from scripts.common.config import load_config
 from scripts.common.gh_api import extract_github_numbers, resolve_github_issues
 from scripts.common.issue_analysis import (
     emit_git_context_markers,
+    format_gh_issues_for_analysis,
     resolve_skill_for_analyze,
     run_analysis,
     run_skill_analysis,
@@ -38,51 +38,6 @@ from scripts.common.slack_format import format_for_slack
 from scripts.standup.slack_client import post_report
 
 _TRACKER = "github"
-
-
-
-def _format_for_analysis(issues: list[dict]) -> str:
-    lines = []
-    for issue in issues:
-        number = issue.get("number", "?")
-        title = issue.get("title", "(no title)")
-        url = issue.get("url", "")
-        assignees = issue.get("assignees") or []
-        assignee = assignees[0].get("login", "Unassigned") if assignees else "Unassigned"
-        labels = [lbl["name"] for lbl in (issue.get("labels") or [])]
-        label_str = f" [{', '.join(labels)}]" if labels else ""
-        body = (issue.get("body") or "").strip()
-        state = issue.get("state", "")
-
-        lines.append(f"### #{number}: {title}{label_str}")
-        lines.append(f"- URL: {url}")
-        lines.append(f"- Assignee: {assignee} | State: {state}")
-        if body:
-            lines.append(f"- Description:\n{body}")
-
-        # First 3 comments (truncated to 500 chars each)
-        comments = issue.get("comments") or []
-        for i, comment in enumerate(comments[:3]):
-            author = (comment.get("author") or {}).get("login", "?")
-            body_short = (comment.get("body") or "").strip()[:500]
-            if body_short:
-                lines.append(f"- Comment by {author}: {body_short}")
-
-        # Linked PRs
-        linked_prs = issue.get("linked_prs") or []
-        if linked_prs:
-            pr_summaries = []
-            for pr in linked_prs:
-                pr_num = pr.get("number", "?")
-                pr_title = pr.get("title", "")
-                pr_url = pr.get("url", "")
-                pr_state = pr.get("state", "")
-                pr_merged = f" merged={pr['mergedAt'][:10]}" if pr.get("mergedAt") else ""
-                pr_summaries.append(f"#{pr_num} {pr_title} ({pr_state}{pr_merged}) {pr_url}")
-            lines.append(f"- Linked PRs: {'; '.join(pr_summaries)}")
-
-        lines.append("")
-    return "\n".join(lines)
 
 
 @click.command()
@@ -137,7 +92,7 @@ def main(issues: str | None, query: str | None, max_results: int, label: str | N
     total_pr_count = sum(len(i.get("linked_prs") or []) for i in enriched)
     print(f"[gh-analyze] enriched: {total_pr_count} linked PRs found", flush=True)
 
-    issues_text = _format_for_analysis(enriched)
+    issues_text = format_gh_issues_for_analysis(enriched)
     ids = [f"#{i.get('number', '?')}" for i in enriched]
 
     ensure_ygs_skills()

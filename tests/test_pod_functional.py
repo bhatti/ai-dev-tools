@@ -542,14 +542,34 @@ def test_01_jira_query(base_env: dict[str, str]) -> TestResult:
     env["WORKSPACE_DIR"] = ws
 
     with pod_fixture("jira-query") as pod:
+        # Step 1: free-text JQL path (likely no results)
         step = exec_step(pod, "jira-query",
                          f"mkdir -p {ws}/reports {ws}/logs && "
                          "python3 -m scripts.jira.query_issues --query 'open' --max 5",
                          env, timeout=120)
         result.steps.append(step)
 
-    if not step.ok:
-        return _fail(result, step, f"exit code {step.returncode}")
+        if not step.ok:
+            return _fail(result, step, f"exit code {step.returncode}")
+
+        # Step 2: direct-fetch path — pass issue key/URL so extract_jira_keys fires
+        if ISSUE_ID:
+            jira_base = base_env.get("JIRA_BASE_URL", "").rstrip("/")
+            # Use the full browse URL to test URL parsing in extract_jira_keys
+            issue_url = f"{jira_base}/browse/{ISSUE_ID}" if jira_base else ISSUE_ID
+            step2 = exec_step(pod, "jira-query-by-url",
+                              f"python3 -m scripts.jira.query_issues --query '{issue_url}' --max 1",
+                              env, timeout=60)
+            result.steps.append(step2)
+            if not step2.ok:
+                return _fail(result, step2, f"direct-fetch exit code {step2.returncode}")
+            if not step2.has_results:
+                return _fail(result, step2, f"direct-fetch returned no issues for {ISSUE_ID}")
+            err = _check_keys(step2, ["SELECTED_TRACKER", "ISSUE_COUNT"]) or \
+                  _check_values(step2, {"SELECTED_TRACKER": "jira", "ISSUE_COUNT": "1"})
+            if err:
+                return _fail(result, step2, err)
+            return _pass(result, f"direct-fetch ISSUE_COUNT=1 for {ISSUE_ID} elapsed={step2.elapsed:.0f}s")
 
     if not step.has_results:
         return _pass(result, "no matching issues (exit 2) — Jira reachable")
@@ -578,6 +598,7 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
     env["WORKSPACE_DIR"] = ws
 
     verify_step = None
+    content_step = None
     with pod_fixture("jira-analyze") as pod:
         step = exec_step(pod, "jira-analyze",
                          f"mkdir -p {ws}/reports {ws}/logs && "
@@ -587,7 +608,7 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
         result.steps.append(step)
 
         if step.ok and step.has_results:
-            # Verify reports/report.md was written with substantial content — runs in same pod
+            # Verify reports/report.md was written with substantial content
             verify_cmd = (
                 f"python3 -c \""
                 f"import os, sys; "
@@ -599,6 +620,38 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
             )
             verify_step = exec_step(pod, "verify-jira-report", verify_cmd, env, timeout=30)
             result.steps.append(verify_step)
+
+            # Verify no leaked markers, report.html exists, and when repo was cloned the report
+            # cites at least one file path (proving Phase 0 grep ran on actual source files)
+            repo_cloned = step.context.get("REPO_CLONED_PATH", "")
+            verify_content_cmd = (
+                f"python3 -c \""
+                f"import sys, re, os; "
+                f"t=open('{ws}/reports/report.md').read(); "
+                f"bad=re.search(r'add-task-context|Full report at|Full analysis at', t, re.I); "
+                f"html_ok=os.path.exists('{ws}/reports/report.html'); "
+                f"repo_cloned={repr(bool(repo_cloned))}; "
+                f"has_path=bool(re.search(r'[a-zA-Z0-9_/\\\\-]+\\.[a-z]{{1,5}}(?::\\d+)?', t)); "
+                f"path_ok = (not repo_cloned) or has_path; "
+                f"print(f'report.html={{\\\"OK\\\" if html_ok else \\\"MISSING\\\"}}',"
+                f"      f'file_paths={{\\\"yes\\\" if has_path else \\\"NONE - Phase0 may not have run\\\"}}'); "
+                f"sys.exit(0 if not bad and html_ok and path_ok else 1)"
+                f"\""
+            )
+            content_step = exec_step(pod, "verify-report-content", verify_content_cmd, env, timeout=15)
+            result.steps.append(content_step)
+
+            # Copy report.md to local /tmp so caller can inspect it
+            local_report = f"/tmp/{ISSUE_ID}-analysis.md" if ISSUE_ID else "/tmp/jira-analysis.md"
+            try:
+                subprocess.run(
+                    ["kubectl", "-n", NAMESPACE, "cp",
+                     f"{pod}:{ws}/reports/report.md", local_report],
+                    check=True, capture_output=True,
+                )
+                print(f"    [jira-analyze] report saved locally → {local_report}", flush=True)
+            except Exception as e:
+                print(f"    [jira-analyze] warn: could not copy report.md locally: {e}", flush=True)
 
     if not step.ok:
         return _fail(result, step,
@@ -614,7 +667,6 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
         return _fail(result, step, err)
 
     git_arch = step.context.get("GIT_ARCHAEOLOGY", "no")
-    # When Bitbucket is configured with SSH key, git archaeology must succeed
     if env.get("BITBUCKET_REPO") and env.get("SSH_PRIVATE_KEY"):
         if git_arch != "yes":
             return _fail(result, step,
@@ -628,32 +680,10 @@ def test_02_jira_analyze(base_env: dict[str, str]) -> TestResult:
                      f"got {verify_step.context.get('REPORT_MD_BYTES', 0)} bytes)\n"
                      f"analyze stdout tail:\n{step.stdout[-2000:]}")
 
-    # Verify report.md has no leaked markers, report.html exists, and when a repo was cloned
-    # the report cites at least one file path (proving Phase 0 grep ran on actual source files)
-    if step.has_results:
-        repo_cloned = step.context.get("REPO_CLONED_PATH", "")
-        verify_content_cmd = (
-            f"python3 -c \""
-            f"import sys, re, os; "
-            f"t=open('{ws}/reports/report.md').read(); "
-            f"bad=re.search(r'add-task-context|Full report at|Full analysis at', t, re.I); "
-            f"html_ok=os.path.exists('{ws}/reports/report.html'); "
-            f"# When repo was cloned, report must cite at least one src file path (e.g. src/foo.ts:42);"
-            f"# absence means Phase 0 grep never ran and analysis is git-history-only (wrong)."
-            f"repo_cloned={repr(bool(repo_cloned))}; "
-            f"has_path=bool(re.search(r'[a-zA-Z0-9_/\\\\-]+\\.[a-z]{{1,5}}(?::\\d+)?', t)); "
-            f"path_ok = (not repo_cloned) or has_path; "
-            f"print(f'report.html={{\\\"OK\\\" if html_ok else \\\"MISSING\\\"}}',"
-            f"      f'file_paths={{\\\"yes\\\" if has_path else \\\"NONE - Phase0 may not have run\\\"}}'); "
-            f"sys.exit(0 if not bad and html_ok and path_ok else 1)"
-            f"\""
-        )
-        content_step = exec_step(pod, "verify-report-content", verify_content_cmd, env, timeout=15)
-        result.steps.append(content_step)
-        if not content_step.ok:
-            return _fail(result, content_step,
-                         "report.md has leaked markers, report.html missing, or no file paths "
-                         "(Phase 0 grep did not run on cloned repo)")
+    if content_step and not content_step.ok:
+        return _fail(result, content_step,
+                     "report.md has leaked markers, report.html missing, or no file paths "
+                     "(Phase 0 grep did not run on cloned repo)")
 
     report_sz = verify_step.context.get("REPORT_MD_BYTES", "?") if verify_step else "?"
     skill_used = step.context.get("SKILL_USED", "none")

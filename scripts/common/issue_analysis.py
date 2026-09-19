@@ -71,6 +71,138 @@ Format *your analysis output* as Slack mrkdwn: `*bold*` not `**bold**`, no `#` h
 """
 
 
+def format_jira_issues_for_analysis(
+    issues: list[dict],
+    base_url: str,
+    linked_prs_map: dict,
+    attachment_texts: dict,
+) -> str:
+    """Format enriched Jira issues into a text block for Claude analysis.
+
+    Includes description, linked issues, comments (up to 20), attachments, and PRs.
+    """
+    from scripts.common.jira_api import extract_adf_text
+
+    lines = []
+    for issue in issues:
+        key = issue.get("key", "?")
+        fields = issue.get("fields", {})
+        summary = fields.get("summary", "(no title)")
+        status = (fields.get("status") or {}).get("name", "?")
+        priority = (fields.get("priority") or {}).get("name", "None")
+        assignee = (fields.get("assignee") or {}).get("displayName") or "Unassigned"
+        description = extract_adf_text(fields.get("description"))
+        url = f"{base_url.rstrip('/')}/browse/{key}"
+
+        lines.append(f"### {key}: {summary}")
+        lines.append(f"- URL: {url}")
+        lines.append(f"- Status: {status} | Priority: {priority} | Assignee: {assignee}")
+        if description and description.strip():
+            lines.append(f"- Description: {description.strip()}")
+
+        # Linked issues
+        issue_links = fields.get("issuelinks") or []
+        if issue_links:
+            link_summaries = []
+            for link in issue_links:
+                rel_type = (link.get("type") or {}).get("name", "Related")
+                for direction in ("inwardIssue", "outwardIssue"):
+                    linked = link.get(direction)
+                    if linked:
+                        lkey = linked.get("key", "?")
+                        lfields = linked.get("fields") or {}
+                        lsummary = lfields.get("summary", "")
+                        lstatus = (lfields.get("status") or {}).get("name", "")
+                        status_tag = f" [{lstatus}]" if lstatus else ""
+                        link_summaries.append(f"{lkey} ({rel_type}): {lsummary}{status_tag}")
+            if link_summaries:
+                lines.append(f"- Linked issues: {'; '.join(link_summaries)}")
+
+        # Comments (most recent 20, trimmed to avoid token overflow)
+        comments_data = (fields.get("comment") or {}).get("comments") or []
+        if comments_data:
+            comment_parts = []
+            for c in comments_data[-20:]:
+                author = (c.get("author") or {}).get("displayName", "?")
+                created = (c.get("created") or "")[:10]
+                body = extract_adf_text(c.get("body")) or ""
+                if body.strip():
+                    comment_parts.append(f"  [{created} {author}]: {body.strip()[:2000]}")
+            if comment_parts:
+                lines.append(f"- Comments ({len(comment_parts)}):\n" + "\n".join(comment_parts))
+
+        # Text attachments
+        attach_text = attachment_texts.get(key, "")
+        if attach_text:
+            lines.append(f"- Attachment content:\n{attach_text.strip()}")
+
+        # Linked PRs
+        prs = linked_prs_map.get(key, [])
+        if prs:
+            pr_summaries = []
+            for pr in prs:
+                pr_id = pr.get("id", pr.get("number", "?"))
+                pr_name = pr.get("name", pr.get("title", ""))
+                pr_url = pr.get("url", "")
+                pr_status = pr.get("status", pr.get("state", ""))
+                pr_summaries.append(f"#{pr_id} {pr_name} ({pr_status}) {pr_url}")
+            lines.append(f"- Linked PRs: {'; '.join(pr_summaries)}")
+
+        lines.append("")
+    return "\n".join(lines)
+
+
+def format_gh_issues_for_analysis(issues: list[dict]) -> str:
+    """Format enriched GitHub issues into a text block for Claude analysis.
+
+    Includes description, labels, comments (up to 20), and linked PRs.
+    """
+    lines = []
+    for issue in issues:
+        number = issue.get("number", "?")
+        title = issue.get("title", "(no title)")
+        url = issue.get("url", "")
+        assignees = issue.get("assignees") or []
+        assignee = assignees[0].get("login", "Unassigned") if assignees else "Unassigned"
+        labels = [lbl["name"] for lbl in (issue.get("labels") or [])]
+        label_str = f" [{', '.join(labels)}]" if labels else ""
+        body = (issue.get("body") or "").strip()
+        state = issue.get("state", "")
+
+        lines.append(f"### #{number}: {title}{label_str}")
+        lines.append(f"- URL: {url}")
+        lines.append(f"- Assignee: {assignee} | State: {state}")
+        if body:
+            lines.append(f"- Description:\n{body}")
+
+        # Comments (most recent 20, trimmed to avoid token overflow)
+        comments = issue.get("comments") or []
+        comment_parts = []
+        for c in comments[-20:]:
+            author = (c.get("author") or {}).get("login", "?")
+            body_text = (c.get("body") or "").strip()[:2000]
+            if body_text:
+                comment_parts.append(f"  [{author}]: {body_text}")
+        if comment_parts:
+            lines.append(f"- Comments ({len(comment_parts)}):\n" + "\n".join(comment_parts))
+
+        # Linked PRs
+        linked_prs = issue.get("linked_prs") or []
+        if linked_prs:
+            pr_summaries = []
+            for pr in linked_prs:
+                pr_num = pr.get("number", "?")
+                pr_title = pr.get("title", "")
+                pr_url = pr.get("url", "")
+                pr_state = pr.get("state", "")
+                pr_merged = f" merged={pr['mergedAt'][:10]}" if pr.get("mergedAt") else ""
+                pr_summaries.append(f"#{pr_num} {pr_title} ({pr_state}{pr_merged}) {pr_url}")
+            lines.append(f"- Linked PRs: {'; '.join(pr_summaries)}")
+
+        lines.append("")
+    return "\n".join(lines)
+
+
 def run_skill_analysis(config: dict, issues_text: str, skill_name: str, skill_path,
                        git_context: str | None = None,
                        git_repo_path: Optional[Path] = None) -> str:
