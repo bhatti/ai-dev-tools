@@ -35,6 +35,9 @@ USAGE
     # List available tests:
     python3 tests/test_pod_functional.py --list
 
+    # Clean up stale pods from interrupted runs (label: app=ai-dev-pod-test):
+    python3 tests/test_pod_functional.py --cleanup
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ENV VARS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3033,6 +3036,8 @@ def main() -> None:
     parser.add_argument("--tests", default=",".join(DEFAULT_TESTS),
                         help="Comma-separated test names, or 'all'")
     parser.add_argument("--list", action="store_true", help="List available tests and exit")
+    parser.add_argument("--cleanup", action="store_true",
+                        help="Delete all stale ai-dev-pod-test pods left by interrupted runs and exit")
     args = parser.parse_args()
 
     if args.list:
@@ -3040,6 +3045,17 @@ def main() -> None:
         for name in ALL_TESTS:
             print(f"  {name}")
         return
+
+    if args.cleanup:
+        print(f"[pod-tests] deleting stale pods with label app=ai-dev-pod-test in namespace {NAMESPACE} ...", flush=True)
+        r = _kubectl("delete", "pods", "-l", "app=ai-dev-pod-test",
+                     "--ignore-not-found=true", "--grace-period=0", check=False)
+        print(r.stdout.strip() or "no pods deleted", flush=True)
+        return
+
+    # Auto-clean any stale pods from previous interrupted runs before starting
+    _kubectl("delete", "pods", "-l", "app=ai-dev-pod-test",
+             "--ignore-not-found=true", "--grace-period=0", check=False)
 
     # Load secret + build base env once — shared across all tests
     print("[pod-tests] loading ai-dev-credentials secret ...", flush=True)
