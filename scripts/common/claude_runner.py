@@ -367,6 +367,12 @@ def _ensure_extra_skills(skills_base: Path) -> None:
         slug = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
         dest = skills_base / f"_extra_{slug}"
         if not (dest.exists() and (dest / ".git").exists()):
+            if token_env and not token:
+                print(
+                    f"[ygs] WARNING: {token_env} is not set or empty — clone of {url} will fail auth;"
+                    f" rotate the credential in the ai-dev-credentials secret",
+                    file=sys.stderr, flush=True,
+                )
             _t0 = _time.monotonic()
             label = "sparse-clone" if sparse else "clone"
             print(f"[ygs] {label} extra skills repo {url} ({skills_dir or 'full'})...", flush=True)

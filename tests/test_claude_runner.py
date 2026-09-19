@@ -317,6 +317,53 @@ class TestEnsureExtraSkillsUrlExpansion:
         cmds = [call.args[0] for call in mock_run.call_args_list]
         assert any("npx" in cmd for cmd in cmds)
 
+    def test_empty_bitbucket_token_warns(self, tmp_path, capsys):
+        """When BITBUCKET_TOKEN is unset/empty, a clear warning is printed before clone."""
+        raw = json.dumps([{"url": "https://bitbucket.org/org/repo.git", "sparse": True}])
+        env = {"BITBUCKET_TOKEN": "", "DEFAULT_TRACKER": "jira", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+                _ensure_extra_skills(tmp_path)
+        captured = capsys.readouterr()
+        assert "BITBUCKET_TOKEN" in captured.err
+        assert "ai-dev-credentials" in captured.err
+
+    def test_empty_gh_token_warns(self, tmp_path, capsys):
+        """When GH_TOKEN is unset/empty, a clear warning is printed before clone."""
+        raw = json.dumps([{"url": "https://github.com/org/repo.git", "sparse": True}])
+        env = {"GH_TOKEN": "", "DEFAULT_TRACKER": "github", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+                _ensure_extra_skills(tmp_path)
+        captured = capsys.readouterr()
+        assert "GH_TOKEN" in captured.err
+        assert "ai-dev-credentials" in captured.err
+
+    def test_bitbucket_token_from_env_injected_into_sparse_clone(self, tmp_path):
+        """BB token from env is embedded in the clone URL for sparse=True (default)."""
+        raw = "https://bitbucket.org/org/repo.git"
+        env = {"BITBUCKET_TOKEN": "ATATT_secret", "BITBUCKET_USERNAME": "x-token-auth",
+               "DEFAULT_TRACKER": "jira", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+                _ensure_extra_skills(tmp_path)
+        all_args = [arg for call in mock_run.call_args_list for arg in call.args[0]]
+        assert any("ATATT_secret" in a for a in all_args), "Token not embedded in clone URL"
+
+    def test_github_token_from_env_injected_into_sparse_clone(self, tmp_path):
+        """GH_TOKEN from env is embedded in the clone URL for sparse=True (default)."""
+        raw = "https://github.com/org/repo.git"
+        env = {"GH_TOKEN": "ghp_testtoken", "DEFAULT_TRACKER": "github", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+                _ensure_extra_skills(tmp_path)
+        all_args = [arg for call in mock_run.call_args_list for arg in call.args[0]]
+        assert any("ghp_testtoken" in a for a in all_args), "GH token not embedded in clone URL"
+
 
 # ---------------------------------------------------------------------------
 # _install_via_skills_cli

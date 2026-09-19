@@ -19,6 +19,34 @@ def _run(cmd: list[str], cwd: Path | None = None, check: bool = True, env=None) 
     return result
 
 
+def _git_env(extra: dict | None = None) -> dict:
+    """Return env copy with GIT_TERMINAL_PROMPT disabled (suppresses interactive prompts)."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _run_git(
+    cmd: list[str],
+    *,
+    env: dict | None = None,
+    timeout: int | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a git command; raise CalledProcessError with credentials redacted on failure."""
+    run_kwargs: dict = {"capture_output": True, "text": True, "env": env if env is not None else _git_env()}
+    if timeout is not None:
+        run_kwargs["timeout"] = timeout
+    if cwd is not None:
+        run_kwargs["cwd"] = str(cwd)
+    result = subprocess.run(cmd, **run_kwargs)
+    if result.returncode != 0:
+        safe_cmd = [_redact_url(arg) for arg in cmd]
+        raise subprocess.CalledProcessError(result.returncode, safe_cmd, result.stdout, result.stderr)
+    return result
+
+
 def _slug(text: str, max_len: int = 40) -> str:
     """Convert arbitrary text to a URL-safe slug."""
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -86,7 +114,7 @@ def clone_repo(
 
     dest = Path(dest)
     key_path = ""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = _git_env()
 
     if http_token:
         git_url = _embed_credentials(url, http_username, http_token)
@@ -107,33 +135,19 @@ def clone_repo(
         git_url = url
         env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no -o BatchMode=yes"
 
-    safe_url = _redact_url(git_url)
-
     try:
         if dest.exists() and (dest / ".git").exists():
             try:
                 # Refresh the stored remote URL so a rotated token is always current
                 if http_token:
-                    _run(["git", "remote", "set-url", "origin", git_url], cwd=dest, env=env)
+                    _run_git(["git", "remote", "set-url", "origin", git_url], cwd=dest, env=env)
                 _run(["git", "fetch", "--depth", str(depth), "origin"], cwd=dest, env=env)
                 return dest
             except subprocess.CalledProcessError as e:
                 print(f"git fetch failed, re-cloning ({e.returncode}): {e.stderr.strip()}", file=sys.stderr)
                 shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["git", "clone", "--depth", str(depth), git_url, str(dest)],
-            capture_output=True, text=True, env=env,
-        )
-        if result.returncode != 0:
-            print(f"git clone failed: {result.stderr.strip()}", file=sys.stderr)
-            # Raise with redacted command so the token is never in the exception message
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                ["git", "clone", "--depth", str(depth), safe_url, str(dest)],
-                result.stdout,
-                result.stderr,
-            )
+        _run_git(["git", "clone", "--depth", str(depth), git_url, str(dest)], env=env)
     finally:
         if key_path and os.path.exists(key_path):
             os.unlink(key_path)
@@ -232,10 +246,10 @@ def push_branch(
     http_token/http_username/url: when provided, refreshes the stored remote URL
     before pushing so a rotated token is always current.
     """
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = _git_env()
     if http_token and url:
         git_url = _embed_credentials(url, http_username, http_token)
-        _run(["git", "remote", "set-url", "origin", git_url], cwd=repo_path, env=env)
+        _run_git(["git", "remote", "set-url", "origin", git_url], cwd=repo_path, env=env)
 
     cmd = ["git", "push", "origin", branch]
     if force_with_lease:
@@ -429,30 +443,16 @@ def sparse_clone_repo(
 
     clone_url = _embed_credentials(url, http_username, http_token) if http_token else url
     dest.parent.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = _git_env()
 
-    result = subprocess.run(
+    _run_git(
         ["git", "clone", "--depth", "1", "--filter=blob:none",
          "--sparse", "--branch", branch, clone_url, str(dest)],
-        capture_output=True, text=True, timeout=timeout, env=env,
+        env=env, timeout=timeout,
     )
-    if result.returncode != 0:
-        safe = _redact_url(clone_url)
-        raise subprocess.CalledProcessError(
-            result.returncode,
-            f"git clone --depth 1 --sparse {safe} {dest}",
-            result.stdout,
-            result.stderr,
-        )
 
     if sparse_dir:
-        r2 = subprocess.run(
+        _run_git(
             ["git", "-C", str(dest), "sparse-checkout", "set", sparse_dir],
-            capture_output=True, text=True, timeout=timeout,
+            env=env, timeout=timeout,
         )
-        if r2.returncode != 0:
-            raise subprocess.CalledProcessError(
-                r2.returncode,
-                ["git", "-C", str(dest), "sparse-checkout", "set", sparse_dir],
-                r2.stdout, r2.stderr,
-            )

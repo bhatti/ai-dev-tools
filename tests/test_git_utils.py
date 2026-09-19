@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from scripts.common.git_utils import (
+    _git_env,
+    _run_git,
     _slug,
     commit_all,
     create_branch,
@@ -267,6 +269,85 @@ class TestNormalizeRepoWebUrl:
     def test_non_hosting_url_unchanged(self):
         result = normalize_repo_web_url("https://example.com/my/repo.git")
         assert result == {"url": "https://example.com/my/repo.git"}
+
+
+# ── _git_env / _run_git (shared helpers) ──────────────────────────────────────
+
+class TestSharedGitHelpers:
+    def test_git_env_disables_terminal_prompt(self):
+        env = _git_env()
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_git_env_extra_keys_merged(self):
+        env = _git_env({"MY_VAR": "val"})
+        assert env["MY_VAR"] == "val"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_run_git_returns_on_success(self, tmp_path):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            result = _run_git(["git", "status"])
+        assert result.returncode == 0
+
+    def test_run_git_redacts_token_in_exception(self, tmp_path):
+        import subprocess
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=128, stdout="", stderr="fatal: auth error"
+            )
+            with pytest.raises(subprocess.CalledProcessError) as exc_info:
+                _run_git(["git", "clone", "https://user:SUPERSECRET@bitbucket.org/org/repo.git", str(tmp_path)])
+        cmd_str = str(exc_info.value.cmd)
+        assert "SUPERSECRET" not in cmd_str
+
+    def test_clone_repo_token_embedding_matches_sparse_clone(self, tmp_path):
+        """clone_repo and sparse_clone_repo must embed BB/GH tokens identically."""
+        from unittest.mock import call as _call
+        token = "ATATT_test_token"
+        username = "x-token-auth"
+        dest = tmp_path / "repo"
+
+        # clone_repo path
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            from scripts.common.git_utils import clone_repo
+            clone_repo("https://bitbucket.org/org/repo.git", dest,
+                       http_token=token, http_username=username, depth=1)
+        clone_cmd = mock_run.call_args_list[0][0][0]
+        clone_url = next(a for a in clone_cmd if token in a)
+
+        # sparse_clone_repo path
+        dest2 = tmp_path / "repo2"
+        with patch("subprocess.run") as mock_run2:
+            mock_run2.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            sparse_clone_repo("https://bitbucket.org/org/repo.git", dest2,
+                              http_token=token, http_username=username)
+        sparse_cmd = mock_run2.call_args_list[0][0][0]
+        sparse_url = next(a for a in sparse_cmd if token in a)
+
+        assert clone_url == sparse_url, (
+            f"Token embedding differs between clone_repo ({clone_url!r}) "
+            f"and sparse_clone_repo ({sparse_url!r})"
+        )
+
+    def test_clone_and_sparse_clone_set_git_terminal_prompt(self, tmp_path):
+        """Both clone paths must pass GIT_TERMINAL_PROMPT=0 to suppress interactive prompts."""
+        for fn_name, fn_args in [
+            ("clone_repo", dict(url="https://github.com/org/repo.git", dest=tmp_path / "c1",
+                                http_token="ghp_tok", depth=1)),
+            ("sparse_clone_repo", dict(url="https://github.com/org/repo.git", dest=tmp_path / "c2",
+                                       http_token="ghp_tok")),
+        ]:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                if fn_name == "clone_repo":
+                    from scripts.common.git_utils import clone_repo
+                    clone_repo(**fn_args)
+                else:
+                    sparse_clone_repo(**fn_args)
+            all_kwargs = {**mock_run.call_args_list[0][1]}
+            assert all_kwargs.get("env", {}).get("GIT_TERMINAL_PROMPT") == "0", \
+                f"{fn_name} did not pass GIT_TERMINAL_PROMPT=0"
 
 
 # ── sparse_clone_repo ─────────────────────────────────────────────────────────
