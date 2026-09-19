@@ -79,7 +79,7 @@ def test_format_for_analysis_includes_linked_issues():
             "description": "",
             "attachment": [],
             "issuelinks": [{
-                "type": {"name": "Blocks"},
+                "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
                 "inwardIssue": {
                     "key": "PROJ-200",
                     "fields": {"summary": "Blocked issue"},
@@ -89,7 +89,7 @@ def test_format_for_analysis_includes_linked_issues():
     }]
     text = _format_for_analysis(issues, "https://company.atlassian.net", {}, {})
     assert "PROJ-200" in text
-    assert "Blocks" in text
+    assert "is blocked by" in text
 
 
 def test_format_for_analysis_includes_linked_prs():

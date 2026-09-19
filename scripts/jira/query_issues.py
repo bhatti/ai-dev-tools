@@ -23,7 +23,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import load_config, get_workspace_dir
-from scripts.common.jira_api import _auth_headers, _base, extract_adf_text, resolve_jira_issues, search_issues, resolve_field_id
+from scripts.common.jira_api import _auth_headers, _base, extract_adf_text, format_issue_links, resolve_jira_issues, search_issues, resolve_field_id
 from scripts.common.report_renderer import render_simple_html
 from scripts.standup.slack_client import build_issue_blocks, notify
 
@@ -67,15 +67,17 @@ def _format_issue(issue: dict, base_url: str) -> str:
     desc = (desc_raw[:120] + "…") if len(desc_raw) > 120 else desc_raw
     url = f"{base_url.rstrip('/')}/browse/{key}"
 
-    link_count = len(fields.get("issuelinks") or [])
     type_tag = f"[{issuetype}] " if issuetype else ""
     meta = f"_{assignee}_ · {status} · priority: {priority}"
     if created:
         meta += f" · {created}"
-    link_tag = f"  [{link_count} linked]" if link_count else ""
-    line = f"• <{url}|{key}> {type_tag}{summary} — {meta}{link_tag}"
+    line = f"• <{url}|{key}> {type_tag}{summary} — {meta}"
     if desc:
         line += f"\n  _{desc}_"
+    # Show direction-tagged linked issues (blockers vs. downstream) using shared helper
+    link_lines = format_issue_links(fields.get("issuelinks") or [])
+    if link_lines:
+        line += "\n  " + " | ".join(link_lines[:5])
     return line
 
 

@@ -77,6 +77,36 @@ def resolve_jira_issues(
     return []
 
 
+def format_issue_links(issue_links: list) -> list[str]:
+    """Return direction-labelled linked issue strings for a Jira issue's issuelinks field.
+
+    Uses Jira's own inward/outward descriptions from the link type (e.g. "is blocked by",
+    "blocks", "relates to") rather than generic direction tags so callers get accurate
+    relationship semantics. Falls back to the type name if descriptions are absent.
+
+    Format: "KEY (is blocked by): Summary [Status]"  — inward: that ticket is a dependency
+            "KEY (blocks): Summary [Status]"          — outward: this ticket is a dependency of that
+
+    Used by both query (compact Slack display) and analyze (Claude prompt context).
+    """
+    summaries = []
+    for link in issue_links:
+        link_type = link.get("type") or {}
+        type_name = link_type.get("name", "related")
+        inward_desc = link_type.get("inward") or type_name
+        outward_desc = link_type.get("outward") or type_name
+        for direction, rel_desc in (("inwardIssue", inward_desc), ("outwardIssue", outward_desc)):
+            linked = link.get(direction)
+            if linked:
+                lkey = linked.get("key", "?")
+                lfields = linked.get("fields") or {}
+                lsummary = lfields.get("summary", "")
+                lstatus = (lfields.get("status") or {}).get("name", "")
+                status_tag = f" [{lstatus}]" if lstatus else ""
+                summaries.append(f"{lkey} ({rel_desc}): {lsummary}{status_tag}")
+    return summaries
+
+
 def extract_adf_text(node: "dict | str | None", depth: int = 0) -> str:
     """Recursively extract plain text from Atlassian Document Format (ADF).
 

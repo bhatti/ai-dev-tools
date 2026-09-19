@@ -59,8 +59,11 @@ Across all bugs in this batch, identify:
 ---
 
 ## FOR ALL ISSUES:
-- **Priority**: P0 Critical / P1 High / P2 Medium / P3 Low with justification
+- **Priority**: Use the priority field from the issue data above verbatim (e.g., "P2-High (might block progress)"). Do NOT re-derive or override it.
 - **Effort estimate**: XS (<1d) / S (1-2d) / M (3-5d) / L (1-2w) / XL (>2w)
+- **Blocker direction**: Linked issues show Jira's own relationship description in parentheses (e.g., "is blocked by KEY" means this ticket depends on KEY; "blocks KEY" means KEY depends on this ticket). Do NOT invert the direction.
+- **Process topology**: Before proposing RPC/message-bus/IPC between two services, verify they actually run in separate OS processes. If service A constructs service B (e.g., `new ServiceB()` in `ServiceA._run()`), they are in the same process — a direct method call is sufficient. Only propose cross-process communication when you can cite code proving the services run in separate processes.
+- **Closed blockers**: If a linked blocker ticket shows `[Closed]` status, state it is closed and do not treat it as an active dependency. Do not recommend "unblock X" if X shows `[Closed]`.
 
 Be concise. Use bullet points. Focus on actionable guidance. Cite issue keys and commit hashes.
 Format *your analysis output* as Slack mrkdwn: `*bold*` not `**bold**`, no `#` headings, no pipe tables.
@@ -81,7 +84,7 @@ def format_jira_issues_for_analysis(
 
     Includes description, linked issues, comments (up to 20), attachments, and PRs.
     """
-    from scripts.common.jira_api import extract_adf_text
+    from scripts.common.jira_api import extract_adf_text, format_issue_links
 
     lines = []
     for issue in issues:
@@ -100,23 +103,11 @@ def format_jira_issues_for_analysis(
         if description and description.strip():
             lines.append(f"- Description: {description.strip()}")
 
-        # Linked issues
+        # Linked issues — direction-tagged via shared helper so LLM knows which way the dependency flows
         issue_links = fields.get("issuelinks") or []
-        if issue_links:
-            link_summaries = []
-            for link in issue_links:
-                rel_type = (link.get("type") or {}).get("name", "Related")
-                for direction in ("inwardIssue", "outwardIssue"):
-                    linked = link.get(direction)
-                    if linked:
-                        lkey = linked.get("key", "?")
-                        lfields = linked.get("fields") or {}
-                        lsummary = lfields.get("summary", "")
-                        lstatus = (lfields.get("status") or {}).get("name", "")
-                        status_tag = f" [{lstatus}]" if lstatus else ""
-                        link_summaries.append(f"{lkey} ({rel_type}): {lsummary}{status_tag}")
-            if link_summaries:
-                lines.append(f"- Linked issues: {'; '.join(link_summaries)}")
+        link_summaries = format_issue_links(issue_links)
+        if link_summaries:
+            lines.append(f"- Linked issues: {'; '.join(link_summaries)}")
 
         # Comments (most recent 20, trimmed to avoid token overflow)
         comments_data = (fields.get("comment") or {}).get("comments") or []

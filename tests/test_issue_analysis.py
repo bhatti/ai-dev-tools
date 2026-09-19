@@ -7,6 +7,30 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_format_issue_links_directions():
+    """format_issue_links uses Jira inward/outward descriptions, not hardcoded tags."""
+    from scripts.common.jira_api import format_issue_links
+
+    links = [
+        {
+            "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+            "inwardIssue": {"key": "DEP-1", "fields": {"summary": "Dependency", "status": {"name": "Open"}}},
+        },
+        {
+            "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+            "outwardIssue": {"key": "DOWN-2", "fields": {"summary": "Downstream", "status": {"name": "Closed"}}},
+        },
+        {
+            "type": {"name": "Relates"},  # no inward/outward — falls back to type name
+            "outwardIssue": {"key": "REL-3", "fields": {"summary": "Related", "status": {"name": ""}}},
+        },
+    ]
+    result = format_issue_links(links)
+    assert result[0] == "DEP-1 (is blocked by): Dependency [Open]"
+    assert result[1] == "DOWN-2 (blocks): Downstream [Closed]"
+    assert result[2] == "REL-3 (Relates): Related"  # no status tag when empty
+
+
 def test_format_jira_issues_includes_comments_and_attachments():
     from scripts.common.issue_analysis import format_jira_issues_for_analysis
 
@@ -19,7 +43,8 @@ def test_format_jira_issues_includes_comments_and_attachments():
             "assignee": {"displayName": "Alice"},
             "description": None,
             "issuelinks": [
-                {"type": {"name": "Blocks"}, "outwardIssue": {"key": "PROJ-2", "fields": {"summary": "HTTP/2"}}}
+                {"type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                 "outwardIssue": {"key": "PROJ-2", "fields": {"summary": "HTTP/2"}}}
             ],
             "comment": {
                 "comments": [
@@ -38,7 +63,7 @@ def test_format_jira_issues_includes_comments_and_attachments():
     )
     assert "PROJ-1" in result
     assert "SSE streaming" in result
-    assert "PROJ-2 (Blocks)" in result
+    assert "PROJ-2 (blocks)" in result
     assert "Confirmed in prod" in result         # comment body
     assert "Bob" in result                       # comment author
     assert "spec content here" in result         # attachment text
