@@ -236,7 +236,11 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
 
 def _write_pr_queue_report(config: dict, workspace, pr_data: dict, title: str,
                            thread_ts: str | None) -> None:
-    """Write reports/report.md + reports/report.html and upload HTML to Slack."""
+    """Write reports/report.md, reports/report.html, and reports/result.json.
+
+    No Slack post here — the post task's __main__ reads report.html from artifacts
+    and appends a single artifact link to the completion message.
+    """
     from scripts.common.report_renderer import render_simple_html
 
     md_report = _pr_queue_to_markdown(pr_data, title)
@@ -250,8 +254,6 @@ def _write_pr_queue_report(config: dict, workspace, pr_data: dict, title: str,
         encoding="utf-8",
     )
     print("[adhoc] wrote reports/report.md + reports/report.html", flush=True)
-    upload_html_report(config, html_content, "pr_queue_report.html",
-                       thread_ts=thread_ts, task_type="run")
 
 
 _TRACKER_SKILLS = {"ygs-risk-scan", "ygs-standup", "ygs-pr-queue"}

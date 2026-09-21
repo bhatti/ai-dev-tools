@@ -650,5 +650,12 @@ if __name__ == "__main__":
     _public_url = (_config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
     _job_id = _config.get("JOB_ID", "") or ""
     if _public_url and _job_id:
-        _text += f"\n<{_public_url}/dashboard/jobs/requests/{_job_id}|View job in Formicary>"
+        from scripts.common.slack_format import build_artifact_links
+        _workspace = _config.get("WORKSPACE_DIR", "/workspace")
+        _report_exists = os.path.exists(os.path.join(_workspace, "reports", "report.html"))
+        if _report_exists:
+            _html_url, _job_url = build_artifact_links(_config, "run", "report.html")
+            _text += f"\n📎 Full report: <{_html_url}|View report.html>  |  <{_job_url}|All artifacts>"
+        else:
+            _text += f"\n<{_public_url}/dashboard/jobs/requests/{_job_id}|View job in Formicary>"
     post_message(_config, _text, thread_ts=_ts)

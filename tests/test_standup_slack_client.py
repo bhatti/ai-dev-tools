@@ -845,34 +845,26 @@ def test_pr_queue_to_markdown_pipe_escaped():
 
 
 # ---------------------------------------------------------------------------
-# _write_pr_queue_report — writes files + calls upload_html_report with task_type="run"
+# _write_pr_queue_report — writes files only; the post task handles the Slack link
 # ---------------------------------------------------------------------------
 
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
 @patch("scripts.standup.slack_client.requests.post")
-def test_write_pr_queue_report_artifact_link_uses_run_task_type(
-        mock_post, mock_fmc, mock_upload, tmp_path):
-    """_write_pr_queue_report must call upload_html_report with task_type='run'
-    so the fallback artifact link points to the run-task artifact zip."""
-    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1.0"})
+def test_write_pr_queue_report_writes_files_no_slack_post(mock_post, tmp_path):
+    """_write_pr_queue_report must write report files but NOT post to Slack.
+    The completion message with artifact link is handled by the post task."""
     config = {
         "SLACK_BOT_TOKEN": "xoxb-test",
         "SLACK_CHANNEL": "dev",
         "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
         "JOB_ID": "job-abc",
     }
-    workspace = tmp_path
     pr_data = {"prs": [], "pr_count": 0}
-    _write_pr_queue_report(config, workspace, pr_data, "PR Queue", thread_ts=None)
+    _write_pr_queue_report(config, tmp_path, pr_data, "PR Queue", thread_ts=None)
     assert (tmp_path / "reports" / "report.md").exists()
     assert (tmp_path / "reports" / "report.html").exists()
     assert (tmp_path / "reports" / "result.json").exists()
-    # Fallback message must include task=run (build_artifact_links was called with task_type="run")
-    assert mock_post.called
-    fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
-    assert "task=run" in fallback_text
-    assert "pr_queue_report.html" in fallback_text
+    # No Slack post from this function — post task handles it
+    assert not mock_post.called
 
 
 def test_write_pr_queue_report_writes_result_json(tmp_path):
@@ -884,3 +876,54 @@ def test_write_pr_queue_report_writes_result_json(tmp_path):
     result = _json.loads((tmp_path / "reports" / "result.json").read_text())
     assert result["status"] == "DONE"
     assert result["pr_count"] == 5
+
+
+# ---------------------------------------------------------------------------
+# slack_client __main__ — single footer with artifact link when report exists
+# ---------------------------------------------------------------------------
+
+def _run_slack_client_main(env: dict) -> str:
+    """Run slack_client __main__ with the given env and return the posted text."""
+    import importlib
+    import runpy
+    import warnings
+    mock_post_ret = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1.0"})
+    with patch("scripts.standup.slack_client.requests.post", return_value=mock_post_ret) as mp, \
+         patch.dict("os.environ", env, clear=True), \
+         warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        runpy.run_module("scripts.standup.slack_client", run_name="__main__")
+    return mp.call_args.kwargs["json"]["text"] if mp.called else ""
+
+
+def test_slack_client_main_shows_artifact_link_when_report_exists(tmp_path):
+    """When reports/report.html exists in workspace, __main__ appends artifact link
+    (not 'View job in Formicary') so the post task shows a single merged footer."""
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "report.html").write_text("<html/>")
+    posted_text = _run_slack_client_main({
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "dev",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "JOB_ID": "job-abc",
+        "WORKSPACE_DIR": str(tmp_path),
+        "MESSAGE": ":white_check_mark: Skill done.",
+    })
+    assert "View report.html" in posted_text
+    assert "task=run" in posted_text
+    assert "file=reports/report.html" in posted_text
+    assert "View job in Formicary" not in posted_text
+
+
+def test_slack_client_main_shows_job_link_when_no_report(tmp_path):
+    """When no reports/report.html, __main__ appends 'View job in Formicary' (original behaviour)."""
+    posted_text = _run_slack_client_main({
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "dev",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "JOB_ID": "job-abc",
+        "WORKSPACE_DIR": str(tmp_path),
+        "MESSAGE": ":white_check_mark: Skill done.",
+    })
+    assert "View job in Formicary" in posted_text
+    assert "View report.html" not in posted_text

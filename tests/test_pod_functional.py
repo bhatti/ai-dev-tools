@@ -3051,8 +3051,7 @@ def test_30_adhoc_pr_queue_report(base_env: dict[str, str]) -> TestResult:
       2. reports/report.md written with PR table content
       3. reports/report.html written with HTML content
       4. reports/result.json has status=DONE and pr_count
-      5. With FORMICARY_PUBLIC_URL + JOB_ID set, the artifact link is attempted
-         (visible in stdout as the "📎 Full report" or upload fallback log lines)
+    Note: the artifact link is added by the post task's __main__, not by run_skill.py.
     """
     result = TestResult("adhoc-pr-queue-report")
     env = dict(base_env)
