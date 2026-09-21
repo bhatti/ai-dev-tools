@@ -2567,6 +2567,57 @@ def test_23_skill_flag_parsing(base_env: dict[str, str]) -> TestResult:
     return _pass(result, "flag parsing verified: empty→error, valid→correct context markers")
 
 
+def test_23b_skill_quoted_args(base_env: dict[str, str]) -> TestResult:
+    """Verify skills with quoted multi-word positional args are parsed correctly.
+
+    Previously the double-quotes in RAW_ARGS broke YAML rendering with:
+      yaml: line 4: did not find expected key
+    The flags parser must also handle quoted tokens without crashing.
+
+    No Claude credentials required — exits before Claude call, verifies flags only.
+    """
+    result = TestResult("skill-quoted-args")
+
+    env = dict(base_env)
+    ws = "/workspace/skill_quoted_args"
+    env["WORKSPACE_DIR"] = ws
+    env["DEFAULT_TRACKER"] = "jira"
+    env.pop("SLACK_BOT_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLAUDE_CODE_USE_BEDROCK", None)
+
+    # Double-quoted multi-word positional arg + unknown flag + known flag
+    raw_args = 'my-sprint-skill "Q4 Roadmap" --dry-run --branch feature-branch'
+
+    with pod_fixture("skill-quoted-args") as pod:
+        env_test = dict(env)
+        env_test["RAW_ARGS"] = raw_args
+        step = exec_step(pod, "quoted-args",
+                         f"mkdir -p {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill 2>&1 || true",
+                         env_test, timeout=60)
+        result.steps.append(step)
+
+        combined = step.stdout + step.stderr
+        # Must not see a flags-parsing crash
+        if "traceback" in combined.lower() and "valueerror" in combined.lower():
+            return _fail(result, step, f"unexpected ValueError from flags parser: {combined[-400:]}")
+
+        # The context markers must be emitted before any Claude call attempt
+        ctx_err = _check_keys(step, ["SKILL", "BRANCH"])
+        if ctx_err:
+            return _fail(result, step, f"context markers missing: {ctx_err}")
+
+        val_err = _check_values(step, {
+            "SKILL": "my-sprint-skill",
+            "BRANCH": "feature-branch",
+        })
+        if val_err:
+            return _fail(result, step, val_err)
+
+    return _pass(result, "quoted args parsed: skill and branch context markers correct")
+
+
 def test_24_skill_integ_tests(base_env: dict[str, str]) -> TestResult:
     """Run scripts.skill.run_skill with integ-tests skill against todo-sample repo.
 

@@ -397,3 +397,51 @@ class TestServiceFlags:
         flags = parse_skill_flags('integ-tests --service-cmd "formicary queen"')
         assert flags.service_cmd == "formicary queen"
         assert flags.repo == ""
+
+
+# ─── quoted positional args ───────────────────────────────────────────────────
+# Reproduces: skill with quoted multi-word positional arg and unknown flag
+# Previously broke YAML rendering (unescaped double-quotes) AND positional tokenization.
+
+class TestQuotedPositionalArgs:
+    def test_quoted_arg_in_passthrough_mode(self):
+        """Quoted multi-word positional arg is stripped of quotes and merged into instructions."""
+        f = parse_skill_flags(
+            'my-sprint-skill "Q4 Roadmap" --dry-run --branch feature-branch'
+        )
+        assert f.skill == "my-sprint-skill"
+        assert f.branch == "feature-branch"
+        # shlex strips quotes; --dry-run is an unknown flag → passthrough
+        assert "Q4 Roadmap" in f.instructions
+        assert "--dry-run" in f.instructions
+        assert '"' not in f.instructions  # no stray quote chars
+
+    def test_quoted_arg_in_positional_mode(self):
+        """Quoted first positional arg is treated as a single repo token."""
+        f = parse_skill_flags('my-sprint-skill "Q4 Roadmap"')
+        assert f.skill == "my-sprint-skill"
+        # No unknown flags → positional mode; first token becomes repo
+        assert f.repo == "Q4 Roadmap"
+        assert f.identifier == ""
+        assert f.instructions == ""
+
+    def test_quoted_arg_with_instructions_separator(self):
+        """Quoted arg before ' -- ' separator is in flag part, not instructions."""
+        f = parse_skill_flags('my-sprint-skill "Q4 Roadmap" -- focus on blockers')
+        assert f.skill == "my-sprint-skill"
+        assert f.repo == "Q4 Roadmap"
+        assert f.instructions == "focus on blockers"
+
+    def test_single_quoted_arg(self):
+        """Single-quoted multi-word arg is also handled correctly."""
+        f = parse_skill_flags("my-sprint-skill 'Sprint 203' --branch main")
+        assert f.skill == "my-sprint-skill"
+        assert f.repo == "Sprint 203"
+        assert f.branch == "main"
+
+    def test_unmatched_quote_falls_back_to_split(self):
+        """Malformed quotes fall back to whitespace split without raising."""
+        f = parse_skill_flags('my-sprint-skill "broken --branch main')
+        assert f.skill == "my-sprint-skill"
+        assert f.branch == "main"
+        # No crash — graceful fallback

@@ -563,14 +563,14 @@ def test_skills_invoked_deduplicates_primary_skill(mock_popen, tmp_path, capsys,
 @patch("scripts.common.claude_runner.subprocess.Popen")
 def test_result_output_skills_used_none_replaced_with_primary(mock_popen, tmp_path, isolated_known_skills):
     """When Claude writes SKILLS_USED: none, result.output is rewritten with primary skill."""
-    isolated_known_skills.add("edge-ac-writer")
+    isolated_known_skills.add("ygs-analyze")
     mock_popen.return_value = _make_proc([
         'AC content here.\n',
         'SKILLS_USED: none\n',
         '{"status":"DONE"}\n',
     ])
-    result = run_claude("write ACs", working_dir=tmp_path, primary_skill="edge-ac-writer")
-    assert "SKILLS_USED: edge-ac-writer" in result.output
+    result = run_claude("write ACs", working_dir=tmp_path, primary_skill="ygs-analyze")
+    assert "SKILLS_USED: ygs-analyze" in result.output
     assert "SKILLS_USED: none" not in result.output
 
 
@@ -664,12 +664,12 @@ def test_inventory_header_rewritten_when_primary_skill_set(mock_popen, tmp_path,
     """With primary_skill set, 'Use the most applicable skill' must not appear in the system prompt."""
     from scripts.common.claude_runner import _SKILLS_PICK_HEADER
     mock_popen.return_value = _make_proc(['{"status":"DONE"}\n'])
-    run_claude("prompt", working_dir=tmp_path, primary_skill="edge-ac-writer")
+    run_claude("prompt", working_dir=tmp_path, primary_skill="ygs-analyze")
     cmd = mock_popen.call_args.args[0]
     sp = cmd[cmd.index("--system-prompt") + 1]
     assert _SKILLS_PICK_HEADER not in sp, "pick-skill header must be replaced when primary_skill is set"
     assert "sub-skills" in sp
-    assert "edge-ac-writer" in sp
+    assert "ygs-analyze" in sp
 
 
 @patch("scripts.common.claude_runner.subprocess.Popen")

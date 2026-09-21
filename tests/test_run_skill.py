@@ -260,13 +260,13 @@ from scripts.adhoc.run_skill import _build_prompt
 
 def test_build_prompt_with_skill_md_has_mandatory_directive():
     """When a real SKILL.md is loaded, the prompt must open with a MANDATORY directive."""
-    prompt = _build_prompt("edge-ac-writer", "CRIBL-44993 --dry-run", "# AC Writer protocol")
+    prompt = _build_prompt("ygs-analyze", "TICKET-123 --dry-run", "# Skill protocol")
     assert "MANDATORY" in prompt
-    assert "edge-ac-writer" in prompt
-    assert "# AC Writer protocol" in prompt
+    assert "ygs-analyze" in prompt
+    assert "# Skill protocol" in prompt
     # Directive must appear before the skill body, not buried after it
     mandatory_pos = prompt.index("MANDATORY")
-    skill_header_pos = prompt.index("## Skill: edge-ac-writer")
+    skill_header_pos = prompt.index("## Skill: ygs-analyze")
     assert mandatory_pos < skill_header_pos
 
 
@@ -294,6 +294,6 @@ def test_build_prompt_mandatory_names_the_skill():
 
 def test_build_prompt_request_section_preserved():
     """The ## Request section must contain the caller's prompt text."""
-    prompt = _build_prompt("some-skill", "CRIBL-99999 --dry-run", "# skill body")
+    prompt = _build_prompt("some-skill", "ISSUE-99999 --dry-run", "# skill body")
     assert "## Request" in prompt
-    assert "CRIBL-99999 --dry-run" in prompt
+    assert "ISSUE-99999 --dry-run" in prompt

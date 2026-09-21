@@ -28,6 +28,7 @@ Passthrough mode (any unrecognized --flag detected):
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 
 
@@ -134,14 +135,25 @@ def parse_skill_flags(raw: str) -> SkillFlags:
         remaining = "".join(c if i not in consumed else " " for i, c in enumerate(rest)).strip()
 
     # Passthrough mode: unknown --flags present → treat remainder as instructions verbatim.
+    # Use shlex to unquote any quoted tokens (e.g. "Sprint 203" → Sprint 203) so the
+    # skill receives clean text rather than shell-quoting artefacts.
     if _UNKNOWN_FLAG_RE.search(remaining):
         if remaining:
-            flags.instructions = f"{remaining} {flags.instructions}".strip() if flags.instructions else remaining
+            try:
+                cleaned = " ".join(shlex.split(remaining))
+            except ValueError:
+                cleaned = remaining
+            flags.instructions = f"{cleaned} {flags.instructions}".strip() if flags.instructions else cleaned
         return flags
 
     # Positional shorthand: first non-numeric → repo, first numeric → identifier.
+    # Use shlex so quoted multi-word tokens (e.g. "Sprint 203") count as one token.
+    try:
+        pos_tokens = shlex.split(remaining)
+    except ValueError:
+        pos_tokens = remaining.split()
     extra_words: list[str] = []
-    for token in remaining.split():
+    for token in pos_tokens:
         if token == "--":
             continue
         if _NUMERIC.match(token) and not flags.identifier:

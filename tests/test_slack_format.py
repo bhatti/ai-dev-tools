@@ -79,7 +79,7 @@ class TestStripSectionHeading:
         assert strip_section_heading(text) == "• item1\n• item2"
 
     def test_strips_risk_report_with_sprint_info(self):
-        text = "# Risk Report — DistMgmt Sprint 202 — 2026-09-18\n• item1"
+        text = "# Risk Report — Team Sprint 202 — 2026-09-18\n• item1"
         assert strip_section_heading(text) == "• item1"
 
     def test_strips_risk_report_h4(self):
