@@ -252,6 +252,15 @@ def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
 
 _PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
 _PR_CI_EMOJI = {"success": "✅", "failure": "❌", "pending": "⏳", "none": ""}
+_PR_GROUP_BADGE = {
+    "CI FAILING": "🔴",
+    "READY TO MERGE": "✅",
+    "APPROVED — WAITING ON CI": "⏳",
+    "APPROVED (1 review)": "👍",
+    "STALE / AT RISK (>5d)": "⚠️",
+    "NEEDS REVIEW (>1d)": "🔔",
+    "IN REVIEW": "👀",
+}
 _PR_GROUP_ORDER = [
     "CI FAILING",
     "READY TO MERGE",
@@ -261,6 +270,29 @@ _PR_GROUP_ORDER = [
     "NEEDS REVIEW (>1d)",
     "IN REVIEW",
 ]
+
+
+def _pr_group(pr: dict) -> str:
+    """Classify a PR dict into one of the _PR_GROUP_ORDER groups."""
+    ci = pr.get("ci_status", "none")
+    # approval_count preferred; fall back to len(approved_by) for backward compat
+    n = pr.get("approval_count")
+    if n is None:
+        n = len(pr.get("approved_by") or [])
+    days = pr.get("age_days", 0)
+    if ci == "failure":
+        return "CI FAILING"
+    if n >= 2 and ci in ("success", "none"):
+        return "READY TO MERGE"
+    if n >= 2 and ci == "pending":
+        return "APPROVED — WAITING ON CI"
+    if n >= 1:
+        return "APPROVED (1 review)"
+    if days > 5:
+        return "STALE / AT RISK (>5d)"
+    if days > 1:
+        return "NEEDS REVIEW (>1d)"
+    return "IN REVIEW"
 
 
 def build_pr_blocks(title: str, pr_data: dict) -> list:
@@ -281,30 +313,9 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "_No open PRs found._"}})
         return blocks
 
-    def _group(pr: dict) -> str:
-        ci = pr.get("ci_status", "none")
-        # approval_count preferred; fall back to len(approved_by) for backward compat
-        n = pr.get("approval_count")
-        if n is None:
-            n = len(pr.get("approved_by") or [])
-        days = pr.get("age_days", 0)
-        if ci == "failure":
-            return "CI FAILING"
-        if n >= 2 and ci in ("success", "none"):
-            return "READY TO MERGE"
-        if n >= 2 and ci == "pending":
-            return "APPROVED — WAITING ON CI"
-        if n >= 1:
-            return "APPROVED (1 review)"
-        if days > 5:
-            return "STALE / AT RISK (>5d)"
-        if days > 1:
-            return "NEEDS REVIEW (>1d)"
-        return "IN REVIEW"
-
     grouped: dict[str, list] = {g: [] for g in _PR_GROUP_ORDER}
     for pr in prs:
-        grouped[_group(pr)].append(pr)
+        grouped[_pr_group(pr)].append(pr)
 
     for group_name in _PR_GROUP_ORDER:
         group_prs = grouped[group_name]
@@ -509,6 +520,64 @@ def _upload_html_to_formicary(config: dict, html: str, filename: str) -> str | N
     return None
 
 
+def upload_html_report(config: dict, html_content: str, filename: str,
+                       thread_ts: str | None, task_type: str = "run",
+                       channel: str | None = None) -> bool:
+    """Upload HTML to Slack as a file; post an artifact fallback link on failure.
+
+    Called after the main Slack message is already posted.  `thread_ts` is the
+    ts to reply to (the original thread or the new message's ts).
+
+    Primary path: upload `html_content` as a Slack file (requires files:write scope).
+    Fallback when upload fails: post a direct formicary download link, or a by-job
+    artifact endpoint link as last resort.
+
+    Returns True if the HTML was uploaded or a fallback link was posted.
+    """
+    import os
+    import tempfile
+    from scripts.common.slack_format import build_artifact_links
+
+    if not html_content:
+        return False
+
+    tmp_path: str | None = None
+    upload_ok = False
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w",
+                                        encoding="utf-8") as fh:
+            tmp_path = fh.name  # set before write so finally can unlink on IOError
+            fh.write(html_content)
+        upload_ok = upload_file(config, tmp_path, filename,
+                                channel=channel, thread_ts=thread_ts)
+        if not upload_ok:
+            print(f"[slack] WARNING: HTML upload failed for '{filename}' — "
+                  f"check bot has files:write scope and is in the channel", flush=True)
+    except Exception as e:
+        print(f"[slack] HTML upload error for '{filename}' (non-fatal): {e}", flush=True)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    if not upload_ok:
+        direct_url = _upload_html_to_formicary(config, html_content, filename)
+        by_job_url, job_link = build_artifact_links(config, task_type, filename)
+        if direct_url and job_link:
+            fallback_text = f"📎 Full report: <{direct_url}|{filename}>  |  <{job_link}|All artifacts>"
+        elif by_job_url:
+            fallback_text = f"📎 Full report: <{by_job_url}|View {filename}>  |  <{job_link}|All artifacts>"
+        else:
+            fallback_text = None
+        if fallback_text:
+            _post_message_ts(config, fallback_text, channel=channel, thread_ts=thread_ts)
+        return bool(fallback_text)
+
+    return True
+
+
 def post_report(config: dict, slack_text: str, md_text: str,
                 title: str, filename: str,
                 thread_ts: str | None = None,
@@ -531,57 +600,20 @@ def post_report(config: dict, slack_text: str, md_text: str,
                      Used in the fallback link to select the correct task's artifact zip.
     """
     from scripts.common.report_renderer import render_simple_html
-    import tempfile, os
 
     msg_ts = _post_message_ts(config, slack_text, channel=channel, thread_ts=thread_ts)
     if not msg_ts:
         return False
 
-    # Thread the HTML to whichever ts is the conversation anchor
-    upload_thread_ts = thread_ts or msg_ts
-
-    # Render HTML once; reuse for both Slack upload and formicary fallback
     html: str = ""
     try:
         html = render_simple_html(title, md_text)
     except Exception as e:
         print(f"[slack] HTML render error for '{filename}' (non-fatal): {e}", flush=True)
 
-    upload_ok = False
     if html:
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w",
-                                            encoding="utf-8") as fh:
-                fh.write(html)
-                tmp_path = fh.name
-            try:
-                upload_ok = upload_file(config, tmp_path, filename,
-                                        channel=channel, thread_ts=upload_thread_ts)
-                if not upload_ok:
-                    print(f"[slack] WARNING: HTML upload failed for '{filename}' — "
-                          f"check bot has files:write scope and is in the channel", flush=True)
-            finally:
-                os.unlink(tmp_path)
-        except Exception as e:
-            print(f"[slack] HTML upload error for '{filename}' (non-fatal): {e}", flush=True)
-
-    # Fallback: post direct artifact links when Slack file upload fails.
-    # Try uploading HTML to formicary for a stable SHA256-based URL first;
-    # otherwise use the by-job endpoint with task filter to extract the file.
-    if not upload_ok:
-        from scripts.common.slack_format import build_artifact_links
-        direct_url = _upload_html_to_formicary(config, html, filename) if html else None
-        by_job_url, job_link = build_artifact_links(config, task_type, filename)
-        if direct_url and job_link:
-            fallback_text = f"📎 Full report: <{direct_url}|{filename}>  |  <{job_link}|All artifacts>"
-        elif by_job_url:
-            fallback_text = f"📎 Full report: <{by_job_url}|View {filename}>  |  <{job_link}|All artifacts>"
-        else:
-            fallback_text = None
-        if fallback_text:
-            _post_message_ts(config, fallback_text, channel=channel,
-                             thread_ts=upload_thread_ts)
-
+        upload_html_report(config, html, filename, thread_ts=thread_ts or msg_ts,
+                           task_type=task_type, channel=channel)
     return True
 
 

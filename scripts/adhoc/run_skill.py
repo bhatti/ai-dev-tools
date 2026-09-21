@@ -26,7 +26,11 @@ import requests
 
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills, _KNOWN_SKILLS
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
-from scripts.standup.slack_client import build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify
+from scripts.standup.slack_client import (
+    build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
+    upload_html_report,
+    _PR_GROUP_ORDER, _PR_CI_EMOJI, _PR_PRIORITY_EMOJI, _PR_GROUP_BADGE, _pr_group,
+)
 
 # Maximum chars of Claude output to post back to Slack
 _MAX_SLACK_CHARS = 12000
@@ -165,6 +169,89 @@ def _strip_for_slack(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
+
+
+def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
+    """Convert pr_queue.json data to a Markdown report with tables and status badges."""
+    prs: list[dict] = pr_data.get("prs", [])
+    lines = [f"# {title}", ""]
+
+    if not prs:
+        lines.append("_No open PRs found._")
+        return "\n".join(lines)
+
+    grouped: dict[str, list] = {g: [] for g in _PR_GROUP_ORDER}
+    for pr in prs:
+        grouped[_pr_group(pr)].append(pr)
+
+    # Summary overview table
+    lines += ["## Overview", ""]
+    lines += ["| Status | Count |", "|--------|-------|"]
+    for group_name in _PR_GROUP_ORDER:
+        count = len(grouped[group_name])
+        badge = _PR_GROUP_BADGE.get(group_name, "")
+        lines.append(f"| {badge} {group_name} | {count} |")
+    lines += ["", "---", ""]
+
+    # Per-group tables
+    for group_name in _PR_GROUP_ORDER:
+        group_prs = grouped[group_name]
+        if not group_prs:
+            continue
+        badge = _PR_GROUP_BADGE.get(group_name, "")
+        lines += [f"## {badge} {group_name} ({len(group_prs)})", ""]
+        lines += ["| CI | PR | Jira | Author | Age | Priority | Title | Reviewers |",
+                  "|----|-----|------|--------|-----|----------|-------|-----------|"]
+        for pr in group_prs:
+            pr_url = pr.get("url", "")
+            pr_num = pr_url.rstrip("/").split("/")[-1] if pr_url else pr.get("id", "?")
+            jira_key = pr.get("jira_key", "")
+            jira_url = pr.get("jira_url", "")
+            pr_title = (pr.get("jira_summary") or pr.get("title") or "(no title)").replace("|", "\\|").replace("\n", " ")[:60]
+            author = (pr.get("author") or "?").split()[0]
+            days = pr.get("age_days", 0)
+            approved_by = pr.get("approved_by") or []
+            pending_reviewers = pr.get("reviewers") or []
+            ci_icon = _PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
+            priority = (pr.get("priority") or "").strip()
+            priority_badge = _PR_PRIORITY_EMOJI.get(priority.lower(), "")
+
+            pr_cell = f"[PR #{pr_num}]({pr_url})" if pr_url else f"PR #{pr_num}"
+            jira_cell = f"[{jira_key}]({jira_url})" if jira_url and jira_key else (jira_key or "—")
+            priority_cell = f"{priority_badge} {priority}".strip() if priority else "—"
+
+            reviewer_parts: list[str] = []
+            if approved_by:
+                reviewer_parts.append("✅ " + ", ".join("@" + n.split()[0] for n in approved_by[:3]))
+            if pending_reviewers:
+                reviewer_parts.append("🔔 " + ", ".join("@" + n.split()[0] for n in pending_reviewers[:4]))
+            reviewer_cell = ";  ".join(reviewer_parts) if reviewer_parts else "—"
+
+            lines.append(f"| {ci_icon} | {pr_cell} | {jira_cell} | @{author} | {days}d"
+                         f" | {priority_cell} | {pr_title} | {reviewer_cell} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _write_pr_queue_report(config: dict, workspace, pr_data: dict, title: str,
+                           thread_ts: str | None) -> None:
+    """Write reports/report.md + reports/report.html and upload HTML to Slack."""
+    from scripts.common.report_renderer import render_simple_html
+
+    md_report = _pr_queue_to_markdown(pr_data, title)
+    reports_dir = workspace / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    html_content = render_simple_html(title, md_report)
+    (reports_dir / "report.md").write_text(md_report, encoding="utf-8")
+    (reports_dir / "report.html").write_text(html_content, encoding="utf-8")
+    (reports_dir / "result.json").write_text(
+        json.dumps({"status": "DONE", "pr_count": pr_data.get("pr_count", 0)}, indent=2),
+        encoding="utf-8",
+    )
+    print("[adhoc] wrote reports/report.md + reports/report.html", flush=True)
+    upload_html_report(config, html_content, "pr_queue_report.html",
+                       thread_ts=thread_ts, task_type="run")
 
 
 _TRACKER_SKILLS = {"ygs-risk-scan", "ygs-standup", "ygs-pr-queue"}
@@ -532,14 +619,21 @@ def main(skill: str, prompt_text: str) -> None:
         # Build and post Block Kit directly — skip Claude for pr-queue
         from datetime import date as _date
         sprint = pr_queue_data.get("sprint", "")
-        title = f"PR Queue — {sprint} — {_date.today().isoformat()}" if sprint else f"PR Queue — {_date.today().isoformat()}"
+        today_str = _date.today().isoformat()
+        title = f"PR Queue — {sprint} — {today_str}" if sprint else f"PR Queue — {today_str}"
         blocks = build_pr_blocks(title, pr_queue_data)
         pr_count = pr_queue_data.get("pr_count", 0)
         fallback_text = f"PR Queue — {pr_count} open PR(s) in {sprint}" if sprint else f"PR Queue — {pr_count} open PR(s)"
         try:
             slack_notify(config, fallback_text, blocks=blocks)
         except Exception as _se:
-            print(f"[adhoc] WARNING: Slack post failed (non-fatal): {_se}", flush=True)
+            print(f"[adhoc] WARNING: Slack block post failed (non-fatal): {_se}", flush=True)
+
+        thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
+        try:
+            _write_pr_queue_report(config, workspace, pr_queue_data, title, thread_ts)
+        except Exception as _re:
+            print(f"[adhoc] WARNING: could not write/upload PR queue report: {_re}", flush=True)
 
         status_data = {
             "status": "DONE",
@@ -676,6 +770,18 @@ def main(skill: str, prompt_text: str) -> None:
             slack_notify(config, f"✅ `/{skill}` complete. {summary}")
     except Exception as _se:
         print(f"[adhoc] WARNING: Slack post failed (non-fatal): {_se}", flush=True)
+
+    # Upload HTML report (if written) as a Slack file and/or artifact link.
+    _html_report_path = workspace / "reports" / "report.html"
+    if _html_report_path.exists():
+        try:
+            _thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
+            _report_filename = f"{skill.replace('ygs-', '')}_report.html"
+            _html_content = _html_report_path.read_text(encoding="utf-8")
+            upload_html_report(config, _html_content, _report_filename,
+                               thread_ts=_thread_ts, task_type="run")
+        except Exception as _ue:
+            print(f"[adhoc] WARNING: HTML report upload failed (non-fatal): {_ue}", flush=True)
 
     print(f"[adhoc] status={status_data.get('status')}", flush=True)
     # Re-emit with final resolved model (may differ from config if AI_MODEL_OVERRIDE was used).

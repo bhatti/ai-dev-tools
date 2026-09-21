@@ -7,9 +7,10 @@ import pytest
 import scripts.standup.slack_client as _sc
 from scripts.standup.slack_client import (
     build_issue_blocks, build_mrkdwn_blocks, build_pr_blocks,
-    get_standup_messages, notify, post_message, post_report,
-    resolve_channel_id, upload_file,
+    get_standup_messages, notify, post_message, post_report, upload_html_report,
+    resolve_channel_id, upload_file, _pr_group,
 )
+from scripts.adhoc.run_skill import _pr_queue_to_markdown
 
 
 @pytest.fixture(autouse=True)
@@ -649,3 +650,174 @@ def test_post_report_no_fallback_when_no_job_id(mock_post, mock_render, mock_upl
 
     # Only 1 post call (the main text message) — no fallback
     assert mock_post.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# _pr_group — module-level grouping logic (shared by Slack blocks + Markdown)
+# ---------------------------------------------------------------------------
+
+def test_pr_group_ci_failure_overrides_approvals():
+    pr = {"ci_status": "failure", "approval_count": 2, "age_days": 0}
+    assert _pr_group(pr) == "CI FAILING"
+
+
+def test_pr_group_ready_to_merge_two_approvals():
+    assert _pr_group({"ci_status": "success", "approval_count": 2}) == "READY TO MERGE"
+    assert _pr_group({"ci_status": "none", "approval_count": 2}) == "READY TO MERGE"
+
+
+def test_pr_group_approved_waiting_on_ci():
+    assert _pr_group({"ci_status": "pending", "approval_count": 2}) == "APPROVED — WAITING ON CI"
+
+
+def test_pr_group_one_approval():
+    assert _pr_group({"ci_status": "none", "approval_count": 1, "age_days": 0}) == "APPROVED (1 review)"
+
+
+def test_pr_group_stale():
+    assert _pr_group({"ci_status": "none", "approval_count": 0, "age_days": 6}) == "STALE / AT RISK (>5d)"
+
+
+def test_pr_group_needs_review():
+    assert _pr_group({"ci_status": "none", "approval_count": 0, "age_days": 2}) == "NEEDS REVIEW (>1d)"
+
+
+def test_pr_group_in_review():
+    assert _pr_group({"ci_status": "none", "approval_count": 0, "age_days": 1}) == "IN REVIEW"
+
+
+def test_pr_group_fallback_approved_by_list():
+    """Falls back to len(approved_by) when approval_count is absent."""
+    pr = {"approved_by": ["Alice", "Bob"], "age_days": 0}
+    assert _pr_group(pr) == "READY TO MERGE"
+
+
+# ---------------------------------------------------------------------------
+# upload_html_report
+# ---------------------------------------------------------------------------
+
+@patch("scripts.standup.slack_client.upload_file", return_value=True)
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_html_report_success(mock_post, mock_upload, config_with_slack):
+    """Returns True and calls upload_file when html_content is provided."""
+    ok = upload_html_report(config_with_slack, "<html>hi</html>", "report.html",
+                            thread_ts="1700000001.000001")
+    assert ok is True
+    assert mock_upload.call_count == 1
+    _, upload_kwargs = mock_upload.call_args
+    assert upload_kwargs.get("thread_ts") == "1700000001.000001"
+
+
+def test_upload_html_report_empty_content(config_with_slack):
+    """Returns False immediately when html_content is empty — no upload attempted."""
+    ok = upload_html_report(config_with_slack, "", "report.html", thread_ts=None)
+    assert ok is False
+
+
+@patch("scripts.standup.slack_client._upload_html_to_formicary",
+       return_value="https://formicary.example.com/dashboard/artifacts/abc/download")
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_html_report_fallback_to_formicary(mock_post, mock_upload, mock_fmc, config_with_slack):
+    """Falls back to formicary link when Slack upload fails."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000002.000001"})
+    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+              "FORMICARY_TOKEN": "tok", "JOB_ID": "job-1"}
+    ok = upload_html_report(config, "<html/>", "report.html", thread_ts="1700000001.0")
+    assert ok is True
+    assert mock_post.call_count == 1
+    fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
+    assert "dashboard/artifacts/abc/download" in fallback_text
+
+
+@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_html_report_fallback_to_by_job_link(mock_post, mock_upload, mock_fmc, config_with_slack):
+    """Falls back to by-job link when formicary upload also fails."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000003.000001"})
+    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+              "JOB_ID": "job-2"}
+    ok = upload_html_report(config, "<html/>", "report.html",
+                            thread_ts="1700000001.0", task_type="run")
+    assert ok is True
+    fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
+    assert "by-job" in fallback_text
+    assert "task=run" in fallback_text
+
+
+# ---------------------------------------------------------------------------
+# _pr_queue_to_markdown — table format, badges
+# ---------------------------------------------------------------------------
+
+_PR_DATA_SAMPLE = {
+    "sprint": "Dev Sprint 3",
+    "pr_count": 2,
+    "prs": [
+        {
+            "url": "https://github.com/org/repo/pull/42",
+            "jira_key": "PROJ-100",
+            "jira_url": "https://org.atlassian.net/browse/PROJ-100",
+            "jira_summary": "Fix auth bug",
+            "author": "Alice Smith",
+            "age_days": 2,
+            "approved_by": ["Bob Jones", "Carol Lee"],
+            "reviewers": [],
+            "ci_status": "success",
+            "approval_count": 2,
+        },
+        {
+            "url": "https://github.com/org/repo/pull/10",
+            "jira_key": "PROJ-200",
+            "jira_summary": "Old work",
+            "author": "Dave",
+            "age_days": 8,
+            "approved_by": [],
+            "reviewers": ["Eve"],
+            "ci_status": "none",
+            "approval_count": 0,
+            "priority": "High",
+        },
+    ],
+}
+
+
+def test_pr_queue_to_markdown_has_overview_table():
+    md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue — Dev Sprint 3 — 2026-09-21")
+    assert "## Overview" in md
+    assert "| Status | Count |" in md
+    # All groups appear in overview table
+    assert "CI FAILING" in md
+    assert "READY TO MERGE" in md
+
+
+def test_pr_queue_to_markdown_group_section_has_badge():
+    md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
+    # READY TO MERGE group should have ✅ badge in section heading
+    assert "✅ READY TO MERGE" in md
+    # STALE group for PR with age_days=8
+    assert "⚠️ STALE / AT RISK" in md
+
+
+def test_pr_queue_to_markdown_pr_rows_have_links():
+    md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
+    assert "[PR #42](https://github.com/org/repo/pull/42)" in md
+    assert "[PROJ-100](https://org.atlassian.net/browse/PROJ-100)" in md
+
+
+def test_pr_queue_to_markdown_priority_badge():
+    md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
+    assert "🟠" in md  # High priority badge for PROJ-200
+
+
+def test_pr_queue_to_markdown_reviewer_badges():
+    md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
+    # Approved PR should show ✅ for approved reviewers
+    assert "✅ @Bob" in md
+    # Stale PR should show 🔔 for pending reviewers
+    assert "🔔 @Eve" in md
+
+
+def test_pr_queue_to_markdown_empty():
+    md = _pr_queue_to_markdown({"prs": [], "sprint": ""}, "PR Queue")
+    assert "_No open PRs found._" in md
