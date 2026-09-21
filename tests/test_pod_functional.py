@@ -3043,6 +3043,96 @@ def test_29_skill_node_image(base_env: dict[str, str]) -> TestResult:
                  f"elapsed={run_step.elapsed:.0f}s")
 
 
+def test_30_adhoc_pr_queue_report(base_env: dict[str, str]) -> TestResult:
+    """Run run_skill.py with ygs-pr-queue using a pre-built pr_queue.json (no GitHub/Jira needed).
+
+    Verifies:
+      1. Exit 0
+      2. reports/report.md written with PR table content
+      3. reports/report.html written with HTML content
+      4. reports/result.json has status=DONE and pr_count
+      5. With FORMICARY_PUBLIC_URL + JOB_ID set, the artifact link is attempted
+         (visible in stdout as the "📎 Full report" or upload fallback log lines)
+    """
+    result = TestResult("adhoc-pr-queue-report")
+    env = dict(base_env)
+    ws = "/workspace/adhoc_pr_queue"
+    env["WORKSPACE_DIR"] = ws
+    env["SLACK_CHANNEL"] = "dev"
+    env["FORMICARY_PUBLIC_URL"] = "https://formicary.example.com"
+    env["JOB_ID"] = "test-job-999"
+    env["JOB_TYPE"] = "ai-adhoc"
+    # No real Slack token so upload_file fails → fallback link path is exercised
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    # Minimal pr_queue.json — one PR in READY TO MERGE group
+    pr_queue_json = (
+        '{"sprint":"Test Sprint 1","pr_count":1,"prs":[{'
+        '"url":"https://github.com/org/repo/pull/42",'
+        '"jira_key":"TEST-1","jira_summary":"Fix bug",'
+        '"author":"Alice","age_days":1,'
+        '"approved_by":["Bob"],"reviewers":[],'
+        '"ci_status":"success","approval_count":1}]}'
+    )
+
+    with pod_fixture("adhoc-pr-queue") as pod:
+        setup_step = exec_step(
+            pod, "setup-pr-queue",
+            f"mkdir -p {ws}/reports {ws}/logs && "
+            f"echo '{pr_queue_json}' > {ws}/pr_queue.json",
+            env, timeout=30,
+        )
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        run_step = exec_step(
+            pod, "run-pr-queue",
+            f"python3 -m scripts.adhoc.run_skill --skill ygs-pr-queue --prompt 'show prs'",
+            env, timeout=60,
+        )
+        result.steps.append(run_step)
+        if not run_step.ok:
+            return _fail(result, run_step, f"run_skill exit {run_step.returncode}: {run_step.stderr[-300:]}")
+
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"md = os.path.join(ws, 'reports', 'report.md')\n"
+            f"if not os.path.exists(md): issues.append('reports/report.md missing')\n"
+            f"else:\n"
+            f"    content = open(md).read()\n"
+            f"    if 'Fix bug' not in content: issues.append('PR title not in report.md')\n"
+            f"    if '| CI |' not in content: issues.append('table header missing in report.md')\n"
+            f"    print(f'::add-task-context REPORT_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"html = os.path.join(ws, 'reports', 'report.html')\n"
+            f"if not os.path.exists(html): issues.append('reports/report.html missing')\n"
+            f"else: print(f'::add-task-context REPORT_HTML_BYTES::{{os.path.getsize(html)}}')\n"
+            f"rj = os.path.join(ws, 'reports', 'result.json')\n"
+            f"if not os.path.exists(rj): issues.append('reports/result.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(rj).read())\n"
+            f"    if d.get('status') != 'DONE': issues.append(f'status={{d.get(\"status\")}}')\n"
+            f"    print(f'::add-task-context PR_COUNT::{{d.get(\"pr_count\",\"?\")}}')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"print('::add-task-context VERIFY::ok')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-pr-queue", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"verification failed: {verify_step.stderr[-300:]}")
+
+    md_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    html_bytes = verify_step.context.get("REPORT_HTML_BYTES", "?")
+    pr_count = verify_step.context.get("PR_COUNT", "?")
+    return _pass(result, f"report.md={md_bytes}B html={html_bytes}B pr_count={pr_count}")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -3075,6 +3165,7 @@ ALL_TESTS: dict[str, callable] = {
     "skill-e2e-identifier":   test_27_skill_e2e_with_identifier,
     "skill-post":             test_28_skill_post,
     "skill-node-image":       test_29_skill_node_image,
+    "adhoc-pr-queue-report":  test_30_adhoc_pr_queue_report,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

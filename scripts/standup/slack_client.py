@@ -10,7 +10,9 @@ Bot scopes needed: channels:history, channels:read, groups:history, groups:read,
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -133,7 +135,6 @@ def upload_file(config: dict, file_path: str, filename: str, channel: str | None
         print("[slack] SLACK_BOT_TOKEN not set — cannot upload file", flush=True)
         return False
 
-    import os
     file_size = os.path.getsize(file_path)
 
     # Step 1: request an upload URL
@@ -250,9 +251,9 @@ def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
     return blocks
 
 
-_PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
-_PR_CI_EMOJI = {"success": "✅", "failure": "❌", "pending": "⏳", "none": ""}
-_PR_GROUP_BADGE = {
+PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
+PR_CI_EMOJI = {"success": "✅", "failure": "❌", "pending": "⏳", "none": ""}
+PR_GROUP_BADGE = {
     "CI FAILING": "🔴",
     "READY TO MERGE": "✅",
     "APPROVED — WAITING ON CI": "⏳",
@@ -261,7 +262,7 @@ _PR_GROUP_BADGE = {
     "NEEDS REVIEW (>1d)": "🔔",
     "IN REVIEW": "👀",
 }
-_PR_GROUP_ORDER = [
+PR_GROUP_ORDER = [
     "CI FAILING",
     "READY TO MERGE",
     "APPROVED — WAITING ON CI",
@@ -272,8 +273,8 @@ _PR_GROUP_ORDER = [
 ]
 
 
-def _pr_group(pr: dict) -> str:
-    """Classify a PR dict into one of the _PR_GROUP_ORDER groups."""
+def pr_group(pr: dict) -> str:
+    """Classify a PR dict into one of the PR_GROUP_ORDER groups."""
     ci = pr.get("ci_status", "none")
     # approval_count preferred; fall back to len(approved_by) for backward compat
     n = pr.get("approval_count")
@@ -313,11 +314,11 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "_No open PRs found._"}})
         return blocks
 
-    grouped: dict[str, list] = {g: [] for g in _PR_GROUP_ORDER}
+    grouped: dict[str, list] = {g: [] for g in PR_GROUP_ORDER}
     for pr in prs:
-        grouped[_pr_group(pr)].append(pr)
+        grouped[pr_group(pr)].append(pr)
 
-    for group_name in _PR_GROUP_ORDER:
+    for group_name in PR_GROUP_ORDER:
         group_prs = grouped[group_name]
         if not group_prs:
             continue
@@ -335,14 +336,14 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
             days = pr.get("age_days", 0)
             approved_by = pr.get("approved_by") or []
             pending = pr.get("reviewers") or []
-            ci_icon = _PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
+            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
 
             # Build clickable links
             jira_link = f"<{jira_url}|{jira_key}>" if jira_url and jira_key else jira_key
             pr_link = f"<{pr_url}|PR #{pr_num}>" if pr_url and pr_num else f"PR #{pr_num}"
 
             priority = (pr.get("priority") or "").strip()
-            priority_emoji = _PR_PRIORITY_EMOJI.get(priority.lower(), "")
+            priority_emoji = PR_PRIORITY_EMOJI.get(priority.lower(), "")
             labels = [l for l in (pr.get("labels") or []) if isinstance(l, str) and l and len(l) <= 25][:3]
 
             reviewer_info = ""
@@ -534,8 +535,6 @@ def upload_html_report(config: dict, html_content: str, filename: str,
 
     Returns True if the HTML was uploaded or a fallback link was posted.
     """
-    import os
-    import tempfile
     from scripts.common.slack_format import build_artifact_links
 
     if not html_content:
@@ -640,8 +639,6 @@ def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL",
 
 
 if __name__ == "__main__":
-    import os
-    import sys
     _config = dict(os.environ)
     _channel = _config.get("SLACK_CHANNEL", "")
     if not _channel:

@@ -8,9 +8,9 @@ import scripts.standup.slack_client as _sc
 from scripts.standup.slack_client import (
     build_issue_blocks, build_mrkdwn_blocks, build_pr_blocks,
     get_standup_messages, notify, post_message, post_report, upload_html_report,
-    resolve_channel_id, upload_file, _pr_group,
+    resolve_channel_id, upload_file, pr_group,
 )
-from scripts.adhoc.run_skill import _pr_queue_to_markdown
+from scripts.adhoc.run_skill import _pr_queue_to_markdown, _write_pr_queue_report
 
 
 @pytest.fixture(autouse=True)
@@ -658,38 +658,38 @@ def test_post_report_no_fallback_when_no_job_id(mock_post, mock_render, mock_upl
 
 def test_pr_group_ci_failure_overrides_approvals():
     pr = {"ci_status": "failure", "approval_count": 2, "age_days": 0}
-    assert _pr_group(pr) == "CI FAILING"
+    assert pr_group(pr) == "CI FAILING"
 
 
 def test_pr_group_ready_to_merge_two_approvals():
-    assert _pr_group({"ci_status": "success", "approval_count": 2}) == "READY TO MERGE"
-    assert _pr_group({"ci_status": "none", "approval_count": 2}) == "READY TO MERGE"
+    assert pr_group({"ci_status": "success", "approval_count": 2}) == "READY TO MERGE"
+    assert pr_group({"ci_status": "none", "approval_count": 2}) == "READY TO MERGE"
 
 
 def test_pr_group_approved_waiting_on_ci():
-    assert _pr_group({"ci_status": "pending", "approval_count": 2}) == "APPROVED — WAITING ON CI"
+    assert pr_group({"ci_status": "pending", "approval_count": 2}) == "APPROVED — WAITING ON CI"
 
 
 def test_pr_group_one_approval():
-    assert _pr_group({"ci_status": "none", "approval_count": 1, "age_days": 0}) == "APPROVED (1 review)"
+    assert pr_group({"ci_status": "none", "approval_count": 1, "age_days": 0}) == "APPROVED (1 review)"
 
 
 def test_pr_group_stale():
-    assert _pr_group({"ci_status": "none", "approval_count": 0, "age_days": 6}) == "STALE / AT RISK (>5d)"
+    assert pr_group({"ci_status": "none", "approval_count": 0, "age_days": 6}) == "STALE / AT RISK (>5d)"
 
 
 def test_pr_group_needs_review():
-    assert _pr_group({"ci_status": "none", "approval_count": 0, "age_days": 2}) == "NEEDS REVIEW (>1d)"
+    assert pr_group({"ci_status": "none", "approval_count": 0, "age_days": 2}) == "NEEDS REVIEW (>1d)"
 
 
 def test_pr_group_in_review():
-    assert _pr_group({"ci_status": "none", "approval_count": 0, "age_days": 1}) == "IN REVIEW"
+    assert pr_group({"ci_status": "none", "approval_count": 0, "age_days": 1}) == "IN REVIEW"
 
 
 def test_pr_group_fallback_approved_by_list():
     """Falls back to len(approved_by) when approval_count is absent."""
     pr = {"approved_by": ["Alice", "Bob"], "age_days": 0}
-    assert _pr_group(pr) == "READY TO MERGE"
+    assert pr_group(pr) == "READY TO MERGE"
 
 
 # ---------------------------------------------------------------------------
@@ -821,3 +821,66 @@ def test_pr_queue_to_markdown_reviewer_badges():
 def test_pr_queue_to_markdown_empty():
     md = _pr_queue_to_markdown({"prs": [], "sprint": ""}, "PR Queue")
     assert "_No open PRs found._" in md
+
+
+def test_pr_queue_to_markdown_pipe_escaped():
+    """PR titles and Jira summaries with pipe chars must not break the table."""
+    data = {
+        "prs": [{
+            "url": "https://github.com/org/repo/pull/99",
+            "jira_summary": "Fix A | B regression",
+            "author": "Alice",
+            "age_days": 1,
+            "approved_by": [],
+            "reviewers": [],
+            "ci_status": "success",
+            "approval_count": 2,
+        }],
+    }
+    md = _pr_queue_to_markdown(data, "PR Queue")
+    # Each table row should have exactly 8 pipe separators (9 columns)
+    for line in md.splitlines():
+        if line.startswith("| ") and "Fix A" in line:
+            assert "\\|" in line, "Pipe in title should be escaped"
+
+
+# ---------------------------------------------------------------------------
+# _write_pr_queue_report — writes files + calls upload_html_report with task_type="run"
+# ---------------------------------------------------------------------------
+
+@patch("scripts.standup.slack_client.upload_file", return_value=False)
+@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
+@patch("scripts.standup.slack_client.requests.post")
+def test_write_pr_queue_report_artifact_link_uses_run_task_type(
+        mock_post, mock_fmc, mock_upload, tmp_path):
+    """_write_pr_queue_report must call upload_html_report with task_type='run'
+    so the fallback artifact link points to the run-task artifact zip."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1.0"})
+    config = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "dev",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "JOB_ID": "job-abc",
+    }
+    workspace = tmp_path
+    pr_data = {"prs": [], "pr_count": 0}
+    _write_pr_queue_report(config, workspace, pr_data, "PR Queue", thread_ts=None)
+    assert (tmp_path / "reports" / "report.md").exists()
+    assert (tmp_path / "reports" / "report.html").exists()
+    assert (tmp_path / "reports" / "result.json").exists()
+    # Fallback message must include task=run (build_artifact_links was called with task_type="run")
+    assert mock_post.called
+    fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
+    assert "task=run" in fallback_text
+    assert "pr_queue_report.html" in fallback_text
+
+
+def test_write_pr_queue_report_writes_result_json(tmp_path):
+    """result.json must contain status=DONE and pr_count."""
+    import json as _json
+    config: dict = {}
+    pr_data = {"prs": [], "pr_count": 5}
+    _write_pr_queue_report(config, tmp_path, pr_data, "PR Queue", thread_ts=None)
+    result = _json.loads((tmp_path / "reports" / "result.json").read_text())
+    assert result["status"] == "DONE"
+    assert result["pr_count"] == 5

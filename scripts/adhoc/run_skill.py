@@ -29,7 +29,7 @@ from scripts.common.config import get_workspace_dir, load_config, validate_claud
 from scripts.standup.slack_client import (
     build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
     upload_html_report,
-    _PR_GROUP_ORDER, _PR_CI_EMOJI, _PR_PRIORITY_EMOJI, _PR_GROUP_BADGE, _pr_group,
+    PR_GROUP_ORDER, PR_CI_EMOJI, PR_PRIORITY_EMOJI, PR_GROUP_BADGE, pr_group,
 )
 
 # Maximum chars of Claude output to post back to Slack
@@ -180,25 +180,25 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
         lines.append("_No open PRs found._")
         return "\n".join(lines)
 
-    grouped: dict[str, list] = {g: [] for g in _PR_GROUP_ORDER}
+    grouped: dict[str, list] = {g: [] for g in PR_GROUP_ORDER}
     for pr in prs:
-        grouped[_pr_group(pr)].append(pr)
+        grouped[pr_group(pr)].append(pr)
 
     # Summary overview table
     lines += ["## Overview", ""]
     lines += ["| Status | Count |", "|--------|-------|"]
-    for group_name in _PR_GROUP_ORDER:
+    for group_name in PR_GROUP_ORDER:
         count = len(grouped[group_name])
-        badge = _PR_GROUP_BADGE.get(group_name, "")
+        badge = PR_GROUP_BADGE.get(group_name, "")
         lines.append(f"| {badge} {group_name} | {count} |")
     lines += ["", "---", ""]
 
     # Per-group tables
-    for group_name in _PR_GROUP_ORDER:
+    for group_name in PR_GROUP_ORDER:
         group_prs = grouped[group_name]
         if not group_prs:
             continue
-        badge = _PR_GROUP_BADGE.get(group_name, "")
+        badge = PR_GROUP_BADGE.get(group_name, "")
         lines += [f"## {badge} {group_name} ({len(group_prs)})", ""]
         lines += ["| CI | PR | Jira | Author | Age | Priority | Title | Reviewers |",
                   "|----|-----|------|--------|-----|----------|-------|-----------|"]
@@ -212,9 +212,9 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
             days = pr.get("age_days", 0)
             approved_by = pr.get("approved_by") or []
             pending_reviewers = pr.get("reviewers") or []
-            ci_icon = _PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
+            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
             priority = (pr.get("priority") or "").strip()
-            priority_badge = _PR_PRIORITY_EMOJI.get(priority.lower(), "")
+            priority_badge = PR_PRIORITY_EMOJI.get(priority.lower(), "")
 
             pr_cell = f"[PR #{pr_num}]({pr_url})" if pr_url else f"PR #{pr_num}"
             jira_cell = f"[{jira_key}]({jira_url})" if jira_url and jira_key else (jira_key or "—")
