@@ -128,8 +128,6 @@ def _write_reports(workspace: Path, skill: str, output_text: str, status_data: d
     except Exception as e:
         print(f"[skill] WARNING: could not write reports/: {e}", flush=True)
 
-
-
 def _find_report_content(workspace: Path) -> str | None:
     """Check for report files written by Claude. Returns content or None."""
     candidates = [

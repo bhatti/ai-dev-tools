@@ -557,6 +557,59 @@ def test_skills_invoked_deduplicates_primary_skill(mock_popen, tmp_path, capsys,
 
 
 # ---------------------------------------------------------------------------
+# result.output SKILLS_USED rewrite — primary skill is always reflected in output
+# ---------------------------------------------------------------------------
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_result_output_skills_used_none_replaced_with_primary(mock_popen, tmp_path, isolated_known_skills):
+    """When Claude writes SKILLS_USED: none, result.output is rewritten with primary skill."""
+    isolated_known_skills.add("edge-ac-writer")
+    mock_popen.return_value = _make_proc([
+        'AC content here.\n',
+        'SKILLS_USED: none\n',
+        '{"status":"DONE"}\n',
+    ])
+    result = run_claude("write ACs", working_dir=tmp_path, primary_skill="edge-ac-writer")
+    assert "SKILLS_USED: edge-ac-writer" in result.output
+    assert "SKILLS_USED: none" not in result.output
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_result_output_skills_used_primary_prepended_to_sub_skills(mock_popen, tmp_path, isolated_known_skills):
+    """When Claude lists sub-skills but omits primary, primary is prepended in result.output."""
+    isolated_known_skills.update({"ygs-review-pr", "ygs-analyze"})
+    mock_popen.return_value = _make_proc([
+        'SKILLS_USED: ygs-analyze\n',
+        '{"status":"DONE"}\n',
+    ])
+    result = run_claude("review", working_dir=tmp_path, primary_skill="ygs-review-pr")
+    assert result.output.index("ygs-review-pr") < result.output.index("ygs-analyze")
+    assert result.output.count("ygs-review-pr") == 1
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_result_output_skills_used_unchanged_when_primary_already_listed(mock_popen, tmp_path, isolated_known_skills):
+    """When primary skill is already in SKILLS_USED, result.output is not duplicated."""
+    isolated_known_skills.add("ygs-review-pr")
+    mock_popen.return_value = _make_proc([
+        'SKILLS_USED: ygs-review-pr, ygs-analyze\n',
+        '{"status":"DONE"}\n',
+    ])
+    result = run_claude("review", working_dir=tmp_path, primary_skill="ygs-review-pr")
+    assert result.output.count("ygs-review-pr") == 1
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_result_output_unchanged_when_no_skills_used_line(mock_popen, tmp_path, isolated_known_skills):
+    """When there is no SKILLS_USED line at all, result.output is not modified."""
+    isolated_known_skills.add("ygs-ask")
+    original_output = 'Report content with no tracking line.\n{"status":"DONE"}\n'
+    mock_popen.return_value = _make_proc([original_output])
+    result = run_claude("query", working_dir=tmp_path, primary_skill="ygs-ask")
+    assert "SKILLS_USED" not in result.output
+
+
+# ---------------------------------------------------------------------------
 # _SKILLS_PICK_HEADER constant — contract test
 # Verifies the constant matches what ensure_ygs_skills() writes into _SKILLS_INVENTORY
 # so the .replace() in run_claude() is never a silent no-op.

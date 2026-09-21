@@ -449,6 +449,19 @@ class ClaudeResult:
     status: str = "UNKNOWN"
 
 
+def _rewrite_skills_used(text: str, skills: list) -> str:
+    """Rewrite the SKILLS_USED line so it reflects the actual skills list.
+
+    Claude writes "SKILLS_USED: none" when the primary skill was embedded in the
+    prompt rather than invoked via the Skill tool. Called after _hits is finalized
+    so the line in result.output matches the ::add-task-context SKILLS_INVOKED:: marker.
+    """
+    m = re.search(r'^SKILLS_USED:\s*.+$', text, re.MULTILINE)
+    if not m:
+        return text
+    return text[:m.start()] + f"SKILLS_USED: {', '.join(skills)}" + text[m.end():]
+
+
 def extract_status_json(output: str) -> dict:
     """Extract the last JSON object containing a 'status' key from output.
 
@@ -866,6 +879,8 @@ def run_claude(
         if primary_skill and primary_skill not in _hits:
             _hits = [primary_skill] + _hits
         print(f"::add-task-context SKILLS_INVOKED::{','.join(dict.fromkeys(_hits)) or 'none'}", flush=True)
+        if _hits:
+            full_output = _rewrite_skills_used(full_output, list(dict.fromkeys(_hits)))
 
     if exit_code != 0:
         # "Reached max turns" is a normal operating condition, not a hard error.
