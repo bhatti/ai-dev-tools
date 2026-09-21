@@ -209,7 +209,12 @@ _SKILL_FALLBACK_DESCRIPTIONS: dict[str, str] = {
 def _build_prompt(skill: str, prompt: str, skill_md: str | None,
                   sprint_team: list[str] | None = None) -> str:
     if skill_md:
-        skill_section = f"## Skill: {skill}\n\n{skill_md}"
+        skill_section = (
+            f"MANDATORY: Execute the `{skill}` skill protocol step-by-step as defined below. "
+            f"Do NOT invoke a different skill from the Available Skills list as a substitute — "
+            f"those are sub-tools you may call only when this protocol explicitly directs you to.\n\n"
+            f"## Skill: {skill}\n\n{skill_md}"
+        )
     elif skill in _SKILL_FALLBACK_DESCRIPTIONS:
         skill_section = f"## Skill: {skill}\n\n{_SKILL_FALLBACK_DESCRIPTIONS[skill]}"
     else:

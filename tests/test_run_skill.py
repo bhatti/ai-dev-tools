@@ -249,3 +249,51 @@ def test_detect_intent_falls_back_when_only_partial_review_skills_installed():
     finally:
         claude_runner._KNOWN_SKILLS.clear()
         claude_runner._KNOWN_SKILLS.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# _build_prompt — MANDATORY directive only when skill_md is loaded
+# ---------------------------------------------------------------------------
+
+from scripts.adhoc.run_skill import _build_prompt
+
+
+def test_build_prompt_with_skill_md_has_mandatory_directive():
+    """When a real SKILL.md is loaded, the prompt must open with a MANDATORY directive."""
+    prompt = _build_prompt("edge-ac-writer", "CRIBL-44993 --dry-run", "# AC Writer protocol")
+    assert "MANDATORY" in prompt
+    assert "edge-ac-writer" in prompt
+    assert "# AC Writer protocol" in prompt
+    # Directive must appear before the skill body, not buried after it
+    mandatory_pos = prompt.index("MANDATORY")
+    skill_header_pos = prompt.index("## Skill: edge-ac-writer")
+    assert mandatory_pos < skill_header_pos
+
+
+def test_build_prompt_without_skill_md_no_mandatory_directive():
+    """When no SKILL.md is found and no fallback exists, no MANDATORY prefix."""
+    prompt = _build_prompt("unknown-skill-xyz", "do something", None)
+    assert "MANDATORY" not in prompt
+    assert "No SKILL.md found" in prompt
+
+
+def test_build_prompt_fallback_description_no_mandatory_directive():
+    """Built-in fallback descriptions (ygs-ask etc.) don't get a MANDATORY prefix."""
+    from scripts.adhoc.run_skill import _SKILL_FALLBACK_DESCRIPTIONS
+    if "ygs-ask" not in _SKILL_FALLBACK_DESCRIPTIONS:
+        pytest.skip("ygs-ask fallback not present")
+    prompt = _build_prompt("ygs-ask", "answer this", None)
+    assert "MANDATORY" not in prompt
+
+
+def test_build_prompt_mandatory_names_the_skill():
+    """The MANDATORY directive must include the skill name so Claude knows which to follow."""
+    prompt = _build_prompt("edge-pr-hygiene", "run checks", "# hygiene content")
+    assert "edge-pr-hygiene" in prompt.split("## Skill:")[0]  # in the directive, before the skill body
+
+
+def test_build_prompt_request_section_preserved():
+    """The ## Request section must contain the caller's prompt text."""
+    prompt = _build_prompt("some-skill", "CRIBL-99999 --dry-run", "# skill body")
+    assert "## Request" in prompt
+    assert "CRIBL-99999 --dry-run" in prompt

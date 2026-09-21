@@ -44,6 +44,9 @@ from scripts.common.git_utils import clone_repo
 _YGS_INSTALLED: bool = False
 # Markdown list of installed skills injected into every run_claude() system prompt.
 _SKILLS_INVENTORY: str = ""
+# Header line inside _SKILLS_INVENTORY — extracted as a constant so run_claude()'s
+# .replace() is guaranteed to match and doesn't silently become a no-op.
+_SKILLS_PICK_HEADER = "Use the most applicable skill below. If none fits, proceed without one."
 # Set of known skill names for SKILLS_INVOKED detection; populated by ensure_ygs_skills()
 # and extended by _ensure_extra_skills().
 _KNOWN_SKILLS: set[str] = set()
@@ -127,7 +130,7 @@ def ensure_ygs_skills() -> None:
     if inventory_lines:
         _SKILLS_INVENTORY = (
             "## Available Skills\n"
-            "Use the most applicable skill below. If none fits, proceed without one.\n\n"
+            + _SKILLS_PICK_HEADER + "\n\n"
             + "\n".join(inventory_lines)
         )
 
@@ -637,7 +640,21 @@ def run_claude(
 
     sp = system_prompt or _DEFAULT_SYSTEM_PROMPT
     if _SKILLS_INVENTORY:
-        sp = sp + "\n\n" + _SKILLS_INVENTORY
+        if primary_skill:
+            # A specific skill protocol is already embedded in the user prompt.
+            # Reword the inventory so Claude treats YGS skills as sub-tools, not
+            # replacements — the original "Use the most applicable skill below"
+            # header causes Claude to pick ygs-investigate (or similar) instead of
+            # following the embedded protocol.
+            adjusted = _SKILLS_INVENTORY.replace(
+                _SKILLS_PICK_HEADER,
+                f"These are available sub-skills. The `{primary_skill}` protocol above "
+                f"defines your task — invoke sub-skills only when the protocol directs you to. "
+                f"Do NOT substitute a sub-skill for the embedded protocol.",
+            )
+            sp = sp + "\n\n" + adjusted
+        else:
+            sp = sp + "\n\n" + _SKILLS_INVENTORY
     if _KNOWN_SKILLS or primary_skill:
         sp = sp + (
             "\n\n## Skill Tracking (MANDATORY)\n"

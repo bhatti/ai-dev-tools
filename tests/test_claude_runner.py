@@ -554,3 +554,77 @@ def test_skills_invoked_deduplicates_primary_skill(mock_popen, tmp_path, capsys,
     lines = [l for l in captured.out.splitlines() if "SKILLS_INVOKED" in l]
     assert len(lines) == 1
     assert lines[0].count("ygs-review-pr") == 1
+
+
+# ---------------------------------------------------------------------------
+# _SKILLS_PICK_HEADER constant — contract test
+# Verifies the constant matches what ensure_ygs_skills() writes into _SKILLS_INVENTORY
+# so the .replace() in run_claude() is never a silent no-op.
+# ---------------------------------------------------------------------------
+
+def test_skills_pick_header_matches_inventory_construction():
+    """_SKILLS_PICK_HEADER must be the exact string used in _SKILLS_INVENTORY.
+
+    If ensure_ygs_skills() changes the header text and _SKILLS_PICK_HEADER is not
+    updated, run_claude()'s .replace() becomes a no-op and the skill-substitution
+    bug silently returns.
+    """
+    from scripts.common.claude_runner import _SKILLS_PICK_HEADER
+    from scripts.common import claude_runner
+
+    saved = claude_runner._SKILLS_INVENTORY
+    try:
+        # Simulate ensure_ygs_skills() writing the inventory with one dummy skill.
+        claude_runner._SKILLS_INVENTORY = (
+            "## Available Skills\n"
+            + _SKILLS_PICK_HEADER + "\n\n"
+            + "- `/ygs-test` — test skill\n"
+        )
+        assert _SKILLS_PICK_HEADER in claude_runner._SKILLS_INVENTORY, (
+            "_SKILLS_PICK_HEADER must match the header written by ensure_ygs_skills()"
+        )
+    finally:
+        claude_runner._SKILLS_INVENTORY = saved
+
+
+# ---------------------------------------------------------------------------
+# run_claude — inventory header rewrite when primary_skill is set
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def _isolated_inventory():
+    """Set a known _SKILLS_INVENTORY value and restore after the test."""
+    from scripts.common import claude_runner
+    from scripts.common.claude_runner import _SKILLS_PICK_HEADER
+    saved = claude_runner._SKILLS_INVENTORY
+    claude_runner._SKILLS_INVENTORY = (
+        "## Available Skills\n"
+        + _SKILLS_PICK_HEADER + "\n\n"
+        + "- `/ygs-investigate` — investigate issues\n"
+    )
+    yield claude_runner
+    claude_runner._SKILLS_INVENTORY = saved
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_inventory_header_rewritten_when_primary_skill_set(mock_popen, tmp_path, _isolated_inventory):
+    """With primary_skill set, 'Use the most applicable skill' must not appear in the system prompt."""
+    from scripts.common.claude_runner import _SKILLS_PICK_HEADER
+    mock_popen.return_value = _make_proc(['{"status":"DONE"}\n'])
+    run_claude("prompt", working_dir=tmp_path, primary_skill="edge-ac-writer")
+    cmd = mock_popen.call_args.args[0]
+    sp = cmd[cmd.index("--system-prompt") + 1]
+    assert _SKILLS_PICK_HEADER not in sp, "pick-skill header must be replaced when primary_skill is set"
+    assert "sub-skills" in sp
+    assert "edge-ac-writer" in sp
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_inventory_header_unchanged_without_primary_skill(mock_popen, tmp_path, _isolated_inventory):
+    """Without primary_skill, the original 'Use the most applicable skill' header is preserved."""
+    from scripts.common.claude_runner import _SKILLS_PICK_HEADER
+    mock_popen.return_value = _make_proc(['{"status":"DONE"}\n'])
+    run_claude("prompt", working_dir=tmp_path)
+    cmd = mock_popen.call_args.args[0]
+    sp = cmd[cmd.index("--system-prompt") + 1]
+    assert _SKILLS_PICK_HEADER in sp
