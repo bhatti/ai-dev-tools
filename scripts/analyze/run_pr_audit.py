@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import click
@@ -43,6 +44,7 @@ from scripts.analyze.pr_fetcher import (
     fetch_prs, fetch_prs_by_numbers, parse_pr_url,
     classify_comments, link_pr_to_issue,
     fetch_issue_details, build_pr_context, write_issues_raw,
+    compute_pr_state_summary, size_bucket,
 )
 
 
@@ -331,6 +333,20 @@ _PR_AUDIT_PROMPT_TEMPLATE = """\
 
 {skill_instructions}
 
+## PR State Summary
+
+{pr_state_summary}
+
+## MANDATORY: PR State Gate — No exceptions
+
+Before writing ANY finding, check the PR's `state` field:
+
+- **state=merged** — This PR LANDED in the codebase. Gaps here are real risks. Generate findings normally.
+- **state=open** — This PR is currently IN REVIEW. Frame as a current risk, not a historical failure.
+- **state=declined** — This PR was REJECTED. The review process WORKED. **DO NOT generate "merged without review" or "scope explosion that landed" findings for declined PRs.** A declined bot-authored PR with zero reviewers is evidence the process caught an issue, not evidence of a gap. Only flag a declined PR if it had zero review activity AND zero comments before decline (pure rubber-stamp decline of a bad PR without any engagement).
+
+Violating this rule creates false positives that destroy audit credibility.
+
 ## Merged PR Data
 
 The following PR data has been pre-fetched from the issue tracker.
@@ -527,8 +543,13 @@ Write these files using relative paths from the repo root (the `reports/` symlin
     "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"gap_type":"team_skill|process|tooling","recommendation":"..."}}],
     "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}},
     "metrics":{{"spec_coverage_pct":0.0,"ci_catch_rate":0.0,"code_review_skill_catch_rate":0.0,
-      "bot_finding_follow_through_rate":0.0,"human_review_burden":0.0,"avg_pr_size_loc":0,
-      "large_pr_review_depth":0.0,"security_review_invocation_rate":0.0,
+      "bot_finding_follow_through_rate":0.0,"human_review_burden":0.0,
+      "pr_state_merged":0,"pr_state_open":0,"pr_state_declined":0,
+      "avg_pr_size_loc":0,"median_pr_size_loc":0,
+      "size_bucket_xs":0,"size_bucket_s":0,"size_bucket_m":0,"size_bucket_l":0,"size_bucket_xl":0,
+      "large_pr_review_depth":0.0,"xl_pr_review_coverage_pct":0.0,
+      "large_pr_human_comments_avg":0.0,
+      "security_review_invocation_rate":0.0,
       "rubber_stamp_rate":0.0,"revert_followup_rate":0.0,
       "verbosity_accumulation_rate":0.0,"complexity_creep_pr_count":0}}}}
 
@@ -795,6 +816,18 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
 
         # -- Build prompt ------------------------------------------------------
         if skill_md:
+            state_summary = compute_pr_state_summary(prs)
+            state_summary_text = (
+                f"merged={state_summary['merged']}  open={state_summary['open']}  "
+                f"declined={state_summary['declined']}  total={state_summary['total']}"
+            )
+            # Size bucket distribution
+            bucket_counts = Counter(pr.get("size_bucket") or size_bucket(pr.get("additions", 0), pr.get("deletions", 0)) for pr in prs)
+            size_summary_text = (
+                f"xs={bucket_counts.get('xs',0)} s={bucket_counts.get('s',0)} "
+                f"m={bucket_counts.get('m',0)} l={bucket_counts.get('l',0)} xl={bucket_counts.get('xl',0)}"
+            )
+            state_summary_text += f"\nsize_buckets: {size_summary_text}"
             prompt = _PR_AUDIT_PROMPT_TEMPLATE.format(
                 repo_label=label,
                 branch=branch,
@@ -806,6 +839,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 pr_context=pr_context,
                 skill_instructions=skill_md,
                 pr_ids=pr_ids_str,
+                pr_state_summary=state_summary_text,
             )
         else:
             print("[pr-audit] WARNING: no SKILL.md found -- using fallback prompt", flush=True)

@@ -11,6 +11,7 @@ from scripts.analyze.run_pr_audit import (
     _resolve_effective_tracker,
     _resolve_branch,
 )
+from scripts.analyze.pr_fetcher import size_bucket, compute_pr_state_summary
 
 
 class TestParseSlackFlags:
@@ -318,6 +319,7 @@ class TestPromptTemplate:
             pr_context="## PRs\n(test data)",
             skill_instructions="Analyze the PRs.",
             pr_ids="1,2,3",
+            pr_state_summary="merged=48  open=1  declined=1  total=50",
         )
         assert "org/repo" in result
         assert "2026-08-15" in result
@@ -334,3 +336,61 @@ class TestPromptTemplate:
         assert "pr_audit_report.md" in _PR_AUDIT_PROMPT_TEMPLATE
         assert "pr_audit_findings.json" in _PR_AUDIT_PROMPT_TEMPLATE
         assert "skill_improvements.json" in _PR_AUDIT_PROMPT_TEMPLATE
+
+    def test_template_has_state_gate(self):
+        """Verify the state-gate section is present so it can't be accidentally deleted."""
+        assert "state=declined" in _PR_AUDIT_PROMPT_TEMPLATE
+        assert "MANDATORY" in _PR_AUDIT_PROMPT_TEMPLATE
+
+    def test_template_has_state_summary_placeholder(self):
+        """Verify the pr_state_summary placeholder is wired into the template."""
+        assert "{pr_state_summary}" in _PR_AUDIT_PROMPT_TEMPLATE
+
+
+class TestPRSizeBucket:
+    def test_xs_boundary(self):
+        assert size_bucket(0, 0) == "xs"
+        assert size_bucket(25, 24) == "xs"    # 49 LOC
+        assert size_bucket(25, 25) == "s"     # 50 LOC
+
+    def test_s_boundary(self):
+        assert size_bucket(100, 99) == "s"    # 199 LOC
+        assert size_bucket(100, 100) == "m"   # 200 LOC
+
+    def test_m_boundary(self):
+        assert size_bucket(250, 249) == "m"   # 499 LOC
+        assert size_bucket(250, 250) == "l"   # 500 LOC
+
+    def test_l_boundary(self):
+        assert size_bucket(500, 499) == "l"   # 999 LOC
+        assert size_bucket(500, 500) == "xl"  # 1000 LOC
+
+    def test_xl_large(self):
+        assert size_bucket(5000, 4999) == "xl"
+
+
+class TestComputePRStateSummary:
+    def test_all_merged(self):
+        prs = [{"state": "merged"}] * 3
+        result = compute_pr_state_summary(prs)
+        assert result == {"merged": 3, "open": 0, "declined": 0, "total": 3}
+
+    def test_mixed_states(self):
+        prs = [
+            {"state": "merged"},
+            {"state": "merged"},
+            {"state": "declined"},
+            {"state": "open"},
+        ]
+        result = compute_pr_state_summary(prs)
+        assert result == {"merged": 2, "open": 1, "declined": 1, "total": 4}
+
+    def test_legacy_closed_counts_as_declined(self):
+        """Ensure old 'closed' state (pre-fix) still increments declined not lost."""
+        prs = [{"state": "closed"}]
+        result = compute_pr_state_summary(prs)
+        assert result["declined"] == 1
+
+    def test_empty(self):
+        result = compute_pr_state_summary([])
+        assert result == {"merged": 0, "open": 0, "declined": 0, "total": 0}

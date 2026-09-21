@@ -83,6 +83,32 @@ def write_issues_raw() -> None:
         _write_raw("issues_raw.json", _issue_raw_cache)
 
 
+def size_bucket(additions: int, deletions: int) -> str:
+    """Classify PR size into a standard bucket based on total lines changed."""
+    loc = additions + deletions
+    if loc < 50:
+        return "xs"
+    if loc < 200:
+        return "s"
+    if loc < 500:
+        return "m"
+    if loc < 1000:
+        return "l"
+    return "xl"
+
+
+def compute_pr_state_summary(prs: list[dict]) -> dict:
+    """Return counts of PRs by state: merged, open, declined, total."""
+    counts: dict[str, int] = {"merged": 0, "open": 0, "declined": 0, "total": len(prs)}
+    for pr in prs:
+        state = (pr.get("state") or "").lower()
+        if state in ("merged", "open", "declined"):
+            counts[state] += 1
+        elif state == "closed":
+            counts["declined"] += 1
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -262,6 +288,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "files_changed": files_changed,
             "additions": additions,
             "deletions": deletions,
+            "size_bucket": size_bucket(additions, deletions),
             "file_paths": file_paths[:50],
             "all_comments": all_comments,
             "bot_comments": classified["bot_comments"],
@@ -418,7 +445,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
 
     gh_state = rp.get("state", "OPEN").upper()
     is_merged = bool(rp.get("mergedAt")) or gh_state == "MERGED"
-    state = "merged" if is_merged else ("closed" if gh_state == "CLOSED" else "open")
+    state = "merged" if is_merged else ("declined" if gh_state == "CLOSED" else "open")
 
     return {
         "number": rp.get("number", pr_number),
@@ -432,6 +459,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         "files_changed": files_changed,
         "additions": additions,
         "deletions": deletions,
+        "size_bucket": size_bucket(additions, deletions),
         "file_paths": file_paths[:50],
         "all_comments": all_comments,
         "bot_comments": classified["bot_comments"],
@@ -549,6 +577,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "files_changed": files_changed,
             "additions": additions,
             "deletions": deletions,
+            "size_bucket": size_bucket(additions, deletions),
             "file_paths": file_paths[:50],
             "all_comments": all_comments,
             "bot_comments": classified["bot_comments"],
@@ -680,7 +709,7 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
 
     bb_state = rp.get("state", "OPEN").upper()
     is_merged = bb_state == "MERGED"
-    state = "merged" if is_merged else ("closed" if bb_state in ("DECLINED", "SUPERSEDED") else "open")
+    state = "merged" if is_merged else ("declined" if bb_state in ("DECLINED", "SUPERSEDED") else "open")
 
     return {
         "number": rp.get("id", pr_id),
@@ -694,6 +723,7 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
         "files_changed": files_changed,
         "additions": additions,
         "deletions": deletions,
+        "size_bucket": size_bucket(additions, deletions),
         "file_paths": file_paths[:50],
         "all_comments": all_comments,
         "bot_comments": classified["bot_comments"],
@@ -1283,7 +1313,8 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         additions = pr.get("additions", 0)
         deletions = pr.get("deletions", 0)
         if additions or deletions:
-            section.append(f"- **Lines of code**: +{additions} / -{deletions}")
+            bucket = pr.get("size_bucket") or size_bucket(additions, deletions)
+            section.append(f"- **Lines of code**: +{additions} / -{deletions} (size: {bucket})")
         section.append(f"- **Review decision**: {pr.get('review_decision', 'none')}")
         if pr.get("is_bot_authored"):
             section.append("- **Author type**: AI/bot-authored PR")
