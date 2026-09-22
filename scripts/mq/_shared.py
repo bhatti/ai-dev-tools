@@ -13,6 +13,8 @@ import requests
 from scripts.common.bitbucket_api import _auth as bb_auth, _repo as bb_repo_url
 from scripts.common.shell import run_cmd
 
+_JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
 
 def resolve_tracker(config: dict) -> str:
     """Resolve effective tracker from config. Returns 'github' or 'bitbucket'."""
@@ -29,13 +31,80 @@ def repo_slug(config: dict) -> str:
     return f"{config.get('GH_ORG', '')}/{config.get('GH_REPO', '')}"
 
 
+def resolve_pr_number(config: dict, pr_number: str) -> str | None:
+    """Resolve a PR identifier to a numeric PR number.
+
+    If pr_number is already numeric, returns it as-is.
+    If it looks like a Jira key (e.g. PROJ-123) and tracker is bitbucket,
+    searches Bitbucket PRs by branch name containing the Jira key.
+    Returns None if no matching PR is found.
+    """
+    if not pr_number:
+        return None
+    if pr_number.isdigit():
+        return pr_number
+    if resolve_tracker(config) == "bitbucket" and _JIRA_KEY_RE.match(pr_number):
+        return _bb_find_pr_by_jira_key(config, pr_number)
+    return pr_number
+
+
+def _bb_find_pr_by_jira_key(config: dict, jira_key: str) -> str | None:
+    """Search Bitbucket open PRs for one whose branch contains the Jira key."""
+    ws = config.get("BITBUCKET_WORKSPACE", "")
+    repo = config.get("BITBUCKET_REPO", "")
+    auth = bb_auth(config)
+    q = f'source.branch.name~"{jira_key}"'
+    url = f"{bb_repo_url(ws, repo)}/pullrequests"
+    try:
+        resp = requests.get(url, auth=auth, params={"q": q, "pagelen": 5}, timeout=30)
+        resp.raise_for_status()
+        values = resp.json().get("values", [])
+        if values:
+            pr_id = values[0].get("id")
+            print(f"[mq] resolved {jira_key} → BB PR #{pr_id}", flush=True)
+            return str(pr_id)
+        for state in ("MERGED", "DECLINED"):
+            resp = requests.get(
+                url, auth=auth,
+                params={"q": q, "state": state, "pagelen": 5},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            values = resp.json().get("values", [])
+            if values:
+                pr_id = values[0].get("id")
+                print(f"[mq] resolved {jira_key} → BB PR #{pr_id} ({state})", flush=True)
+                return str(pr_id)
+    except Exception as e:
+        print(f"[mq] warn: BB PR search for {jira_key} failed: {e}", flush=True)
+    # Fallback: search by title
+    try:
+        q_title = f'title~"{jira_key}"'
+        resp = requests.get(url, auth=auth, params={"q": q_title, "pagelen": 5}, timeout=30)
+        resp.raise_for_status()
+        values = resp.json().get("values", [])
+        if values:
+            pr_id = values[0].get("id")
+            print(f"[mq] resolved {jira_key} → BB PR #{pr_id} (by title)", flush=True)
+            return str(pr_id)
+    except Exception as e:
+        print(f"[mq] warn: BB PR title search for {jira_key} failed: {e}", flush=True)
+    print(f"[mq] warn: no BB PR found for {jira_key}", flush=True)
+    return None
+
+
 def fetch_pr_files(config: dict, pr_number: str) -> list[dict]:
     """Fetch changed files for a PR. Returns list of dicts with path/additions/deletions.
 
     Works with both GitHub (gh CLI) and Bitbucket (REST API).
+    Resolves Jira keys to numeric BB PR numbers automatically.
     """
     if resolve_tracker(config) == "bitbucket":
-        return _bb_fetch_pr_files(config, pr_number)
+        resolved = resolve_pr_number(config, pr_number)
+        if not resolved:
+            print(f"[mq] warn: could not resolve PR {pr_number} — returning empty", flush=True)
+            return []
+        return _bb_fetch_pr_files(config, resolved)
     return _gh_fetch_pr_files(config, pr_number)
 
 
@@ -74,7 +143,10 @@ def _bb_fetch_pr_files(config: dict, pr_number: str) -> list[dict]:
 def fetch_pr_stats(config: dict, pr_number: str) -> dict:
     """Fetch PR stats: files list + aggregate additions/deletions."""
     if resolve_tracker(config) == "bitbucket":
-        files = _bb_fetch_pr_files(config, pr_number)
+        resolved = resolve_pr_number(config, pr_number)
+        if not resolved:
+            return {"files": [], "additions": 0, "deletions": 0}
+        files = _bb_fetch_pr_files(config, resolved)
         return {
             "files": files,
             "additions": sum(f.get("additions", 0) for f in files),

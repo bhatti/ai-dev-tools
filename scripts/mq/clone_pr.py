@@ -16,7 +16,7 @@ import click
 
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.git_utils import clone_by_tracker
-from scripts.mq._shared import repo_slug, resolve_tracker
+from scripts.mq._shared import repo_slug, resolve_pr_number, resolve_tracker
 
 
 @click.command()
@@ -38,16 +38,20 @@ def main(pr_number: str | None) -> None:
         print(f"[clone_pr] cloned to {repo_dir}", flush=True)
 
     if pr_number:
+        resolved = resolve_pr_number(config, pr_number) if tracker == "bitbucket" else pr_number
         if tracker == "bitbucket":
+            if not resolved:
+                print(f"[clone_pr] could not resolve {pr_number} to BB PR — skipping checkout", flush=True)
+                return
             result = subprocess.run(
                 ["git", "fetch", "origin",
-                 f"refs/pull-requests/{pr_number}/from:pr-{pr_number}"],
+                 f"refs/pull-requests/{resolved}/from:pr-{resolved}"],
                 cwd=str(repo_dir), capture_output=True, text=True,
             )
             if result.returncode == 0:
-                subprocess.run(["git", "checkout", f"pr-{pr_number}"],
+                subprocess.run(["git", "checkout", f"pr-{resolved}"],
                                cwd=str(repo_dir), capture_output=True, text=True)
-                print(f"[clone_pr] checked out PR #{pr_number} via git fetch", flush=True)
+                print(f"[clone_pr] checked out PR #{resolved} via git fetch", flush=True)
             else:
                 print(f"[clone_pr] pr checkout failed (non-fatal): {result.stderr.strip()}", flush=True)
         else:
