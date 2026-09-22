@@ -6,32 +6,32 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from scripts.mq._shared import top_level_module
 from scripts.mq.scope_router import (
     _compute_scope,
     _match_codeowner,
     _parse_codeowners,
-    _top_level_module,
 )
 
 
 class TestTopLevelModule:
     def test_simple_path(self):
-        assert _top_level_module("billing/charge.py") == "billing"
+        assert top_level_module("billing/charge.py") == "billing"
 
     def test_src_prefix(self):
-        assert _top_level_module("src/billing/charge.py") == "src/billing"
+        assert top_level_module("src/billing/charge.py") == "src/billing"
 
     def test_lib_prefix(self):
-        assert _top_level_module("lib/auth/login.py") == "lib/auth"
+        assert top_level_module("lib/auth/login.py") == "lib/auth"
 
     def test_single_file(self):
-        assert _top_level_module("README.md") == "README.md"
+        assert top_level_module("README.md") == "README.md"
 
     def test_crates_prefix(self):
-        assert _top_level_module("crates/core/src/lib.rs") == "crates/core"
+        assert top_level_module("crates/core/src/lib.rs") == "crates/core"
 
     def test_apps_prefix(self):
-        assert _top_level_module("apps/web/index.ts") == "apps/web"
+        assert top_level_module("apps/web/index.ts") == "apps/web"
 
 
 class TestParseCodeowners:

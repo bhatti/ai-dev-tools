@@ -207,6 +207,8 @@ def main(pr_number: str) -> None:
         flush=True,
     )
     print(f"::add-task-context RISK_TIER::{tier}", flush=True)
+    print(f"::add-task-context RISK_SCORE::{composite:.1f}", flush=True)
+    print(f"::add-task-context REQUIRES_APPROVAL::{'yes' if requires_human else 'no'}", flush=True)
 
 
 if __name__ == "__main__":

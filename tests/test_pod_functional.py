@@ -3132,6 +3132,261 @@ def test_30_adhoc_pr_queue_report(base_env: dict[str, str]) -> TestResult:
     return _pass(result, f"report.md={md_bytes}B html={html_bytes}B pr_count={pr_count}")
 
 
+def test_31_mq_scope_router(base_env: dict[str, str]) -> TestResult:
+    """Run scope_router + risk_score on a GitHub PR. Verifies scope.json and risk_score.json."""
+    result = TestResult("mq-scope-router")
+    if not base_env.get("GH_ORG") or not base_env.get("GH_REPO"):
+        result.passed = True
+        result.message = "SKIPPED — GH_ORG/GH_REPO not set"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/mq_scope"
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+
+    with pod_fixture("mq-scope-router") as pod:
+        setup_step = exec_step(pod, "setup",
+                               f"mkdir -p {ws}/reports {ws}/logs",
+                               env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        clone_step = exec_step(pod, "clone",
+                               "python3 -m scripts.gh.clone_repo --pr-number 1",
+                               env, timeout=120)
+        result.steps.append(clone_step)
+        if not clone_step.ok:
+            return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
+
+        scope_step = exec_step(pod, "scope-router",
+                               "python3 -m scripts.mq.scope_router --pr-number 1",
+                               env, timeout=120)
+        result.steps.append(scope_step)
+        if not scope_step.ok:
+            return _fail(result, scope_step, f"scope_router exit {scope_step.returncode}: {scope_step.stderr[-300:]}")
+
+        err = _check_keys(scope_step, ["SCOPE_KEY", "BLAST_RADIUS", "CHANGED_FILES"])
+        if err:
+            return _fail(result, scope_step, err)
+
+        risk_step = exec_step(pod, "risk-score",
+                              "python3 -m scripts.mq.risk_score --pr-number 1",
+                              env, timeout=120)
+        result.steps.append(risk_step)
+        if not risk_step.ok:
+            return _fail(result, risk_step, f"risk_score exit {risk_step.returncode}: {risk_step.stderr[-300:]}")
+
+        err = _check_keys(risk_step, ["RISK_TIER"])
+        if err:
+            return _fail(result, risk_step, err)
+
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"sp = os.path.join(ws, 'scope.json')\n"
+            f"if not os.path.exists(sp): issues.append('scope.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(sp).read())\n"
+            f"    if 'scope' not in d: issues.append('scope.json missing scope key')\n"
+            f"    if 'blast_radius' not in d: issues.append('scope.json missing blast_radius')\n"
+            f"    print(f'::add-task-context SCOPE_NAME::{{d.get(\"scope\",\"?\")}}')\n"
+            f"rp = os.path.join(ws, 'risk_score.json')\n"
+            f"if not os.path.exists(rp): issues.append('risk_score.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(rp).read())\n"
+            f"    if 'tier' not in d: issues.append('risk_score.json missing tier')\n"
+            f"    if 'score' not in d: issues.append('risk_score.json missing score')\n"
+            f"    print(f'::add-task-context RISK_SCORE::{{d.get(\"score\",\"?\")}}')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"print('::add-task-context VERIFY::ok')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-artifacts", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"verify failed: {verify_step.stderr[-300:]}")
+
+    scope = scope_step.context.get("SCOPE_KEY", "?")
+    tier = risk_step.context.get("RISK_TIER", "?")
+    score = verify_step.context.get("RISK_SCORE", "?")
+    return _pass(result, f"scope={scope} tier={tier} score={score} elapsed={scope_step.elapsed + risk_step.elapsed:.0f}s")
+
+
+def test_32_mq_test_impact(base_env: dict[str, str]) -> TestResult:
+    """Run test_impact on a GitHub PR. Verifies test_impact.json with shards."""
+    result = TestResult("mq-test-impact")
+    if not base_env.get("GH_ORG") or not base_env.get("GH_REPO"):
+        result.passed = True
+        result.message = "SKIPPED — GH_ORG/GH_REPO not set"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/mq_impact"
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+
+    with pod_fixture("mq-test-impact") as pod:
+        setup_step = exec_step(pod, "setup",
+                               f"mkdir -p {ws}/reports {ws}/logs",
+                               env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        clone_step = exec_step(pod, "clone",
+                               "python3 -m scripts.gh.clone_repo --pr-number 1",
+                               env, timeout=120)
+        result.steps.append(clone_step)
+        if not clone_step.ok:
+            return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
+
+        impact_step = exec_step(pod, "test-impact",
+                                "python3 -m scripts.mq.test_impact --pr-number 1",
+                                env, timeout=120)
+        result.steps.append(impact_step)
+        if not impact_step.ok:
+            return _fail(result, impact_step, f"test_impact exit {impact_step.returncode}: {impact_step.stderr[-300:]}")
+
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"ip = os.path.join(ws, 'test_impact.json')\n"
+            f"if not os.path.exists(ip): issues.append('test_impact.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(ip).read())\n"
+            f"    for k in ('total_tests', 'selected_tests', 'reduction_pct', 'shards', 'language'):\n"
+            f"        if k not in d: issues.append(f'test_impact.json missing {{k}}')\n"
+            f"    print(f'::add-task-context TOTAL_TESTS::{{d.get(\"total_tests\",\"?\")}}')\n"
+            f"    print(f'::add-task-context SELECTED_TESTS::{{d.get(\"selected_tests\",\"?\")}}')\n"
+            f"    print(f'::add-task-context REDUCTION_PCT::{{d.get(\"reduction_pct\",\"?\")}}')\n"
+            f"    print(f'::add-task-context SHARD_COUNT::{{len(d.get(\"shards\",[]))}}')\n"
+            f"    print(f'::add-task-context LANGUAGE::{{d.get(\"language\",\"?\")}}')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"print('::add-task-context VERIFY::ok')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-impact", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"verify failed: {verify_step.stderr[-300:]}")
+
+    total = verify_step.context.get("TOTAL_TESTS", "?")
+    selected = verify_step.context.get("SELECTED_TESTS", "?")
+    pct = verify_step.context.get("REDUCTION_PCT", "?")
+    shards = verify_step.context.get("SHARD_COUNT", "?")
+    lang = verify_step.context.get("LANGUAGE", "?")
+    return _pass(result, f"selected={selected}/{total} reduction={pct}% shards={shards} lang={lang}")
+
+
+def test_33_mq_full_pipeline(base_env: dict[str, str]) -> TestResult:
+    """Run the full MQ pipeline (scope + risk + impact + report) in one pod.
+
+    Verifies all artifacts exist and report.md/report.html are generated.
+    """
+    result = TestResult("mq-full-pipeline")
+    if not base_env.get("GH_ORG") or not base_env.get("GH_REPO"):
+        result.passed = True
+        result.message = "SKIPPED — GH_ORG/GH_REPO not set"
+        return result
+
+    env = dict(base_env)
+    ws = "/workspace/mq_pipeline"
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("mq-pipeline") as pod:
+        setup_step = exec_step(pod, "setup",
+                               f"mkdir -p {ws}/reports {ws}/logs",
+                               env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        clone_step = exec_step(pod, "clone",
+                               "python3 -m scripts.gh.clone_repo --pr-number 1",
+                               env, timeout=120)
+        result.steps.append(clone_step)
+        if not clone_step.ok:
+            return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
+
+        scope_step = exec_step(pod, "scope-router",
+                               "python3 -m scripts.mq.scope_router --pr-number 1",
+                               env, timeout=120)
+        result.steps.append(scope_step)
+        if not scope_step.ok:
+            return _fail(result, scope_step, f"scope exit {scope_step.returncode}: {scope_step.stderr[-300:]}")
+
+        risk_step = exec_step(pod, "risk-score",
+                              "python3 -m scripts.mq.risk_score --pr-number 1",
+                              env, timeout=120)
+        result.steps.append(risk_step)
+        if not risk_step.ok:
+            return _fail(result, risk_step, f"risk exit {risk_step.returncode}: {risk_step.stderr[-300:]}")
+
+        impact_step = exec_step(pod, "test-impact",
+                                "python3 -m scripts.mq.test_impact --pr-number 1",
+                                env, timeout=120)
+        result.steps.append(impact_step)
+        if not impact_step.ok:
+            return _fail(result, impact_step, f"impact exit {impact_step.returncode}: {impact_step.stderr[-300:]}")
+
+        report_step = exec_step(pod, "report",
+                                "python3 -m scripts.mq.report",
+                                env, timeout=60)
+        result.steps.append(report_step)
+        if not report_step.ok:
+            return _fail(result, report_step, f"report exit {report_step.returncode}: {report_step.stderr[-300:]}")
+
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"for f in ('scope.json', 'risk_score.json', 'test_impact.json'):\n"
+            f"    if not os.path.exists(os.path.join(ws, f)): issues.append(f'{{f}} missing')\n"
+            f"md = os.path.join(ws, 'reports', 'report.md')\n"
+            f"if not os.path.exists(md): issues.append('reports/report.md missing')\n"
+            f"else:\n"
+            f"    content = open(md).read()\n"
+            f"    print(f'::add-task-context REPORT_MD_BYTES::{{os.path.getsize(md)}}')\n"
+            f"    if 'Risk' not in content and 'risk' not in content: issues.append('report.md has no risk content')\n"
+            f"html = os.path.join(ws, 'reports', 'report.html')\n"
+            f"if not os.path.exists(html): issues.append('reports/report.html missing')\n"
+            f"else: print(f'::add-task-context REPORT_HTML_BYTES::{{os.path.getsize(html)}}')\n"
+            f"rj = os.path.join(ws, 'reports', 'result.json')\n"
+            f"if not os.path.exists(rj): issues.append('reports/result.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(rj).read())\n"
+            f"    print(f'::add-task-context REPORT_STATUS::{{d.get(\"status\",\"?\")}}')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"print('::add-task-context VERIFY::ok')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-pipeline", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"verify failed: {verify_step.stderr[-300:]}")
+
+    md_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    html_bytes = verify_step.context.get("REPORT_HTML_BYTES", "?")
+    tier = risk_step.context.get("RISK_TIER", "?")
+    scope = scope_step.context.get("SCOPE_KEY", "?")
+    return _pass(result, f"scope={scope} tier={tier} report.md={md_bytes}B html={html_bytes}B")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -3165,6 +3420,9 @@ ALL_TESTS: dict[str, callable] = {
     "skill-post":             test_28_skill_post,
     "skill-node-image":       test_29_skill_node_image,
     "adhoc-pr-queue-report":  test_30_adhoc_pr_queue_report,
+    "mq-scope-router":        test_31_mq_scope_router,
+    "mq-test-impact":         test_32_mq_test_impact,
+    "mq-full-pipeline":       test_33_mq_full_pipeline,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

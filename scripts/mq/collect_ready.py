@@ -87,6 +87,8 @@ def main(label: str) -> None:
         deletions = pr.get("deletions", 0)
         age_hours = _compute_age_hours(pr.get("createdAt", ""))
 
+        # Quick triage — scope_router.py does the authoritative classification
+        # after cloning; this is a lightweight pre-sort without repo access.
         total_lines = additions + deletions
         if total_lines > 300 or len(files) >= 10:
             blast_radius = "high"

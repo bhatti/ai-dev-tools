@@ -61,9 +61,6 @@ def _match_codeowner(filepath: str, codeowners: dict[str, list[str]]) -> list[st
     return matched_owners
 
 
-_top_level_module = top_level_module
-
-
 def _fetch_pr_files(org: str, repo: str, pr_number: str) -> list[dict]:
     """Fetch changed files for a PR via gh CLI."""
     result = run_cmd([
@@ -91,7 +88,7 @@ def _compute_scope(
         deletions = f.get("deletions", 0)
         total_lines += additions + deletions
 
-        module = _top_level_module(path)
+        module = top_level_module(path)
         modules.add(module)
 
         owners = _match_codeowner(path, codeowners)
@@ -166,6 +163,10 @@ def main(pr_number: str) -> None:
     out_path = workspace / "scope.json"
     out_path.write_text(json.dumps(result, indent=2))
     print(f"[scope_router] scope={scope} blast_radius={blast_radius} files={len(files)} lines={total_lines}", flush=True)
+    print(f"::add-task-context SCOPE_KEY::{scope}", flush=True)
+    print(f"::add-task-context BLAST_RADIUS::{blast_radius}", flush=True)
+    print(f"::add-task-context CHANGED_FILES::{len(files)}", flush=True)
+    print(f"::add-task-context LINES_CHANGED::{total_lines}", flush=True)
 
     try:
         run_cmd([
@@ -177,7 +178,7 @@ def main(pr_number: str) -> None:
     except (subprocess.CalledProcessError, OSError) as e:
         print(f"[scope_router] warn: could not label PR: {e}", flush=True)
 
-    modules = {_top_level_module(f.get("path", "")) for f in files}
+    modules = {top_level_module(f.get("path", "")) for f in files}
     if scope == "cross-scope" and len(modules) >= 3:
         print(f"[scope_router] ambiguous scope: {len(modules)} unrelated modules", flush=True)
         sys.exit(2)

@@ -95,8 +95,6 @@ def _detect_language(files: list[str]) -> str:
     return lang_map.get(best_ext, "python")
 
 
-_is_test_file = is_test_file
-
 
 def _map_to_test_files(
     changed_files: list[str],
@@ -112,7 +110,7 @@ def _map_to_test_files(
     unmapped: list[str] = []
 
     for src_file in changed_files:
-        if _is_test_file(src_file):
+        if is_test_file(src_file):
             found_tests.add(src_file)
             continue
 
@@ -135,7 +133,7 @@ def _map_to_test_files(
                     matched = True
                     break
 
-        if not matched and not _is_test_file(src_file):
+        if not matched and not is_test_file(src_file):
             unmapped.append(src_file)
 
     return sorted(found_tests), unmapped
@@ -181,7 +179,7 @@ def _discover_dependent_tests(
 
     try:
         for test_file in repo_path.glob(glob_pattern):
-            if not _is_test_file(str(test_file.relative_to(repo_path))):
+            if not is_test_file(str(test_file.relative_to(repo_path))):
                 continue
             try:
                 content = test_file.read_text(errors="ignore")
@@ -342,6 +340,10 @@ def main(pr_number: str, num_shards: int) -> None:
         {"shard_id": str(s["shard_id"]), "tests": json.dumps(s["tests"])}
         for s in shards
     ])
+    print(f"::add-task-context SELECTED_TESTS::{len(all_selected)}", flush=True)
+    print(f"::add-task-context TOTAL_TESTS::{total_tests}", flush=True)
+    print(f"::add-task-context REDUCTION_PCT::{impact['reduction_pct']}", flush=True)
+    print(f"::add-task-context SHARD_COUNT::{len(shards)}", flush=True)
     print(f"::add-task-context TEST_GROUPS::{fan_out_value}", flush=True)
 
 

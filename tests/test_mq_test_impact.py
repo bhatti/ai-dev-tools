@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from scripts.mq._shared import is_test_file
 from scripts.mq.test_impact import (
     _detect_language,
-    _is_test_file,
     _map_to_test_files,
     _partition_shards,
 )
@@ -48,46 +48,46 @@ class TestDetectLanguage:
 
 class TestIsTestFile:
     def test_python_test_prefix(self):
-        assert _is_test_file("test_foo.py")
+        assert is_test_file("test_foo.py")
 
     def test_python_test_in_tests_dir(self):
-        assert _is_test_file("tests/test_foo.py")
+        assert is_test_file("tests/test_foo.py")
 
     def test_go_test(self):
-        assert _is_test_file("foo_test.go")
+        assert is_test_file("foo_test.go")
 
     def test_ts_test(self):
-        assert _is_test_file("foo.test.ts")
+        assert is_test_file("foo.test.ts")
 
     def test_tsx_test(self):
-        assert _is_test_file("foo.test.tsx")
+        assert is_test_file("foo.test.tsx")
 
     def test_java_test(self):
-        assert _is_test_file("FooTest.java")
+        assert is_test_file("FooTest.java")
 
     def test_kotlin_test(self):
-        assert _is_test_file("FooTest.kt")
+        assert is_test_file("FooTest.kt")
 
     def test_ruby_spec(self):
-        assert _is_test_file("foo_spec.rb")
+        assert is_test_file("foo_spec.rb")
 
     def test_ruby_test(self):
-        assert _is_test_file("foo_test.rb")
+        assert is_test_file("foo_test.rb")
 
     def test_csharp_test(self):
-        assert _is_test_file("FooTests.cs")
+        assert is_test_file("FooTests.cs")
 
     def test_spec_ts(self):
-        assert _is_test_file("foo.spec.ts")
+        assert is_test_file("foo.spec.ts")
 
     def test_spec_dir(self):
-        assert _is_test_file("spec/models/foo_spec.rb")
+        assert is_test_file("spec/models/foo_spec.rb")
 
     def test_not_test(self):
-        assert not _is_test_file("foo.py")
+        assert not is_test_file("foo.py")
 
     def test_not_test_go(self):
-        assert not _is_test_file("foo.go")
+        assert not is_test_file("foo.go")
 
 
 class TestMapToTestFiles:

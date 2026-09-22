@@ -92,10 +92,9 @@ def _build_test_command(
             parts = t.split("/")
             if len(parts) >= 2 and parts[0] == "crates":
                 modules.add(parts[1])
-        if modules:
-            cmd = ["cargo", "test", "-p", ",".join(sorted(modules))]
-        else:
-            cmd = ["cargo", "test"]
+        cmd = ["cargo", "test"]
+        for m in sorted(modules):
+            cmd.extend(["-p", m])
         return cmd
 
     if project_type == "node":
