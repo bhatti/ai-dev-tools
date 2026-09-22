@@ -437,6 +437,23 @@ formicary submit formicary/ai-adhoc.yaml \
 
 ---
 
+## Merge Queue Scripts (`scripts/mq/`)
+
+Scripts for scope-aware merge queue orchestration. Called by Formicary YAML jobs (`ai-scope-router`, `ai-merge-queue`, `ai-parallel-test`, etc.).
+
+| Script | Purpose |
+|--------|---------|
+| `scope_router.py` | Compute blast-radius scope from changed file paths and CODEOWNERS. Writes `scope.json`, labels PR with `scope:{name}` |
+| `risk_score.py` | RADAR-style risk tier (LOW/MEDIUM/HIGH) from scope + diff stats + historical defect data. Writes `risk_score.json` |
+| `collect_ready.py` | Collect all PRs labeled `ai-merge-ready`, compute scope and blast radius per PR. Writes `ready_prs.json` |
+| `group_by_scope.py` | Partition ready PRs into independent scope lanes for parallel testing. Writes `lane_groups.json` |
+| `test_impact.py` | Map changed files to affected tests via naming conventions + import graphs, partition into balanced shards. Writes `test_impact.json` |
+| `run_scoped_ci.py` | Run CI for a specific test shard. Auto-detects project type (Python/Go/Rust/Node/Java). Writes `shard_result_{id}.json` |
+
+All scripts follow the standard pattern: Click CLI, `load_config(required=[...])`, `get_workspace_dir()`, `[tag]`-prefixed logging, exit codes 0/1/2.
+
+---
+
 ## Generic Skill Invocation (`ai-skill`)
 
 Run **any** YGS skill against **any** repo with full flag parsing, smart defaults, and optional background services — all from a single Slack command or API call.
