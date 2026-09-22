@@ -6,8 +6,8 @@ traversal, and historical timing data for shard balancing.
 Usage:
     python -m scripts.mq.test_impact --pr-number 42
 
-Required env: GH_ORG, GH_REPO
-Reads:  PR diff (via gh CLI), optional /workspace/test_timings.json
+Required env: GH_ORG + GH_REPO (GitHub) or BITBUCKET_WORKSPACE + BITBUCKET_REPO (Bitbucket)
+Reads:  PR diff (via gh CLI or Bitbucket API), optional /workspace/test_timings.json
 Writes: /workspace/test_impact.json
 
 Exit codes: 0=done, 1=error (falls back to full suite — never blocks)
@@ -15,7 +15,6 @@ Exit codes: 0=done, 1=error (falls back to full suite — never blocks)
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -23,8 +22,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.shell import run_cmd
-from scripts.mq._shared import is_test_file
+from scripts.mq._shared import fetch_pr_files, is_test_file, repo_slug
 
 
 _LANG_TEST_PATTERNS: dict[str, list[tuple[str, str]]] = {
@@ -263,22 +261,16 @@ def _count_all_tests(repo_dir: str | None) -> int:
 @click.option("--pr-number", required=True, help="PR number to analyze")
 @click.option("--num-shards", default=4, help="Number of test shards")
 def main(pr_number: str, num_shards: int) -> None:
-    config = load_config(required=["GH_ORG", "GH_REPO"])
-    org = config["GH_ORG"]
-    repo = config["GH_REPO"]
+    config = load_config(required=[])
+    slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
     repo_dir = config.get("CODEBASE_DIR", "")
 
-    print(f"[test_impact] pr={pr_number} repo={org}/{repo} shards={num_shards}", flush=True)
+    print(f"[test_impact] pr={pr_number} repo={slug} shards={num_shards}", flush=True)
 
-    result = run_cmd([
-        "gh", "pr", "view", pr_number,
-        "--repo", f"{org}/{repo}",
-        "--json", "files",
-    ])
-    pr_data = json.loads(result.stdout)
-    changed_files = [f.get("path", "") for f in pr_data.get("files", []) if f.get("path")]
+    files = fetch_pr_files(config, pr_number)
+    changed_files = [f.get("path", "") for f in files if f.get("path")]
 
     if not changed_files:
         print("[test_impact] no changed files — nothing to test", flush=True)

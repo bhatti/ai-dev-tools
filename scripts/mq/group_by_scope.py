@@ -3,7 +3,7 @@
 Usage:
     python -m scripts.mq.group_by_scope
 
-Required env: GH_ORG, GH_REPO (for workspace resolution)
+Required env: (none — reads ready_prs.json from workspace)
 Reads:  /workspace/ready_prs.json (from collect_ready)
 Writes: /workspace/lane_groups.json
 

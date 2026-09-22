@@ -173,6 +173,16 @@ _SCRIPTS_TO_COPY = [
     "scripts/common/pr_utils.py",
     "scripts/common/setup_tracker.py",
     "scripts/common/text_utils.py",
+    "scripts/mq/__init__.py",
+    "scripts/mq/_shared.py",
+    "scripts/mq/clone_pr.py",
+    "scripts/mq/collect_ready.py",
+    "scripts/mq/group_by_scope.py",
+    "scripts/mq/report.py",
+    "scripts/mq/risk_score.py",
+    "scripts/mq/run_scoped_ci.py",
+    "scripts/mq/scope_router.py",
+    "scripts/mq/test_impact.py",
     "requirements.txt",
 ]
 
@@ -3154,14 +3164,14 @@ def test_31_mq_scope_router(base_env: dict[str, str]) -> TestResult:
             return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
 
         clone_step = exec_step(pod, "clone",
-                               "python3 -m scripts.gh.clone_repo --pr-number 1",
+                               "python3 -m scripts.mq.clone_pr --pr-number 26",
                                env, timeout=120)
         result.steps.append(clone_step)
         if not clone_step.ok:
             return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
 
         scope_step = exec_step(pod, "scope-router",
-                               "python3 -m scripts.mq.scope_router --pr-number 1",
+                               "python3 -m scripts.mq.scope_router --pr-number 26",
                                env, timeout=120)
         result.steps.append(scope_step)
         if not scope_step.ok:
@@ -3172,7 +3182,7 @@ def test_31_mq_scope_router(base_env: dict[str, str]) -> TestResult:
             return _fail(result, scope_step, err)
 
         risk_step = exec_step(pod, "risk-score",
-                              "python3 -m scripts.mq.risk_score --pr-number 1",
+                              "python3 -m scripts.mq.risk_score --pr-number 26",
                               env, timeout=120)
         result.steps.append(risk_step)
         if not risk_step.ok:
@@ -3240,14 +3250,14 @@ def test_32_mq_test_impact(base_env: dict[str, str]) -> TestResult:
             return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
 
         clone_step = exec_step(pod, "clone",
-                               "python3 -m scripts.gh.clone_repo --pr-number 1",
+                               "python3 -m scripts.mq.clone_pr --pr-number 26",
                                env, timeout=120)
         result.steps.append(clone_step)
         if not clone_step.ok:
             return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
 
         impact_step = exec_step(pod, "test-impact",
-                                "python3 -m scripts.mq.test_impact --pr-number 1",
+                                "python3 -m scripts.mq.test_impact --pr-number 26",
                                 env, timeout=120)
         result.steps.append(impact_step)
         if not impact_step.ok:
@@ -3314,28 +3324,28 @@ def test_33_mq_full_pipeline(base_env: dict[str, str]) -> TestResult:
             return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
 
         clone_step = exec_step(pod, "clone",
-                               "python3 -m scripts.gh.clone_repo --pr-number 1",
+                               "python3 -m scripts.mq.clone_pr --pr-number 26",
                                env, timeout=120)
         result.steps.append(clone_step)
         if not clone_step.ok:
             return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
 
         scope_step = exec_step(pod, "scope-router",
-                               "python3 -m scripts.mq.scope_router --pr-number 1",
+                               "python3 -m scripts.mq.scope_router --pr-number 26",
                                env, timeout=120)
         result.steps.append(scope_step)
         if not scope_step.ok:
             return _fail(result, scope_step, f"scope exit {scope_step.returncode}: {scope_step.stderr[-300:]}")
 
         risk_step = exec_step(pod, "risk-score",
-                              "python3 -m scripts.mq.risk_score --pr-number 1",
+                              "python3 -m scripts.mq.risk_score --pr-number 26",
                               env, timeout=120)
         result.steps.append(risk_step)
         if not risk_step.ok:
             return _fail(result, risk_step, f"risk exit {risk_step.returncode}: {risk_step.stderr[-300:]}")
 
         impact_step = exec_step(pod, "test-impact",
-                                "python3 -m scripts.mq.test_impact --pr-number 1",
+                                "python3 -m scripts.mq.test_impact --pr-number 26",
                                 env, timeout=120)
         result.steps.append(impact_step)
         if not impact_step.ok:

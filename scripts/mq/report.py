@@ -237,18 +237,27 @@ def main() -> None:
     for key, val in ctx.items():
         print(f"::add-task-context {key}::{val}", flush=True)
 
+    from scripts.common.report_renderer import render_simple_html
+    try:
+        html = render_simple_html(title, report_text)
+        (reports_dir / "report.html").write_text(html)
+        print("[mq-report] reports/report.html written", flush=True)
+    except Exception as e:
+        print(f"[mq-report] HTML render failed (non-fatal): {e}", flush=True)
+
     slack_text = format_for_slack(report_text)
     thread_ts = config.get("SLACK_THREAD_TS") or None
     slack_ok = post_report(config, slack_text, report_text,
                            title=title, filename="mq_report.html",
                            thread_ts=thread_ts, task_type="report")
 
-    post_result = {
+    result = {
         "status": "DONE",
         "slack_posted": slack_ok,
         **ctx,
     }
-    (reports_dir / "post_result.json").write_text(json.dumps(post_result, indent=2))
+    (reports_dir / "result.json").write_text(json.dumps(result, indent=2))
+    (reports_dir / "post_result.json").write_text(json.dumps(result, indent=2))
 
     print(
         f"[mq-report] done — slack_posted={slack_ok} "

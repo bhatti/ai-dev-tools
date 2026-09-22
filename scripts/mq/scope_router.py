@@ -3,8 +3,8 @@
 Usage:
     python -m scripts.mq.scope_router --pr-number 42
 
-Required env: GH_ORG, GH_REPO
-Reads:  (fetches PR data via gh CLI)
+Required env: GH_ORG + GH_REPO (GitHub) or BITBUCKET_WORKSPACE + BITBUCKET_REPO (Bitbucket)
+Reads:  (fetches PR data via gh CLI or Bitbucket API)
 Writes: /workspace/scope.json
 
 Exit codes: 0=done, 1=error, 2=ambiguous scope (3+ unrelated modules)
@@ -12,17 +12,14 @@ Exit codes: 0=done, 1=error, 2=ambiguous scope (3+ unrelated modules)
 from __future__ import annotations
 
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.shell import run_cmd
-from scripts.mq._shared import SENSITIVE_PATHS, top_level_module
+from scripts.mq._shared import SENSITIVE_PATHS, fetch_pr_files, label_pr, repo_slug, top_level_module
 
 _CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
 
@@ -61,15 +58,6 @@ def _match_codeowner(filepath: str, codeowners: dict[str, list[str]]) -> list[st
     return matched_owners
 
 
-def _fetch_pr_files(org: str, repo: str, pr_number: str) -> list[dict]:
-    """Fetch changed files for a PR via gh CLI."""
-    result = run_cmd([
-        "gh", "pr", "view", pr_number,
-        "--repo", f"{org}/{repo}",
-        "--json", "files,additions,deletions",
-    ])
-    data = json.loads(result.stdout)
-    return data.get("files", [])
 
 
 def _compute_scope(
@@ -123,15 +111,14 @@ def _compute_scope(
 @click.command()
 @click.option("--pr-number", required=True, help="PR number to analyze")
 def main(pr_number: str) -> None:
-    config = load_config(required=["GH_ORG", "GH_REPO"])
-    org = config["GH_ORG"]
-    repo = config["GH_REPO"]
+    config = load_config(required=[])
+    slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    print(f"[scope_router] pr={pr_number} repo={org}/{repo}", flush=True)
+    print(f"[scope_router] pr={pr_number} repo={slug}", flush=True)
 
-    files = _fetch_pr_files(org, repo, pr_number)
+    files = fetch_pr_files(config, pr_number)
     if not files:
         print("[scope_router] no changed files found", flush=True)
         result = {
@@ -168,15 +155,8 @@ def main(pr_number: str) -> None:
     print(f"::add-task-context CHANGED_FILES::{len(files)}", flush=True)
     print(f"::add-task-context LINES_CHANGED::{total_lines}", flush=True)
 
-    try:
-        run_cmd([
-            "gh", "pr", "edit", pr_number,
-            "--repo", f"{org}/{repo}",
-            "--add-label", f"scope:{scope}",
-        ], check=False)
-        print(f"[scope_router] labeled PR with scope:{scope}", flush=True)
-    except (subprocess.CalledProcessError, OSError) as e:
-        print(f"[scope_router] warn: could not label PR: {e}", flush=True)
+    label_pr(config, pr_number, f"scope:{scope}")
+    print(f"[scope_router] labeled PR with scope:{scope}", flush=True)
 
     modules = {top_level_module(f.get("path", "")) for f in files}
     if scope == "cross-scope" and len(modules) >= 3:

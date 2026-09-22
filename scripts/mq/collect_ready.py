@@ -3,8 +3,9 @@
 Usage:
     python -m scripts.mq.collect_ready
 
-Required env: GH_ORG, GH_REPO
-Reads:  (fetches PR list via gh CLI)
+Required env: GH_ORG + GH_REPO (GitHub) or BITBUCKET_WORKSPACE + BITBUCKET_REPO (Bitbucket).
+              Bitbucket does not support PR labels — returns empty.
+Reads:  (fetches PR list via gh CLI or Bitbucket API)
 Writes: /workspace/ready_prs.json
 
 Exit codes: 0=done, 1=error
@@ -19,24 +20,10 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.shell import run_cmd
-from scripts.mq._shared import top_level_module
+from scripts.mq._shared import fetch_ready_prs, repo_slug, top_level_module
 
 
 _MERGE_READY_LABEL = "ai-merge-ready"
-
-
-def _fetch_ready_prs(org: str, repo: str, label: str) -> list[dict]:
-    """Fetch open PRs with the merge-ready label via gh CLI."""
-    result = run_cmd([
-        "gh", "pr", "list",
-        "--repo", f"{org}/{repo}",
-        "--label", label,
-        "--state", "open",
-        "--json", "number,headRefName,labels,author,createdAt,additions,deletions,files,title",
-        "--limit", "100",
-    ])
-    return json.loads(result.stdout) if result.stdout.strip() else []
 
 
 def _compute_age_hours(created_at: str) -> float:
@@ -68,15 +55,14 @@ def _infer_scope(files: list[dict]) -> str:
 @click.command()
 @click.option("--label", default=_MERGE_READY_LABEL, help="Label to filter merge-ready PRs")
 def main(label: str) -> None:
-    config = load_config(required=["GH_ORG", "GH_REPO"])
-    org = config["GH_ORG"]
-    repo = config["GH_REPO"]
+    config = load_config(required=[])
+    slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    print(f"[collect_ready] repo={org}/{repo} label={label}", flush=True)
+    print(f"[collect_ready] repo={slug} label={label}", flush=True)
 
-    raw_prs = _fetch_ready_prs(org, repo, label)
+    raw_prs = fetch_ready_prs(config, label)
     print(f"[collect_ready] found {len(raw_prs)} PRs with label '{label}'", flush=True)
 
     ready_prs = []
