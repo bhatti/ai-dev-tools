@@ -246,7 +246,13 @@ def main() -> None:
         print(f"[mq-report] HTML render failed (non-fatal): {e}", flush=True)
 
     slack_text = format_for_slack(report_text)
-    thread_ts = config.get("SLACK_THREAD_TS") or None
+
+    from scripts.common.slack_format import build_artifact_links
+    html_url, job_url = build_artifact_links(config, "report", "report.html")
+    if html_url:
+        slack_text += f"\n\n📎 <{html_url}|View full report>  |  <{job_url}|Job details>"
+
+    thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
     slack_ok = post_report(config, slack_text, report_text,
                            title=title, filename="mq_report.html",
                            thread_ts=thread_ts, task_type="report")
