@@ -300,6 +300,7 @@ def main(pr_number: str, num_shards: int) -> None:
             "reduction_pct": 100.0,
             "shards": [],
             "unmapped_files": [],
+            "language": "unknown",
         }
         (workspace / "test_impact.json").write_text(json.dumps(impact, indent=2))
         sys.exit(0)

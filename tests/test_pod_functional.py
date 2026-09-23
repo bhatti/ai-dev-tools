@@ -3414,6 +3414,93 @@ def test_33_mq_full_pipeline(base_env: dict[str, str]) -> TestResult:
     return _pass(result, f"scope={scope} tier={tier} report.md={md_bytes}B html={html_bytes}B")
 
 
+def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
+    """Run test_impact with a branch name (not a PR number).
+
+    Regression test for: TypeError: run_cmd() got an unexpected keyword argument 'cwd'
+    This code path is taken when --pr-number receives a branch/tag (e.g. 'main')
+    rather than a numeric PR ID.  It calls fetch_changed_files_from_diff() which
+    passes cwd= to run_cmd(); before the fix that raised TypeError.
+
+    Uses the formicary repo itself cloned to CODEBASE_DIR so we don't need GitHub
+    credentials — we just need a valid git repo on disk.
+    """
+    result = TestResult("mq-test-impact-branch")
+
+    env = dict(base_env)
+    ws = "/workspace/mq_branch"
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+    env["BASE_BRANCH"] = "main"
+    # Point at a public repo so clone_pr can clone without credentials
+    env["GH_ORG"] = "bhatti"
+    env["GH_REPO"] = "formicary"
+    env["REPO_URL"] = "https://github.com/bhatti/formicary"
+
+    with pod_fixture("mq-impact-branch") as pod:
+        setup_step = exec_step(pod, "setup",
+                               f"mkdir -p {ws}/reports {ws}/logs",
+                               env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        # Clone without a PR number (branch-based clone)
+        clone_step = exec_step(pod, "clone",
+                               f"python3 -m scripts.mq.clone_pr --repo {env['REPO_URL']} --branch main",
+                               env, timeout=120)
+        result.steps.append(clone_step)
+        if not clone_step.ok:
+            return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
+
+        # KEY ASSERTION: passing a branch name as pr-number must not raise TypeError.
+        # Before the fix, this failed with:
+        #   TypeError: run_cmd() got an unexpected keyword argument 'cwd'
+        impact_step = exec_step(pod, "test-impact-branch",
+                                "python3 -m scripts.mq.test_impact --pr-number main",
+                                env, timeout=120)
+        result.steps.append(impact_step)
+        if not impact_step.ok:
+            # Distinguish the specific TypeError from other failures
+            if "unexpected keyword argument 'cwd'" in impact_step.stderr:
+                return _fail(result, impact_step,
+                             "REGRESSION: run_cmd() does not accept cwd — fix scripts/common/shell.py")
+            return _fail(result, impact_step,
+                         f"test_impact branch exit {impact_step.returncode}: {impact_step.stderr[-400:]}")
+
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"ip = os.path.join(ws, 'test_impact.json')\n"
+            f"if not os.path.exists(ip): issues.append('test_impact.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(ip).read())\n"
+            f"    for k in ('total_tests', 'selected_tests', 'shards', 'language'):\n"
+            f"        if k not in d: issues.append(f'test_impact.json missing {{k}}')\n"
+            f"    print(f'::add-task-context TOTAL_TESTS::{{d.get(\"total_tests\",\"?\")}}')\n"
+            f"    print(f'::add-task-context SELECTED_TESTS::{{d.get(\"selected_tests\",\"?\")}}')\n"
+            f"    print(f'::add-task-context SHARD_COUNT::{{len(d.get(\"shards\",[]))}}')\n"
+            f"    print(f'::add-task-context LANGUAGE::{{d.get(\"language\",\"?\")}}')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"print('::add-task-context VERIFY::ok')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify-branch-impact", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"verify failed: {verify_step.stderr[-300:]}")
+
+    total = verify_step.context.get("TOTAL_TESTS", "?")
+    selected = verify_step.context.get("SELECTED_TESTS", "?")
+    shards = verify_step.context.get("SHARD_COUNT", "?")
+    lang = verify_step.context.get("LANGUAGE", "?")
+    return _pass(result, f"branch=main selected={selected}/{total} shards={shards} lang={lang}")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -3450,6 +3537,7 @@ ALL_TESTS: dict[str, callable] = {
     "mq-scope-router":        test_31_mq_scope_router,
     "mq-test-impact":         test_32_mq_test_impact,
     "mq-full-pipeline":       test_33_mq_full_pipeline,
+    "mq-test-impact-branch":  test_34_mq_test_impact_branch,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

@@ -189,6 +189,30 @@ class TestFetchChangedFilesFromDiff:
         assert len(files) == 1
         assert mock_cmd.call_count == 2
 
+    @patch("scripts.mq._shared.run_cmd")
+    def test_passes_cwd_to_run_cmd(self, mock_cmd):
+        # Regression: run_cmd must receive cwd= so git runs in the repo directory,
+        # not the script's working directory.  Before the fix, run_cmd() did not
+        # accept cwd and raised TypeError: unexpected keyword argument 'cwd'.
+        mock_cmd.return_value = MagicMock(stdout="5\t2\tsrc/foo.py\n")
+        fetch_changed_files_from_diff("/my/repo", "main")
+        _, kwargs = mock_cmd.call_args
+        assert kwargs.get("cwd") == "/my/repo", (
+            "run_cmd must be called with cwd='/my/repo' so git diff runs "
+            "inside the cloned repo, not the container's working directory"
+        )
+
+    @patch("scripts.mq._shared.run_cmd")
+    def test_fallback_also_passes_cwd(self, mock_cmd):
+        # The fallback call (origin/base) must also forward cwd.
+        mock_cmd.side_effect = [
+            Exception("no local ref"),
+            MagicMock(stdout="1\t0\tREADME.md\n"),
+        ]
+        fetch_changed_files_from_diff("/my/repo", "develop")
+        fallback_kwargs = mock_cmd.call_args_list[1][1]
+        assert fallback_kwargs.get("cwd") == "/my/repo"
+
 
 class TestLabelPrSkipsBranch:
     @patch("scripts.mq._shared.run_cmd")
