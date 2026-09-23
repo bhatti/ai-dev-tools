@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from scripts.mq.clone_pr import main
+from scripts.mq.clone_pr import _apply_repo_override, main
 
 
 class TestClonePr:
@@ -153,3 +153,57 @@ class TestClonePr:
         assert result.exit_code == 0
         calls = mock_sub.run.call_args_list
         assert calls[2][0][0] == ["git", "checkout", "origin/develop"]
+
+
+class TestApplyRepoOverride:
+    def test_github_url(self):
+        cfg = {"GH_ORG": "old", "GH_REPO": "old"}
+        _apply_repo_override(cfg, "https://github.com/bhatti/formicary")
+        assert cfg["GH_ORG"] == "bhatti"
+        assert cfg["GH_REPO"] == "formicary"
+
+    def test_bitbucket_url(self):
+        cfg = {}
+        _apply_repo_override(cfg, "https://bitbucket.org/myws/myrepo")
+        assert cfg["BITBUCKET_WORKSPACE"] == "myws"
+        assert cfg["BITBUCKET_REPO"] == "myrepo"
+
+    def test_empty_url_noop(self):
+        cfg = {"GH_ORG": "org", "GH_REPO": "repo"}
+        _apply_repo_override(cfg, "")
+        assert cfg["GH_ORG"] == "org"
+
+    def test_none_url_noop(self):
+        cfg = {"GH_ORG": "org"}
+        _apply_repo_override(cfg, None)
+        assert cfg["GH_ORG"] == "org"
+
+
+class TestRepoAndBranchFlags:
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_repo_flag_overrides_config(self, mock_ws, mock_cfg, mock_clone, tmp_path):
+        mock_cfg.return_value = {"GH_ORG": "old", "GH_REPO": "old"}
+        mock_ws.return_value = tmp_path
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, [
+                "--repo", "https://github.com/bhatti/formicary",
+                "--branch", "main",
+            ])
+        assert result.exit_code == 0
+        mock_clone.assert_called_once()
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_branch_flag_used_when_no_pr_number(self, mock_ws, mock_cfg, mock_clone, tmp_path):
+        mock_cfg.return_value = {"GH_ORG": "org", "GH_REPO": "repo"}
+        mock_ws.return_value = tmp_path
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, ["--branch", "develop"])
+        assert result.exit_code == 0
+        calls = mock_sub.run.call_args_list
+        assert calls[0][0][0] == ["git", "fetch", "origin", "develop"]
