@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -271,3 +272,133 @@ class TestCountAllTests:
 
     def test_none_repo(self):
         assert _count_all_tests(None) == 0
+
+
+class TestMainFullSuiteDefault:
+    """Default mode (no --diff-scope): always runs the full test suite.
+
+    Validates that passing --pr-number main produces real test output (selected > 0,
+    shards > 0) regardless of what git diff returns.  This is the correct behaviour
+    for: @sb-slack parallel-test --repo ... main
+    """
+
+    @patch("scripts.mq.test_impact.get_workspace_dir")
+    @patch("scripts.mq.test_impact.load_config")
+    def test_full_suite_always_runs(self, mock_cfg, mock_ws, tmp_path):
+        from click.testing import CliRunner
+        from scripts.mq.test_impact import main
+
+        repo_dir = tmp_path / "repo"
+        (repo_dir / "tests").mkdir(parents=True)
+        (repo_dir / "tests" / "test_alpha.py").write_text("def test_a(): pass")
+        (repo_dir / "tests" / "test_beta.py").write_text("def test_b(): pass")
+        (repo_dir / "tests" / "test_gamma.py").write_text("def test_g(): pass")
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        mock_ws.return_value = ws
+        mock_cfg.return_value = {
+            "GH_ORG": "org", "GH_REPO": "repo",
+            "CODEBASE_DIR": str(repo_dir),
+            "BASE_BRANCH": "main",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["--pr-number", "main", "--num-shards", "2"])
+        assert result.exit_code == 0, f"unexpected exit: {result.output}"
+
+        impact = json.loads((ws / "test_impact.json").read_text())
+        assert impact["total_tests"] == 3
+        assert impact["selected_tests"] == 3
+        assert impact["fallback_full_suite"] is True
+        assert len(impact["shards"]) > 0
+        assert impact["language"] == "python"
+        assert "::add-job-context TestShards::" in result.output
+
+    @patch("scripts.mq.test_impact.get_workspace_dir")
+    @patch("scripts.mq.test_impact.load_config")
+    def test_no_repo_dir_emits_empty(self, mock_cfg, mock_ws, tmp_path):
+        from click.testing import CliRunner
+        from scripts.mq.test_impact import main
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        mock_ws.return_value = ws
+        mock_cfg.return_value = {"GH_ORG": "org", "GH_REPO": "repo", "CODEBASE_DIR": ""}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["--pr-number", "main"])
+        assert result.exit_code == 0
+
+        impact = json.loads((ws / "test_impact.json").read_text())
+        assert impact["total_tests"] == 0
+        assert impact["selected_tests"] == 0
+        assert impact["shards"] == []
+
+
+class TestMainDiffScopeFallback:
+    """--diff-scope mode: scopes by diff but falls back to full suite when diff is empty."""
+
+    @patch("scripts.mq.test_impact.fetch_pr_files", return_value=[])
+    @patch("scripts.mq.test_impact.get_workspace_dir")
+    @patch("scripts.mq.test_impact.load_config")
+    def test_empty_diff_falls_back_to_full_suite(self, mock_cfg, mock_ws, mock_fetch, tmp_path):
+        from click.testing import CliRunner
+        from scripts.mq.test_impact import main
+
+        repo_dir = tmp_path / "repo"
+        (repo_dir / "tests").mkdir(parents=True)
+        (repo_dir / "tests" / "test_alpha.py").write_text("def test_a(): pass")
+        (repo_dir / "tests" / "test_beta.py").write_text("def test_b(): pass")
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        mock_ws.return_value = ws
+        mock_cfg.return_value = {
+            "GH_ORG": "org", "GH_REPO": "repo",
+            "CODEBASE_DIR": str(repo_dir),
+            "BASE_BRANCH": "main",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["--pr-number", "main", "--diff-scope"])
+        assert result.exit_code == 0, f"unexpected exit: {result.output}"
+
+        impact = json.loads((ws / "test_impact.json").read_text())
+        assert impact["total_tests"] == 2, "must fall back to full suite (2 test files)"
+        assert impact["selected_tests"] == 2
+        assert impact["fallback_full_suite"] is True
+        assert "::add-job-context TestShards::" in result.output
+
+    @patch("scripts.mq.test_impact.fetch_pr_files", return_value=[
+        {"path": "scripts/mq/test_impact.py"},
+    ])
+    @patch("scripts.mq.test_impact.get_workspace_dir")
+    @patch("scripts.mq.test_impact.load_config")
+    def test_diff_scope_with_head_flag(self, mock_cfg, mock_ws, mock_fetch, tmp_path):
+        """--diff-scope --head <branch> is the correct explicit diff-scope invocation."""
+        from click.testing import CliRunner
+        from scripts.mq.test_impact import main
+
+        repo_dir = tmp_path / "repo"
+        (repo_dir / "tests").mkdir(parents=True)
+        (repo_dir / "tests" / "test_impact.py").write_text("def test_foo(): pass")
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        mock_ws.return_value = ws
+        mock_cfg.return_value = {
+            "GH_ORG": "org", "GH_REPO": "repo",
+            "CODEBASE_DIR": str(repo_dir),
+            "BASE_BRANCH": "main",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["--pr-number", "feature/my-branch", "--head", "feature/my-branch", "--diff-scope"],
+        )
+        assert result.exit_code == 0, f"unexpected exit: {result.output}"
+        impact = json.loads((ws / "test_impact.json").read_text())
+        assert impact["selected_tests"] > 0
+        assert "::add-job-context TestShards::" in result.output

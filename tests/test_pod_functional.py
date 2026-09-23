@@ -3415,15 +3415,15 @@ def test_33_mq_full_pipeline(base_env: dict[str, str]) -> TestResult:
 
 
 def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
-    """Run test_impact with a branch name (not a PR number).
+    """Run test_impact with a branch name against bhatti/formicary repo.
 
-    Regression test for: TypeError: run_cmd() got an unexpected keyword argument 'cwd'
-    This code path is taken when --pr-number receives a branch/tag (e.g. 'main')
-    rather than a numeric PR ID.  It calls fetch_changed_files_from_diff() which
-    passes cwd= to run_cmd(); before the fix that raised TypeError.
+    Validates two things:
+    1. No TypeError: run_cmd() got an unexpected keyword argument 'cwd'  (regression)
+    2. Full suite fallback: when git diff main...HEAD is empty (HEAD is at main),
+       test_impact must discover ALL test files in the repo and produce real
+       test metrics (selected > 0, shards > 0) — NOT report 0/0 tests.
 
-    Uses the formicary repo itself cloned to CODEBASE_DIR so we don't need GitHub
-    credentials — we just need a valid git repo on disk.
+    This mirrors exactly: @sb-slack parallel-test --repo https://github.com/bhatti/formicary main
     """
     result = TestResult("mq-test-impact-branch")
 
@@ -3432,7 +3432,6 @@ def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
     env["WORKSPACE_DIR"] = ws
     env["CODEBASE_DIR"] = f"{ws}/repo"
     env["BASE_BRANCH"] = "main"
-    # Point at a public repo so clone_pr can clone without credentials
     env["GH_ORG"] = "bhatti"
     env["GH_REPO"] = "formicary"
     env["REPO_URL"] = "https://github.com/bhatti/formicary"
@@ -3445,7 +3444,6 @@ def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
         if not setup_step.ok:
             return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
 
-        # Clone without a PR number (branch-based clone)
         clone_step = exec_step(pod, "clone",
                                f"python3 -m scripts.mq.clone_pr --repo {env['REPO_URL']} --branch main",
                                env, timeout=120)
@@ -3453,36 +3451,66 @@ def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
         if not clone_step.ok:
             return _fail(result, clone_step, f"clone exit {clone_step.returncode}: {clone_step.stderr[-300:]}")
 
-        # KEY ASSERTION: passing a branch name as pr-number must not raise TypeError.
-        # Before the fix, this failed with:
-        #   TypeError: run_cmd() got an unexpected keyword argument 'cwd'
         impact_step = exec_step(pod, "test-impact-branch",
-                                "python3 -m scripts.mq.test_impact --pr-number main",
+                                "python3 -m scripts.mq.test_impact --pr-number main --num-shards 4",
                                 env, timeout=120)
         result.steps.append(impact_step)
         if not impact_step.ok:
-            # Distinguish the specific TypeError from other failures
             if "unexpected keyword argument 'cwd'" in impact_step.stderr:
                 return _fail(result, impact_step,
                              "REGRESSION: run_cmd() does not accept cwd — fix scripts/common/shell.py")
             return _fail(result, impact_step,
                          f"test_impact branch exit {impact_step.returncode}: {impact_step.stderr[-400:]}")
 
+        # Verify ::add-job-context TestShards:: is present in stdout (job-scoped, required for fan-out).
+        if "::add-job-context TestShards::" not in impact_step.stdout:
+            return _fail(result, impact_step,
+                         "REGRESSION: test_impact stdout missing ::add-job-context TestShards:: — "
+                         "fan_out.source: TestShards will have no items to iterate")
+
+        # Verify real test metrics — not 0/0
         verify_cmd = (
             f"python3 - <<'PYEOF'\n"
             f"import json, sys, os\n"
             f"ws = '{ws}'\n"
             f"issues = []\n"
             f"ip = os.path.join(ws, 'test_impact.json')\n"
-            f"if not os.path.exists(ip): issues.append('test_impact.json missing')\n"
+            f"if not os.path.exists(ip):\n"
+            f"    issues.append('test_impact.json missing')\n"
             f"else:\n"
             f"    d = json.loads(open(ip).read())\n"
-            f"    for k in ('total_tests', 'selected_tests', 'shards', 'language'):\n"
+            f"    for k in ('total_tests', 'selected_tests', 'reduction_pct', 'shards', 'language'):\n"
             f"        if k not in d: issues.append(f'test_impact.json missing {{k}}')\n"
-            f"    print(f'::add-task-context TOTAL_TESTS::{{d.get(\"total_tests\",\"?\")}}')\n"
-            f"    print(f'::add-task-context SELECTED_TESTS::{{d.get(\"selected_tests\",\"?\")}}')\n"
-            f"    print(f'::add-task-context SHARD_COUNT::{{len(d.get(\"shards\",[]))}}')\n"
-            f"    print(f'::add-task-context LANGUAGE::{{d.get(\"language\",\"?\")}}')\n"
+            f"    total = d.get('total_tests', 0)\n"
+            f"    selected = d.get('selected_tests', 0)\n"
+            f"    shard_count = len(d.get('shards', []))\n"
+            f"    lang = d.get('language', '?')\n"
+            f"    fallback = d.get('fallback_full_suite', False)\n"
+            f"    print(f'::add-task-context TOTAL_TESTS::{{total}}')\n"
+            f"    print(f'::add-task-context SELECTED_TESTS::{{selected}}')\n"
+            f"    print(f'::add-task-context SHARD_COUNT::{{shard_count}}')\n"
+            f"    print(f'::add-task-context LANGUAGE::{{lang}}')\n"
+            f"    print(f'::add-task-context FALLBACK_FULL_SUITE::{{fallback}}')\n"
+            f"    if total == 0:\n"
+            f"        issues.append('total_tests=0: full-suite fallback did not discover any tests')\n"
+            f"    if selected == 0:\n"
+            f"        issues.append('selected_tests=0: branch run must select all tests (full suite fallback)')\n"
+            f"    if shard_count == 0:\n"
+            f"        issues.append('shards=[]: no shards produced — fan-out will have nothing to run')\n"
+            f"    if not fallback:\n"
+            f"        issues.append('fallback_full_suite=False: expected True for branch with empty diff')\n"
+            f"    reduction = d.get('reduction_pct', 0.0)\n"
+            f"    print(f'::add-task-context REDUCTION_PCT::{{reduction}}')\n"
+            f"    # Per-shard load balance: max/min ratio (1.0=perfect, <3.0=acceptable)\n"
+            f"    durations = [s['est_duration_s'] for s in d.get('shards', []) if s.get('est_duration_s', 0) > 0]\n"
+            f"    if len(durations) > 1:\n"
+            f"        balance = round(max(durations) / min(durations), 2)\n"
+            f"        print(f'::add-task-context SHARD_BALANCE::{{balance}}')\n"
+            f"        if balance > 3.0:\n"
+            f"            issues.append(f'shard imbalance: max/min={{balance}} (expected <3.0)')\n"
+            f"    # Print per-shard summary\n"
+            f"    for s in d.get('shards', []):\n"
+            f"        print(f'  shard={{s[\"shard_id\"]}} tests={{s[\"test_count\"]}} est={{s[\"est_duration_s\"]}}s')\n"
             f"if issues:\n"
             f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
             f"    sys.exit(1)\n"
@@ -3498,7 +3526,13 @@ def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
     selected = verify_step.context.get("SELECTED_TESTS", "?")
     shards = verify_step.context.get("SHARD_COUNT", "?")
     lang = verify_step.context.get("LANGUAGE", "?")
-    return _pass(result, f"branch=main selected={selected}/{total} shards={shards} lang={lang}")
+    fallback = verify_step.context.get("FALLBACK_FULL_SUITE", "?")
+    reduction = verify_step.context.get("REDUCTION_PCT", "0.0")
+    balance = verify_step.context.get("SHARD_BALANCE", "n/a")
+    return _pass(result,
+                 f"branch=main full-suite fallback={fallback} "
+                 f"selected={selected}/{total} shards={shards} lang={lang} "
+                 f"reduction={reduction}% shard_balance={balance}")
 
 
 # ── test registry ──────────────────────────────────────────────────────────────
