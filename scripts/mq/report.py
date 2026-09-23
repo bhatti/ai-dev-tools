@@ -255,6 +255,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         skipped = summary.get("skipped", 0)
         wall = summary.get("wall_clock_s", 0)
         status = summary.get("status", "UNKNOWN")
+        n_shards = summary.get("shards", "?")
         emoji = "✅" if status == "PASS" else "❌"
         sections.append("## Test Results")
         sections.append("")
@@ -263,9 +264,52 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             sections.append(f"  ❌ {failed} failed")
         if skipped:
             sections.append(f"  ⏭️ {skipped} skipped")
-        sections.append(f"  ⏱️ {wall:.0f}s wall clock across "
-                        f"{summary.get('shards', '?')} shards")
+        sections.append(f"  ⏱️ {wall:.0f}s wall clock across {n_shards} shards")
         sections.append("")
+
+        shard_files = sorted(glob.glob(str(workspace / "shard_result_*.json")))
+        shard_results = []
+        for f in shard_files:
+            try:
+                shard_results.append(json.loads(Path(f).read_text()))
+            except (json.JSONDecodeError, OSError):
+                pass
+        if len(shard_results) > 1:
+            durations = [r.get("duration_s", 0) for r in shard_results]
+            total_sequential = sum(durations)
+            wall_parallel = max(durations) if durations else 0
+            speedup = total_sequential / wall_parallel if wall_parallel > 0 else 1.0
+            sections.append("### Shard Performance")
+            sections.append("")
+            sections.append("| Shard | Tests | Passed | Failed | Duration | Status |")
+            sections.append("|-------|-------|--------|--------|----------|--------|")
+            for r in sorted(shard_results, key=lambda x: x.get("duration_s", 0), reverse=True):
+                sid = r.get("shard_id", "?")
+                s_passed = r.get("passed", 0)
+                s_failed = r.get("failed", 0)
+                s_total = s_passed + s_failed + r.get("skipped", 0)
+                s_dur = r.get("duration_s", 0)
+                s_status = "✅" if r.get("status") == "passed" else "❌"
+                sections.append(f"| {sid} | {s_total} | {s_passed} | {s_failed} | {s_dur:.1f}s | {s_status} |")
+            sections.append("")
+            sections.append(f"> **Parallel speedup:** {total_sequential:.0f}s sequential → "
+                            f"{wall_parallel:.0f}s parallel ({speedup:.1f}x across {len(shard_results)} shards)")
+            sections.append("")
+
+            all_slow: list[dict] = []
+            for r in shard_results:
+                for st in r.get("slow_tests", []):
+                    all_slow.append(st)
+            all_slow.sort(key=lambda x: x.get("duration_s", 0), reverse=True)
+            if all_slow:
+                sections.append("### Slowest Tests")
+                sections.append("")
+                sections.append("| Duration | Test |")
+                sections.append("|----------|------|")
+                for st in all_slow[:10]:
+                    sections.append(f"| {st['duration_s']:.2f}s | `{st['name']}` |")
+                sections.append("")
+
         ctx["TEST_STATUS"] = status
         ctx["TESTS_PASSED"] = str(passed)
         ctx["TESTS_FAILED"] = str(failed)
@@ -348,7 +392,7 @@ def main() -> None:
 
     thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
     slack_ok = post_report(config, slack_text, report_text,
-                           title=title, filename="mq_report.html",
+                           title=title, filename="report.html",
                            thread_ts=thread_ts, task_type="report")
 
     result = {

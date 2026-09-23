@@ -4,6 +4,9 @@ from unittest.mock import MagicMock, patch
 
 from scripts.mq._shared import (
     _bb_find_pr_by_jira_key,
+    fetch_changed_files_from_diff,
+    is_branch_or_tag,
+    label_pr,
     resolve_pr_number,
     resolve_tracker,
     repo_slug,
@@ -122,3 +125,78 @@ class TestBbFindPrByJiraKey:
                "BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t"}
         result = _bb_find_pr_by_jira_key(cfg, "PROJ-123")
         assert result is None
+
+
+class TestIsBranchOrTag:
+    def test_numeric_is_not_branch(self):
+        assert is_branch_or_tag("42") is False
+
+    def test_jira_key_is_not_branch(self):
+        assert is_branch_or_tag("PROJ-123") is False
+
+    def test_branch_with_slash(self):
+        assert is_branch_or_tag("feature/my-branch") is True
+
+    def test_simple_branch(self):
+        assert is_branch_or_tag("develop") is True
+
+    def test_tag(self):
+        assert is_branch_or_tag("v1.2.3") is True
+
+    def test_main_branch(self):
+        assert is_branch_or_tag("main") is True
+
+    def test_empty_is_not_branch(self):
+        assert is_branch_or_tag("") is False
+
+    def test_multi_segment_jira(self):
+        assert is_branch_or_tag("AB-1") is False
+
+    def test_lowercase_not_jira(self):
+        assert is_branch_or_tag("proj-123") is True
+
+
+class TestFetchChangedFilesFromDiff:
+    @patch("scripts.mq._shared.run_cmd")
+    def test_parses_numstat(self, mock_cmd):
+        mock_cmd.return_value = MagicMock(
+            stdout="10\t5\tsrc/main.py\n3\t0\tREADME.md\n"
+        )
+        files = fetch_changed_files_from_diff("/repo", "main")
+        assert len(files) == 2
+        assert files[0] == {"path": "src/main.py", "additions": 10, "deletions": 5}
+        assert files[1] == {"path": "README.md", "additions": 3, "deletions": 0}
+
+    @patch("scripts.mq._shared.run_cmd")
+    def test_binary_file_dashes(self, mock_cmd):
+        mock_cmd.return_value = MagicMock(stdout="-\t-\timage.png\n")
+        files = fetch_changed_files_from_diff("/repo", "main")
+        assert files[0]["additions"] == 0
+        assert files[0]["deletions"] == 0
+
+    @patch("scripts.mq._shared.run_cmd")
+    def test_empty_output(self, mock_cmd):
+        mock_cmd.return_value = MagicMock(stdout="")
+        assert fetch_changed_files_from_diff("/repo", "main") == []
+
+    @patch("scripts.mq._shared.run_cmd")
+    def test_falls_back_to_origin(self, mock_cmd):
+        mock_cmd.side_effect = [
+            Exception("no ref"),
+            MagicMock(stdout="1\t1\tfile.py\n"),
+        ]
+        files = fetch_changed_files_from_diff("/repo", "main")
+        assert len(files) == 1
+        assert mock_cmd.call_count == 2
+
+
+class TestLabelPrSkipsBranch:
+    @patch("scripts.mq._shared.run_cmd")
+    def test_skips_for_branch(self, mock_cmd):
+        label_pr({"DEFAULT_TRACKER": "github"}, "feature/x", "scope:api")
+        mock_cmd.assert_not_called()
+
+    @patch("scripts.mq._shared.run_cmd")
+    def test_runs_for_pr_number(self, mock_cmd):
+        label_pr({"DEFAULT_TRACKER": "github", "GH_ORG": "o", "GH_REPO": "r"}, "42", "scope:api")
+        mock_cmd.assert_called_once()

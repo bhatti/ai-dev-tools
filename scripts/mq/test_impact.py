@@ -22,7 +22,18 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.mq._shared import fetch_pr_files, is_test_file, repo_slug
+from scripts.mq._shared import fetch_changed_files_from_diff, fetch_pr_files, is_test_file, repo_slug
+
+_SKIP_DIRS = frozenset({
+    "node_modules", "vendor", "target", ".git", "__pycache__",
+    ".tox", ".nox", ".mypy_cache", ".pytest_cache", "dist",
+    "build", ".gradle", ".next", "coverage",
+})
+
+
+def _should_skip(path: Path) -> bool:
+    """Return True if path is under a directory we should never crawl."""
+    return bool(_SKIP_DIRS & set(path.parts))
 
 
 _LANG_TEST_PATTERNS: dict[str, list[tuple[str, str]]] = {
@@ -155,10 +166,9 @@ def _discover_dependent_tests(
 
     changed_modules: set[str] = set()
     for f in changed_files:
-        stem = Path(f).stem
-        module = f.replace("/", ".").replace(".py", "").replace(".go", "").replace(".ts", "").replace(".java", "").replace(".kt", "").replace(".rb", "").replace(".cs", "").replace(".rs", "")
-        changed_modules.add(stem)
-        changed_modules.add(module)
+        p = Path(f)
+        changed_modules.add(p.stem)
+        changed_modules.add(p.with_suffix("").as_posix().replace("/", "."))
 
     dependent_tests: set[str] = set()
     repo_path = Path(repo_dir)
@@ -177,7 +187,10 @@ def _discover_dependent_tests(
 
     try:
         for test_file in repo_path.glob(glob_pattern):
-            if not is_test_file(str(test_file.relative_to(repo_path))):
+            rel = test_file.relative_to(repo_path)
+            if _should_skip(rel):
+                continue
+            if not is_test_file(str(rel)):
                 continue
             try:
                 content = test_file.read_text(errors="ignore")
@@ -236,25 +249,32 @@ def _partition_shards(
     ]
 
 
+def _find_all_test_files(repo_dir: str) -> list[str]:
+    """Return all test file paths in the repo, skipping vendor/build dirs."""
+    repo_path = Path(repo_dir)
+    result: list[str] = []
+    try:
+        for f in repo_path.rglob("*"):
+            if not f.is_file():
+                continue
+            try:
+                rel = f.relative_to(repo_path)
+            except ValueError:
+                continue
+            if _should_skip(rel):
+                continue
+            if is_test_file(str(rel)):
+                result.append(str(rel))
+    except OSError:
+        pass
+    return sorted(result)
+
+
 def _count_all_tests(repo_dir: str | None) -> int:
     """Count total test files in the repo for reduction percentage."""
     if not repo_dir:
         return 0
-
-    count = 0
-    repo_path = Path(repo_dir)
-    try:
-        for f in repo_path.rglob("*"):
-            if f.is_file():
-                try:
-                    rel = str(f.relative_to(repo_path))
-                except ValueError:
-                    continue
-                if is_test_file(rel):
-                    count += 1
-    except OSError:
-        pass
-    return count
+    return len(_find_all_test_files(repo_dir))
 
 
 @click.command()
@@ -291,9 +311,14 @@ def main(pr_number: str, num_shards: int) -> None:
     dependent_tests = _discover_dependent_tests(changed_files, lang, repo_dir or None)
 
     all_selected = sorted(set(mapped_tests) | set(dependent_tests))
+    fallback_full_suite = False
+    if not all_selected and changed_files:
+        print("[test_impact] no tests mapped — falling back to full suite", flush=True)
+        fallback_full_suite = True
     print(
         f"[test_impact] mapped={len(mapped_tests)} dependent={len(dependent_tests)} "
-        f"total_selected={len(all_selected)} unmapped={len(unmapped)}",
+        f"total_selected={len(all_selected)} unmapped={len(unmapped)}"
+        f"{' (fallback: full suite)' if fallback_full_suite else ''}",
         flush=True,
     )
 
@@ -306,8 +331,13 @@ def main(pr_number: str, num_shards: int) -> None:
         except (json.JSONDecodeError, OSError):
             pass
 
-    shards = _partition_shards(all_selected, num_shards, timings)
     total_tests = _count_all_tests(repo_dir or None) or max(len(all_selected), 1)
+
+    if fallback_full_suite and repo_dir:
+        all_selected = _find_all_test_files(repo_dir)
+        total_tests = len(all_selected) or 1
+
+    shards = _partition_shards(all_selected, num_shards, timings)
     reduction_pct = round((1.0 - len(all_selected) / total_tests) * 100, 1) if total_tests > 0 else 0.0
 
     impact = {
@@ -318,6 +348,7 @@ def main(pr_number: str, num_shards: int) -> None:
         "shards": shards,
         "unmapped_files": unmapped,
         "test_files": all_selected,
+        "fallback_full_suite": fallback_full_suite,
     }
 
     out_path = workspace / "test_impact.json"

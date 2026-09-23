@@ -237,3 +237,39 @@ class TestBuildReport:
         assert ctx["SCOPE"] == "api"
         assert ctx["RISK_TIER"] == "LOW"
         assert ctx["TEST_STATUS"] == "PASS"
+
+    def test_shard_performance_table(self, tmp_path):
+        for i, dur in enumerate([30.5, 15.2, 22.8]):
+            (tmp_path / f"shard_result_{i}.json").write_text(json.dumps({
+                "shard_id": str(i),
+                "passed": 10,
+                "failed": 0,
+                "skipped": 1,
+                "duration_s": dur,
+                "status": "passed",
+                "slow_tests": [
+                    {"name": f"tests/test_{i}.py::test_slow", "duration_s": dur / 2},
+                ],
+            }))
+        (tmp_path / "test_summary.json").write_text(json.dumps({
+            "passed": 30, "failed": 0, "total": 30,
+            "shards": 3, "wall_clock_s": 30.5, "status": "PASS",
+        }))
+        md, ctx = _build_report(tmp_path, "1", "Shard Test")
+        assert "### Shard Performance" in md
+        assert "Parallel speedup" in md
+        assert "30.5s" in md
+        assert "### Slowest Tests" in md
+        assert "test_slow" in md
+
+    def test_shard_performance_not_shown_for_single_shard(self, tmp_path):
+        (tmp_path / "shard_result_0.json").write_text(json.dumps({
+            "shard_id": "0", "passed": 5, "failed": 0, "skipped": 0,
+            "duration_s": 10.0, "status": "passed", "slow_tests": [],
+        }))
+        (tmp_path / "test_summary.json").write_text(json.dumps({
+            "passed": 5, "failed": 0, "total": 5,
+            "shards": 1, "wall_clock_s": 10.0, "status": "PASS",
+        }))
+        md, ctx = _build_report(tmp_path, "1", "Single Shard")
+        assert "### Shard Performance" not in md

@@ -107,3 +107,49 @@ class TestClonePr:
             result = CliRunner().invoke(main, [])
         assert result.exit_code == 0
         mock_sub.run.assert_not_called()
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_branch_checkout(self, mock_ws, mock_cfg, mock_clone, tmp_path):
+        mock_cfg.return_value = {"GH_ORG": "org", "GH_REPO": "repo"}
+        mock_ws.return_value = tmp_path
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, ["--pr-number", "feature/billing-v2"])
+        assert result.exit_code == 0
+        mock_clone.assert_called_once()
+        calls = mock_sub.run.call_args_list
+        assert calls[0][0][0] == ["git", "fetch", "origin", "feature/billing-v2"]
+        assert calls[1][0][0] == ["git", "checkout", "feature/billing-v2"]
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_tag_checkout(self, mock_ws, mock_cfg, mock_clone, tmp_path):
+        mock_cfg.return_value = {"GH_ORG": "org", "GH_REPO": "repo"}
+        mock_ws.return_value = tmp_path
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, ["--pr-number", "v1.2.3"])
+        assert result.exit_code == 0
+        calls = mock_sub.run.call_args_list
+        assert calls[0][0][0] == ["git", "fetch", "origin", "v1.2.3"]
+        assert calls[1][0][0] == ["git", "checkout", "v1.2.3"]
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_branch_checkout_fallback_to_origin(self, mock_ws, mock_cfg, mock_clone, tmp_path):
+        mock_cfg.return_value = {"GH_ORG": "org", "GH_REPO": "repo"}
+        mock_ws.return_value = tmp_path
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.side_effect = [
+                MagicMock(returncode=0),   # fetch succeeds
+                MagicMock(returncode=1),   # checkout fails
+                MagicMock(returncode=0),   # fallback to origin/branch
+            ]
+            result = CliRunner().invoke(main, ["--pr-number", "develop"])
+        assert result.exit_code == 0
+        calls = mock_sub.run.call_args_list
+        assert calls[2][0][0] == ["git", "checkout", "origin/develop"]

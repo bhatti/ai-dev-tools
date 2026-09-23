@@ -16,6 +16,17 @@ from scripts.common.shell import run_cmd
 _JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 
+def is_branch_or_tag(ref: str) -> bool:
+    """Return True if ref looks like a branch/tag rather than a PR number or Jira key."""
+    if not ref:
+        return False
+    if ref.isdigit():
+        return False
+    if _JIRA_KEY_RE.match(ref):
+        return False
+    return True
+
+
 def resolve_tracker(config: dict) -> str:
     """Resolve effective tracker from config. Returns 'github' or 'bitbucket'."""
     tracker = (config.get("DEFAULT_TRACKER") or "github").lower().strip()
@@ -93,12 +104,44 @@ def _bb_find_pr_by_jira_key(config: dict, jira_key: str) -> str | None:
     return None
 
 
-def fetch_pr_files(config: dict, pr_number: str) -> list[dict]:
-    """Fetch changed files for a PR. Returns list of dicts with path/additions/deletions.
+def fetch_changed_files_from_diff(repo_dir: str, base_branch: str = "main") -> list[dict]:
+    """Fetch changed files via git diff against a base branch.
 
-    Works with both GitHub (gh CLI) and Bitbucket (REST API).
-    Resolves Jira keys to numeric BB PR numbers automatically.
+    Used when operating on a branch/tag rather than a PR number.
     """
+    try:
+        result = run_cmd(
+            ["git", "diff", "--numstat", f"{base_branch}...HEAD"],
+            cwd=repo_dir,
+        )
+    except Exception:
+        result = run_cmd(
+            ["git", "diff", "--numstat", f"origin/{base_branch}...HEAD"],
+            cwd=repo_dir,
+        )
+    files = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            adds = int(parts[0]) if parts[0] != "-" else 0
+            dels = int(parts[1]) if parts[1] != "-" else 0
+            files.append({"path": parts[2], "additions": adds, "deletions": dels})
+    return files
+
+
+def fetch_pr_files(config: dict, pr_number: str) -> list[dict]:
+    """Fetch changed files for a PR, branch, or tag.
+
+    Works with GitHub (gh CLI), Bitbucket (REST API), and git diff fallback.
+    Accepts: numeric PR ("42"), Jira key ("PROJ-123"), branch ("feature/x"), tag ("v1.2.3").
+    """
+    repo_dir = config.get("CODEBASE_DIR", "")
+    base_branch = config.get("BASE_BRANCH", "main")
+
+    if is_branch_or_tag(pr_number) and repo_dir:
+        print(f"[mq] using git diff for branch/tag: {pr_number}", flush=True)
+        return fetch_changed_files_from_diff(repo_dir, base_branch)
+
     if resolve_tracker(config) == "bitbucket":
         resolved = resolve_pr_number(config, pr_number)
         if not resolved:
@@ -141,7 +184,22 @@ def _bb_fetch_pr_files(config: dict, pr_number: str) -> list[dict]:
 
 
 def fetch_pr_stats(config: dict, pr_number: str) -> dict:
-    """Fetch PR stats: files list + aggregate additions/deletions."""
+    """Fetch PR stats: files list + aggregate additions/deletions.
+
+    Accepts: numeric PR, Jira key, branch name, or tag.
+    """
+    repo_dir = config.get("CODEBASE_DIR", "")
+    base_branch = config.get("BASE_BRANCH", "main")
+
+    if is_branch_or_tag(pr_number) and repo_dir:
+        files = fetch_changed_files_from_diff(repo_dir, base_branch)
+        return {
+            "files": files,
+            "additions": sum(f.get("additions", 0) for f in files),
+            "deletions": sum(f.get("deletions", 0) for f in files),
+            "changedFiles": len(files),
+        }
+
     if resolve_tracker(config) == "bitbucket":
         resolved = resolve_pr_number(config, pr_number)
         if not resolved:
@@ -177,8 +235,11 @@ def fetch_ready_prs(config: dict, label: str) -> list[dict]:
 
 
 def label_pr(config: dict, pr_number: str, label: str) -> None:
-    """Add a label to a PR. GitHub-only (Bitbucket has no label API)."""
+    """Add a label to a PR. GitHub-only (Bitbucket has no label API). Skips for branch/tag refs."""
     if resolve_tracker(config) != "github":
+        return
+    if is_branch_or_tag(pr_number):
+        print(f"[mq] skip label: {pr_number} is a branch/tag, not a PR", flush=True)
         return
     try:
         run_cmd([

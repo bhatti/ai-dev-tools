@@ -1,12 +1,14 @@
 """Run CI for a specific test shard (called per fan-out item).
 
 Detects project type and runs the appropriate test command for the shard's
-file list.
+file list.  Supports Python, Go, Rust, Node/Jest, Java (Gradle/Maven),
+Kotlin, Ruby, C#, and Makefile projects.  Override detection with TEST_CMD.
 
 Usage:
     python -m scripts.mq.run_scoped_ci --shard '{"shard_id":"0","tests":"[\"tests/test_foo.py\"]"}'
 
 Required env: (none required, CODEBASE_DIR recommended)
+Optional env: TEST_CMD — override auto-detected test command (e.g. "make test")
 Reads:  shard definition from --shard JSON or /workspace/test_impact.json
 Writes: /workspace/shard_result_{shard_id}.json
 
@@ -17,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -25,7 +28,6 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.shell import run_cmd
 
 
 _PROJECT_TYPE_MARKERS = [
@@ -56,35 +58,65 @@ def _detect_project_type(repo_dir: str) -> str:
     return "python"
 
 
+def _detect_concurrency() -> int:
+    """Detect available CPUs respecting cgroup limits (K8s pods).
+
+    Reads cgroup v2 (cpu.max) then v1 (cpu.cfs_quota_us/period) to honour
+    the container's CPU request/limit.  Falls back to os.cpu_count().
+    """
+    cgroup_max = Path("/sys/fs/cgroup/cpu.max")
+    cfs_quota = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+    cfs_period = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+    try:
+        if cgroup_max.exists():
+            parts = cgroup_max.read_text().strip().split()
+            if parts[0] != "max":
+                return max(1, int(parts[0]) // int(parts[1]))
+        elif cfs_quota.exists() and cfs_period.exists():
+            quota = int(cfs_quota.read_text().strip())
+            period = int(cfs_period.read_text().strip())
+            if quota > 0:
+                return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    return max(1, os.cpu_count() or 1)
+
+
 def _build_test_command(
     project_type: str,
     tests: list[str],
     repo_dir: str,
     junit_path: str | None = None,
-) -> list[str]:
-    """Build the test runner command for a shard."""
+    concurrency: int | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Build the test runner command for a shard.
+
+    Returns (command, extra_env) where extra_env contains environment
+    variables needed for concurrency control.
+    """
+    n = concurrency or _detect_concurrency()
+    extra_env: dict[str, str] = {}
+
     if project_type == "python":
-        cmd = ["python", "-m", "pytest", "-v", "--tb=short"]
+        cmd = ["python", "-m", "pytest", "-v", "--tb=short", "--durations=5"]
         if junit_path:
-            cmd.extend([f"--junitxml={junit_path}"])
+            cmd.append(f"--junitxml={junit_path}")
         cmd.extend(tests)
-        return cmd
+        return cmd, extra_env
 
     if project_type == "go":
         packages: set[str] = set()
         for t in tests:
             pkg = str(Path(t).parent)
-            if pkg == ".":
-                pkg = "./..."
-            else:
-                pkg = f"./{pkg}/..."
-            packages.add(pkg)
-        cmd = ["go", "test", "-v", "-count=1"]
+            packages.add("./..." if pkg == "." else f"./{pkg}/...")
+        extra_env["GOMAXPROCS"] = str(n)
         if junit_path:
-            cmd = ["gotestsum", "--junitfile", junit_path, "--"] + list(packages)
+            cmd = ["gotestsum", "--junitfile", junit_path, "--",
+                   "-count=1", f"-parallel={n}"] + sorted(packages)
         else:
+            cmd = ["go", "test", "-v", "-count=1", f"-parallel={n}"]
             cmd.extend(sorted(packages))
-        return cmd
+        return cmd, extra_env
 
     if project_type == "rust":
         modules: set[str] = set()
@@ -95,36 +127,39 @@ def _build_test_command(
         cmd = ["cargo", "test"]
         for m in sorted(modules):
             cmd.extend(["-p", m])
-        return cmd
+        cmd.extend(["--", f"--test-threads={n}"])
+        extra_env["RUST_TEST_THREADS"] = str(n)
+        return cmd, extra_env
 
     if project_type == "node":
-        cmd = ["npx", "jest", "--verbose"]
+        cmd = ["npx", "jest", "--verbose", f"--maxWorkers={n}"]
         if junit_path:
-            cmd.extend(["--reporters=jest-junit"])
+            cmd.append("--reporters=jest-junit")
         cmd.extend(["--"] + tests)
-        return cmd
+        return cmd, extra_env
 
     if project_type == "java":
         if (Path(repo_dir) / "build.gradle").exists():
-            cmd = ["./gradlew", "test", "--tests"]
+            cmd = ["./gradlew", "test", f"--max-workers={n}", "--tests"]
             test_patterns = [t.replace("/", ".").replace(".java", "") for t in tests]
             cmd.extend(test_patterns)
         else:
-            cmd = ["mvn", "test", "-pl", ",".join({str(Path(t).parent) for t in tests})]
-        return cmd
+            cmd = ["mvn", "test", f"-T{n}", "-pl",
+                   ",".join(sorted({str(Path(t).parent) for t in tests}))]
+        return cmd, extra_env
 
     if project_type == "ruby":
         cmd = ["bundle", "exec", "rspec"]
         if junit_path:
             cmd.extend(["--format", "RspecJunitFormatter", "--out", junit_path])
         cmd.extend(tests)
-        return cmd
+        return cmd, extra_env
 
     if project_type == "kotlin":
-        cmd = ["./gradlew", "test", "--tests"]
+        cmd = ["./gradlew", "test", f"--max-workers={n}", "--tests"]
         test_patterns = [t.replace("/", ".").replace(".kt", "") for t in tests]
         cmd.extend(test_patterns)
-        return cmd
+        return cmd, extra_env
 
     if project_type == "csharp":
         cmd = ["dotnet", "test", "--filter"]
@@ -132,16 +167,25 @@ def _build_test_command(
         cmd.append("|".join(f"FullyQualifiedName~{c}" for c in test_classes))
         if junit_path:
             cmd.extend(["--logger", f"junit;LogFilePath={junit_path}"])
-        return cmd
+        extra_env["DOTNET_PROCESSOR_COUNT"] = str(n)
+        return cmd, extra_env
 
-    return ["python", "-m", "pytest", "-v"] + tests
+    if project_type == "make":
+        cmd = ["make", "test"]
+        return cmd, extra_env
+
+    return ["python", "-m", "pytest", "-v"] + tests, extra_env
 
 
 def _run_tests(
     cmd: list[str],
     repo_dir: str,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, str, float]:
     """Execute the test command and capture results."""
+    env = None
+    if extra_env:
+        env = {**os.environ, **extra_env}
     start = time.monotonic()
     try:
         result = subprocess.run(
@@ -149,6 +193,7 @@ def _run_tests(
             capture_output=True,
             text=True,
             cwd=repo_dir,
+            env=env,
             timeout=1800,
         )
         duration = time.monotonic() - start
@@ -162,26 +207,90 @@ def _run_tests(
 
 
 def _parse_test_counts(stdout: str, stderr: str) -> tuple[int, int, int]:
-    """Parse passed/failed/skipped counts from test output."""
-    passed = failed = skipped = 0
-    pytest_match = re.search(r"(\d+) passed", stdout + stderr)
-    if pytest_match:
-        passed = int(pytest_match.group(1))
-    fail_match = re.search(r"(\d+) failed", stdout + stderr)
-    if fail_match:
-        failed = int(fail_match.group(1))
-    skip_match = re.search(r"(\d+) skipped", stdout + stderr)
-    if skip_match:
-        skipped = int(skip_match.group(1))
+    """Parse passed/failed/skipped counts from test output.
 
-    go_pass = re.search(r"ok\s+\S+\s+", stdout)
-    if go_pass:
-        passed = max(passed, len(re.findall(r"^ok\s+", stdout, re.MULTILINE)))
-    go_fail = re.search(r"^FAIL\s+", stdout, re.MULTILINE)
-    if go_fail:
-        failed = max(failed, len(re.findall(r"^FAIL\s+", stdout, re.MULTILINE)))
+    Supports pytest, Go, Rust, Jest, RSpec, and dotnet output formats.
+    """
+    combined = stdout + stderr
+    passed = failed = skipped = 0
+
+    # pytest: "5 passed, 2 failed, 1 skipped in 3.2s"
+    m = re.search(r"(\d+) passed", combined)
+    if m:
+        passed = int(m.group(1))
+    m = re.search(r"(\d+) failed", combined)
+    if m:
+        failed = int(m.group(1))
+    m = re.search(r"(\d+) skipped", combined)
+    if m:
+        skipped = int(m.group(1))
+
+    # Go: "ok  github.com/org/repo/pkg  0.5s" / "FAIL github.com/..."
+    go_ok = re.findall(r"^ok\s+", stdout, re.MULTILINE)
+    go_fail = re.findall(r"^FAIL\s+", stdout, re.MULTILINE)
+    if go_ok or go_fail:
+        passed = max(passed, len(go_ok))
+        failed = max(failed, len(go_fail))
+
+    # Rust: "test result: ok. 5 passed; 0 failed; 1 ignored"
+    m = re.search(r"test result:.*?(\d+) passed.*?(\d+) failed.*?(\d+) ignored", combined)
+    if m:
+        passed = max(passed, int(m.group(1)))
+        failed = max(failed, int(m.group(2)))
+        skipped = max(skipped, int(m.group(3)))
+
+    # Jest: "Tests:  2 failed, 5 passed, 7 total"
+    m = re.search(r"Tests:\s+(?:(\d+)\s+failed,\s*)?(\d+)\s+passed", combined)
+    if m:
+        if m.group(1):
+            failed = max(failed, int(m.group(1)))
+        passed = max(passed, int(m.group(2)))
+
+    # RSpec: "15 examples, 2 failures, 1 pending"
+    m = re.search(r"(\d+)\s+examples?,\s+(\d+)\s+failures?(?:,\s+(\d+)\s+pending)?", combined)
+    if m:
+        total_examples = int(m.group(1))
+        rspec_failures = int(m.group(2))
+        rspec_pending = int(m.group(3)) if m.group(3) else 0
+        passed = max(passed, total_examples - rspec_failures - rspec_pending)
+        failed = max(failed, rspec_failures)
+        skipped = max(skipped, rspec_pending)
+
+    # dotnet: "Passed!  - Failed: 0, Passed: 10, Skipped: 2, Total: 12"
+    m = re.search(r"Failed:\s*(\d+),\s*Passed:\s*(\d+),\s*Skipped:\s*(\d+)", combined)
+    if m:
+        failed = max(failed, int(m.group(1)))
+        passed = max(passed, int(m.group(2)))
+        skipped = max(skipped, int(m.group(3)))
 
     return passed, failed, skipped
+
+
+def _parse_slow_tests(stdout: str, stderr: str, top_n: int = 5) -> list[dict]:
+    """Extract slowest tests from runner output.
+
+    Supports pytest --durations, Go test -v, Rust test output.
+    Returns list of {"name": str, "duration_s": float} sorted slowest first.
+    """
+    combined = stdout + stderr
+    slow: list[dict] = []
+
+    # pytest --durations: "1.23s call     tests/test_foo.py::test_bar"
+    for m in re.finditer(r"([\d.]+)s\s+(?:call|setup)\s+(.+)", combined):
+        slow.append({"name": m.group(2).strip(), "duration_s": float(m.group(1))})
+
+    # Go: "--- PASS: TestFoo (1.230s)" or "--- FAIL: TestFoo (2.100s)"
+    if not slow:
+        for m in re.finditer(r"---\s+(?:PASS|FAIL):\s+(\S+)\s+\(([\d.]+)s\)", combined):
+            slow.append({"name": m.group(1), "duration_s": float(m.group(2))})
+
+    # Rust: "test module::test_name ... ok (1.23s)" — not all Rust runners emit timing
+    if not slow:
+        for m in re.finditer(r"test\s+(\S+)\s+\.\.\.\s+\w+\s+\(([\d.]+)s\)", combined):
+            slow.append({"name": m.group(1), "duration_s": float(m.group(2))})
+
+    slow.sort(key=lambda x: x["duration_s"], reverse=True)
+    return slow[:top_n]
 
 
 @click.command()
@@ -232,15 +341,25 @@ def main(shard: str, shard_id: str | None) -> None:
         (workspace / f"shard_result_{sid}.json").write_text(json.dumps(result, indent=2))
         sys.exit(0)
 
-    project_type = _detect_project_type(repo_dir)
-    print(f"[run_scoped_ci] project_type={project_type} repo={repo_dir}", flush=True)
+    # TEST_CMD override — lets users specify their own test runner
+    test_cmd_override = os.environ.get("TEST_CMD", "").strip()
 
-    junit_path = str(workspace / f"shard_{sid}_junit.xml")
-    cmd = _build_test_command(project_type, tests, repo_dir, junit_path)
+    if test_cmd_override:
+        cmd = shlex.split(test_cmd_override) + tests
+        extra_env: dict[str, str] = {}
+        project_type = "custom"
+        print(f"[run_scoped_ci] using TEST_CMD override: {test_cmd_override}", flush=True)
+    else:
+        project_type = _detect_project_type(repo_dir)
+        junit_path = str(workspace / f"shard_{sid}_junit.xml")
+        cmd, extra_env = _build_test_command(project_type, tests, repo_dir, junit_path)
+
+    print(f"[run_scoped_ci] project_type={project_type} repo={repo_dir}", flush=True)
     print(f"[run_scoped_ci] running: {' '.join(cmd[:6])}{'...' if len(cmd) > 6 else ''}", flush=True)
 
-    returncode, stdout, stderr, duration = _run_tests(cmd, repo_dir)
+    returncode, stdout, stderr, duration = _run_tests(cmd, repo_dir, extra_env)
     passed, failed, skipped = _parse_test_counts(stdout, stderr)
+    slow_tests = _parse_slow_tests(stdout, stderr)
 
     status = "passed" if returncode == 0 else "failed"
     print(
@@ -249,6 +368,11 @@ def main(shard: str, shard_id: str | None) -> None:
         f"duration={duration:.1f}s",
         flush=True,
     )
+
+    if slow_tests:
+        print(f"[run_scoped_ci] slowest tests:", flush=True)
+        for st in slow_tests[:3]:
+            print(f"  {st['duration_s']:.2f}s  {st['name']}", flush=True)
 
     if stdout:
         for line in stdout.splitlines()[-20:]:
@@ -265,7 +389,8 @@ def main(shard: str, shard_id: str | None) -> None:
         "duration_s": round(duration, 1),
         "status": status,
         "returncode": returncode,
-        "junit_xml": junit_path if Path(junit_path).exists() else None,
+        "project_type": project_type,
+        "slow_tests": slow_tests,
     }
 
     out_path = workspace / f"shard_result_{sid}.json"

@@ -7,9 +7,12 @@ import pytest
 
 from scripts.mq._shared import is_test_file
 from scripts.mq.test_impact import (
+    _count_all_tests,
     _detect_language,
+    _find_all_test_files,
     _map_to_test_files,
     _partition_shards,
+    _should_skip,
 )
 
 
@@ -189,3 +192,82 @@ class TestPartitionShards:
         tests = ["test_a.py"]
         shards = _partition_shards(tests, 0, None)
         assert len(shards) == 1
+
+
+class TestShouldSkip:
+    def test_node_modules(self):
+        assert _should_skip(Path("node_modules/foo/test_bar.py"))
+
+    def test_vendor(self):
+        assert _should_skip(Path("vendor/github.com/pkg/foo_test.go"))
+
+    def test_target(self):
+        assert _should_skip(Path("target/debug/build/test.rs"))
+
+    def test_git(self):
+        assert _should_skip(Path(".git/hooks/pre-commit"))
+
+    def test_pycache(self):
+        assert _should_skip(Path("src/__pycache__/foo.cpython-311.pyc"))
+
+    def test_normal_path(self):
+        assert not _should_skip(Path("src/billing/charge.py"))
+
+    def test_tests_dir(self):
+        assert not _should_skip(Path("tests/test_charge.py"))
+
+
+class TestFindAllTestFiles:
+    def test_finds_test_files(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("")
+        (tmp_path / "tests" / "test_b.py").write_text("")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("")
+        result = _find_all_test_files(str(tmp_path))
+        assert len(result) == 2
+        assert "tests/test_a.py" in result
+
+    def test_skips_node_modules(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("")
+        (tmp_path / "node_modules" / "pkg" / "tests").mkdir(parents=True)
+        (tmp_path / "node_modules" / "pkg" / "tests" / "test_x.py").write_text("")
+        assert len(_find_all_test_files(str(tmp_path))) == 1
+
+    def test_skips_vendor(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("")
+        (tmp_path / "vendor" / "github.com").mkdir(parents=True)
+        (tmp_path / "vendor" / "github.com" / "foo_test.go").write_text("")
+        assert len(_find_all_test_files(str(tmp_path))) == 1
+
+    def test_sorted_output(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_z.py").write_text("")
+        (tmp_path / "tests" / "test_a.py").write_text("")
+        result = _find_all_test_files(str(tmp_path))
+        assert result == sorted(result)
+
+
+class TestCountAllTests:
+    def test_counts_test_files(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("")
+        (tmp_path / "tests" / "test_b.py").write_text("")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("")
+        assert _count_all_tests(str(tmp_path)) == 2
+
+    def test_skips_node_modules(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("")
+        (tmp_path / "node_modules" / "pkg" / "tests").mkdir(parents=True)
+        (tmp_path / "node_modules" / "pkg" / "tests" / "test_x.py").write_text("")
+        assert _count_all_tests(str(tmp_path)) == 1
+
+    def test_empty_repo(self, tmp_path):
+        assert _count_all_tests(str(tmp_path)) == 0
+
+    def test_none_repo(self):
+        assert _count_all_tests(None) == 0
