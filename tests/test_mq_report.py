@@ -34,12 +34,30 @@ class TestBuildReport:
             "changed_files": 12,
             "lines_changed": 450,
             "touches": ["auth/login.py"],
+            "owners": ["@team-payments"],
         }))
         md, ctx = _build_report(tmp_path, "1", "Scope")
         assert "billing" in md
         assert "high" in md
+        assert "Description" in md
+        assert "can merge in dedicated lane" in md
+        assert "security-sensitive" in md
+        assert "auth/login.py" in md
+        assert "auth/security/billing/infra" in md
+        assert "@team-payments" in md
         assert ctx["SCOPE"] == "billing"
         assert ctx["BLAST_RADIUS"] == "high"
+
+    def test_scope_cross_scope_description(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps({
+            "scope": "cross-scope",
+            "blast_radius": "medium",
+            "changed_files": 5,
+            "lines_changed": 100,
+        }))
+        md, ctx = _build_report(tmp_path, "2", "Scope")
+        assert "must serialize" in md
+        assert "test independently" in md
 
     def test_risk_score(self, tmp_path):
         (tmp_path / "risk_score.json").write_text(json.dumps({
@@ -47,13 +65,67 @@ class TestBuildReport:
             "score": 42.5,
             "requires_human_approval": True,
             "dimensions": {"size": 5, "sensitive_paths": 8},
+            "weights": {"size": 1.5, "sensitive_paths": 2.5},
+            "additions": 300,
+            "deletions": 50,
+            "changed_files": 10,
+            "has_historical_data": False,
         }))
         md, ctx = _build_report(tmp_path, "", "Risk")
         assert "HIGH" in md
         assert "42.5" in md
         assert "Human approval required" in md
+        assert "Evidence" in md
+        assert "Description" in md
+        assert "350 lines" in md
+        assert "no sensitive files" in md
         assert ctx["RISK_TIER"] == "HIGH"
         assert ctx["RISK_SCORE"] == "42.5"
+
+    def test_risk_score_with_evidence(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps({
+            "scope": "api", "blast_radius": "medium",
+            "changed_files": 4, "lines_changed": 54,
+            "touches": ["auth/token.py", "security/rbac.py"],
+        }))
+        (tmp_path / "risk_score.json").write_text(json.dumps({
+            "tier": "MEDIUM",
+            "score": 25.5,
+            "requires_human_approval": False,
+            "dimensions": {
+                "size": 3, "file_count": 2, "blast_radius": 5,
+                "sensitive_paths": 5, "test_coverage": 4, "historical": 3,
+            },
+            "weights": {"size": 1.5, "file_count": 1.0, "blast_radius": 2.0,
+                        "sensitive_paths": 2.5, "test_coverage": 1.5, "historical": 1.0},
+            "additions": 40,
+            "deletions": 14,
+            "changed_files": 4,
+            "scope": "api",
+            "has_historical_data": False,
+        }))
+        md, ctx = _build_report(tmp_path, "99", "Full Risk")
+        assert "54 lines (+40/−14)" in md
+        assert "4 files changed" in md
+        assert "blast=medium, scope=api" in md
+        assert "2 sensitive files: auth/token.py, security/rbac.py" in md
+        assert "no defect history available" in md
+        assert "Score breakdown" in md
+        assert "Requires human approval" not in md
+
+    def test_risk_score_historical_with_data(self, tmp_path):
+        (tmp_path / "risk_score.json").write_text(json.dumps({
+            "tier": "LOW",
+            "score": 10.0,
+            "requires_human_approval": False,
+            "dimensions": {"historical": 6},
+            "weights": {"historical": 1.0},
+            "additions": 10, "deletions": 5, "changed_files": 1,
+            "has_historical_data": True,
+        }))
+        md, ctx = _build_report(tmp_path, "", "Hist")
+        assert "from defect_history.json" in md
+        assert "no defect history" not in md
 
     def test_test_impact(self, tmp_path):
         (tmp_path / "test_impact.json").write_text(json.dumps({

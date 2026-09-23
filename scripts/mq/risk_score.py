@@ -100,24 +100,27 @@ def _score_test_coverage(files: list[dict]) -> int:
     return 8
 
 
-def _score_historical(workspace: Path) -> int:
-    """Score based on historical defect data if available."""
+def _score_historical(workspace: Path) -> tuple[int, bool]:
+    """Score based on historical defect data if available.
+
+    Returns (score, has_real_data).
+    """
     history_path = workspace / "defect_history.json"
     if not history_path.exists():
-        return 3
+        return 3, False
 
     try:
         data = json.loads(history_path.read_text())
         defect_rate = data.get("recent_defect_rate", 0.0)
         if defect_rate <= 0.01:
-            return 1
+            return 1, True
         if defect_rate <= 0.05:
-            return 3
+            return 3, True
         if defect_rate <= 0.10:
-            return 6
-        return 9
+            return 6, True
+        return 9, True
     except (json.JSONDecodeError, OSError):
-        return 3
+        return 3, False
 
 
 def _tier_for_score(score: int) -> str:
@@ -158,7 +161,7 @@ def main(pr_number: str) -> None:
     dim_blast = _BLAST_RADIUS_SCORES.get(blast_radius, 5)
     dim_sensitive = _score_sensitive_paths(files)
     dim_test_coverage = _score_test_coverage(files)
-    dim_historical = _score_historical(workspace)
+    dim_historical, has_history = _score_historical(workspace)
 
     weights = {
         "size": 1.5,
@@ -177,7 +180,7 @@ def main(pr_number: str) -> None:
         "historical": dim_historical,
     }
     composite = sum(raw_scores[k] * weights[k] for k in raw_scores)
-    tier = _tier_for_score(int(composite))
+    tier = _tier_for_score(round(composite))
     requires_human = tier == "HIGH"
 
     risk_result = {
@@ -186,6 +189,7 @@ def main(pr_number: str) -> None:
         "dimensions": raw_scores,
         "weights": weights,
         "requires_human_approval": requires_human,
+        "has_historical_data": has_history,
         "scope": scope_data.get("scope", "unknown"),
         "additions": additions,
         "deletions": deletions,

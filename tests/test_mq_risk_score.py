@@ -114,23 +114,31 @@ class TestScoreTestCoverage:
 
 class TestScoreHistorical:
     def test_no_history_file(self, tmp_path):
-        assert _score_historical(tmp_path) == 3
+        score, has_data = _score_historical(tmp_path)
+        assert score == 3
+        assert has_data is False
 
     def test_low_defect_rate(self, tmp_path):
         (tmp_path / "defect_history.json").write_text(
             json.dumps({"recent_defect_rate": 0.005})
         )
-        assert _score_historical(tmp_path) == 1
+        score, has_data = _score_historical(tmp_path)
+        assert score == 1
+        assert has_data is True
 
     def test_high_defect_rate(self, tmp_path):
         (tmp_path / "defect_history.json").write_text(
             json.dumps({"recent_defect_rate": 0.15})
         )
-        assert _score_historical(tmp_path) == 9
+        score, has_data = _score_historical(tmp_path)
+        assert score == 9
+        assert has_data is True
 
     def test_corrupt_file(self, tmp_path):
         (tmp_path / "defect_history.json").write_text("not json")
-        assert _score_historical(tmp_path) == 3
+        score, has_data = _score_historical(tmp_path)
+        assert score == 3
+        assert has_data is False
 
 
 class TestTierForScore:

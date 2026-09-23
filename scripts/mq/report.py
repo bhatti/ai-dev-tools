@@ -47,6 +47,64 @@ def _read_json(path: Path) -> dict | None:
     return None
 
 
+_SCOPE_DESCRIPTIONS = {
+    "cross-scope": "Files span 2+ teams or top-level directories — must serialize in merge queue",
+    "empty": "No changed files detected (metadata-only change)",
+}
+
+_BLAST_DESCRIPTIONS = {
+    "low": "Small, contained change (≤50 lines, 1 module) — safe to batch with other PRs",
+    "medium": "Moderate change (51–300 lines or 2 modules) — test independently before merge",
+    "high": "Large or security-sensitive change (>300 lines, 3+ modules, or sensitive paths) — requires human approval",
+}
+
+_RISK_DIM_DESCRIPTIONS = {
+    "size": "Total lines changed (additions + deletions). Larger PRs have more surface area for defects",
+    "file_count": "Number of files modified. More files = more integration points that could break",
+    "blast_radius": "How many modules/teams affected. Cross-scope changes multiply interaction failure risk",
+    "sensitive_paths": "Files touching auth, security, billing, or infrastructure. Defects here have outsized production impact",
+    "test_coverage": "Ratio of test files to source files. No tests = changes ship unverified (lower is better)",
+    "historical": "Recent defect rate for changed paths. Areas with frequent past defects produce more",
+}
+
+
+
+def _dim_evidence(dim: str, score: int, additions: int, deletions: int,
+                   n_files: int, scope_data: dict | None, risk_scope: str,
+                   has_historical_data: bool = False) -> str:
+    """Return a short evidence string explaining why a dimension got its score."""
+    total_loc = additions + deletions
+    if dim == "size":
+        return f"{total_loc} lines (+{additions}/−{deletions})"
+    if dim == "file_count":
+        return f"{n_files} files changed"
+    if dim == "blast_radius":
+        blast = (scope_data or {}).get("blast_radius", "unknown")
+        return f"blast={blast}, scope={risk_scope}"
+    if dim == "sensitive_paths":
+        sensitive = (scope_data or {}).get("touches", []) or (scope_data or {}).get("sensitive_touched", [])
+        if sensitive:
+            shown = ", ".join(sensitive[:3])
+            extra = f" +{len(sensitive)-3} more" if len(sensitive) > 3 else ""
+            return f"{len(sensitive)} sensitive files: {shown}{extra}"
+        return "no sensitive files detected"
+    if dim == "test_coverage":
+        if score == 0:
+            return "test:source ratio ≥1:1"
+        if score <= 2:
+            return "test:source ratio ≥1:2"
+        if score <= 4:
+            return "test:source ratio ≥1:4"
+        if score <= 6:
+            return "few test files relative to source"
+        return "no test files in PR"
+    if dim == "historical":
+        if has_historical_data:
+            return f"from defect_history.json (score={score})"
+        return "⚠️ no defect history available — using neutral default"
+    return ""
+
+
 def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dict]:
     """Build markdown report from available MQ result files.
 
@@ -67,17 +125,22 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         blast = scope.get("blast_radius", "unknown")
         files = scope.get("changed_files", 0)
         lines = scope.get("lines_changed", 0)
+        owners = scope.get("owners", [])
+        scope_desc = _SCOPE_DESCRIPTIONS.get(s, f"All changes owned by {s} — can merge in dedicated lane")
+        blast_desc = _BLAST_DESCRIPTIONS.get(blast, "Unknown blast radius")
         sections.append("## Scope")
         sections.append("")
-        sections.append(f"| Field | Value |")
-        sections.append(f"|-------|-------|")
-        sections.append(f"| Scope | **{s}** |")
-        sections.append(f"| Blast radius | **{blast}** |")
-        sections.append(f"| Changed files | {files} |")
-        sections.append(f"| Lines changed | {lines} |")
-        sensitive = scope.get("sensitive_touched", [])
+        sections.append("| Field | Value | Description |")
+        sections.append("|-------|-------|-------------|")
+        sections.append(f"| Scope | **{s}** | {scope_desc} |")
+        sections.append(f"| Blast radius | **{blast}** | {blast_desc} |")
+        sections.append(f"| Changed files | {files} | Number of files modified in this PR |")
+        sections.append(f"| Lines changed | {lines} | Total additions + deletions |")
+        if owners:
+            sections.append(f"| Owners | {', '.join(owners)} | CODEOWNERS entries responsible for review |")
+        sensitive = scope.get("touches", []) or scope.get("sensitive_touched", [])
         if sensitive:
-            sections.append(f"| Sensitive paths | {', '.join(f'`{p}`' for p in sensitive[:5])} |")
+            sections.append(f"| Sensitive paths | {', '.join(f'`{p}`' for p in sensitive[:5])} | Files matching auth/security/billing/infra patterns |")
         sections.append("")
         ctx["SCOPE"] = s
         ctx["BLAST_RADIUS"] = blast
@@ -87,20 +150,51 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         tier = risk.get("tier", "UNKNOWN")
         score = risk.get("score", 0)
         needs_approval = risk.get("requires_human_approval", False)
+        tier_descs = {
+            "LOW": "Safe to auto-merge after CI passes; can batch with other low-risk PRs",
+            "MEDIUM": "Standard review needed; test independently before merge",
+            "HIGH": "Requires human approval; test in isolation before merge",
+        }
         emoji = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(tier, "⚪")
         sections.append("## Risk Score")
         sections.append("")
-        sections.append(f"{emoji} **{tier}** (score {score}/100)")
+        sections.append(f"{emoji} **{tier}** (score {score}/100) — {tier_descs.get(tier, 'Unknown tier')}")
         sections.append("")
         dims = risk.get("dimensions", {})
+        weights = risk.get("weights", {})
+        additions = risk.get("additions", 0)
+        deletions = risk.get("deletions", 0)
+        n_files = risk.get("changed_files", 0)
+        risk_scope = risk.get("scope", "unknown")
+        has_hist = risk.get("has_historical_data", False)
         if dims:
-            sections.append("| Dimension | Score |")
-            sections.append("|-----------|-------|")
+            sections.append("| Dimension | Score | Weight | Evidence | Description |")
+            sections.append("|-----------|-------|--------|----------|-------------|")
             for k, v in dims.items():
-                sections.append(f"| {k.replace('_', ' ').title()} | {v} |")
+                label = k.replace("_", " ").title()
+                w_raw = weights.get(k)
+                w = f"{w_raw}×" if isinstance(w_raw, (int, float)) else str(w_raw or "")
+                desc = _RISK_DIM_DESCRIPTIONS.get(k, "")
+                evidence = _dim_evidence(k, v, additions, deletions, n_files,
+                                         scope, risk_scope, has_hist)
+                sections.append(f"| {label} | {v}/10 | {w} | {evidence} | {desc} |")
+            sections.append("")
+        if dims and weights:
+            breakdown_parts = []
+            computed_total = 0.0
+            for k, v in dims.items():
+                w = weights.get(k, 1.0)
+                contribution = v * w
+                computed_total += contribution
+                breakdown_parts.append(f"{k.replace('_',' ')}={v}×{w}={contribution:.1f}")
+            sections.append(f"> **Score breakdown:** {' + '.join(breakdown_parts)} = **{computed_total:.1f}**")
+            sections.append("")
+        if not has_hist and "historical" in dims:
+            sections.append("> ℹ️ Historical dimension uses neutral default (3/10) — "
+                            "provide `defect_history.json` for data-driven scoring")
             sections.append("")
         if needs_approval:
-            sections.append("> ⚠️ **Human approval required**")
+            sections.append("> ⚠️ **Human approval required** — risk score exceeds auto-merge threshold (≥31)")
             sections.append("")
         ctx["RISK_TIER"] = tier
         ctx["RISK_SCORE"] = str(score)
