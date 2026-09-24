@@ -158,14 +158,14 @@ def _dim_evidence(dim: str, score: int, additions: int, deletions: int,
         return "no sensitive files detected"
     if dim == "test_coverage":
         if score == 0:
-            return "test:source ratio ≥1:1"
+            return "good coverage (test:source ≥1:1)"
         if score <= 2:
-            return "test:source ratio ≥1:2"
+            return "moderate coverage (test:source 0.5–1.0)"
         if score <= 4:
-            return "test:source ratio ≥1:4"
+            return "low coverage (test:source 0.25–0.5)"
         if score <= 6:
-            return "few test files relative to source"
-        return "no test files in PR"
+            return "sparse coverage (test:source <0.25)"
+        return "no test files in changed files"
     if dim == "historical":
         if has_historical_data:
             return f"from defect_history.json (score={score})"
@@ -257,16 +257,27 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     """Build markdown report from available MQ result files.
 
     Returns (markdown_text, context_vars_for_task_context).
+    Section order: header → Review Findings → Gate Decision → Risk Score → Scope → Test Impact → Test Results → Lanes
     """
     ctx: dict[str, str] = {}
-    sections: list[str] = []
+    # Named buckets assembled in desired display order at the end.
+    header_sections: list[str] = []
+    findings_sections: list[str] = []
+    gate_sections: list[str] = []
+    risk_sections: list[str] = []
+    scope_sections: list[str] = []
+    test_sections: list[str] = []
+    lane_sections: list[str] = []
+    # Alias: most existing code appends to `sections`; we'll route by context below.
+    sections = findings_sections  # default bucket reassigned per block
 
     heading = f"# {title}"
     if pr_number:
         heading += f" — PR #{pr_number}"
-    sections.append(heading)
-    sections.append("")
+    header_sections.append(heading)
+    header_sections.append("")
 
+    sections = scope_sections  # scope block
     scope = _read_json(workspace / "scope.json")
     if scope:
         s = scope.get("scope", "unknown")
@@ -293,6 +304,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["SCOPE"] = s
         ctx["BLAST_RADIUS"] = blast
 
+    sections = risk_sections  # risk block
     risk = _read_json(workspace / "risk_score.json")
     if risk:
         tier = risk.get("tier", "UNKNOWN")
@@ -316,16 +328,15 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         risk_scope = risk.get("scope", "unknown")
         has_hist = risk.get("has_historical_data", False)
         if dims:
-            sections.append("| Dimension | Score | Weight | Evidence | Description |")
-            sections.append("|-----------|-------|--------|----------|-------------|")
+            sections.append("| Dimension | Score | Weight | Evidence |")
+            sections.append("|-----------|-------|--------|----------|")
             for k, v in dims.items():
                 label = k.replace("_", " ").title()
                 w_raw = weights.get(k)
                 w = f"{w_raw}×" if isinstance(w_raw, (int, float)) else str(w_raw or "")
-                desc = _RISK_DIM_DESCRIPTIONS.get(k, "")
                 evidence = _dim_evidence(k, v, additions, deletions, n_files,
                                          scope, risk_scope, has_hist)
-                sections.append(f"| {label} | {v}/10 | {w} | {evidence} | {desc} |")
+                sections.append(f"| {label} | {v}/10 | {w} | {evidence} |")
             sections.append("")
         if dims and weights:
             breakdown_parts = []
@@ -347,6 +358,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["RISK_TIER"] = tier
         ctx["RISK_SCORE"] = str(score)
 
+    sections = test_sections  # test impact + results block
     impact = _read_json(workspace / "test_impact.json")
     if impact:
         total = impact.get("total_tests", 0)
@@ -472,6 +484,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["TESTS_PASSED"] = str(passed)
         ctx["TESTS_FAILED"] = str(failed)
 
+    sections = findings_sections  # review findings block
     review = _read_json(workspace / "review_result.json")
     if review:
         verdict = review.get("verdict", "UNKNOWN")
@@ -489,8 +502,11 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         )
         sections.append("## Review Findings")
         sections.append("")
-        sections.append(f"{verdict_emoji} **{verdict}** — {len(all_findings)} finding(s)"
-                        + (f" ({sev_summary})" if sev_summary else ""))
+        if not all_findings:
+            sections.append("✅ No issues found")
+        else:
+            sections.append(f"{verdict_emoji} **{verdict}** — {len(all_findings)} finding(s)"
+                            + (f" ({sev_summary})" if sev_summary else ""))
         sections.append("")
         if all_findings:
             sections.append("| Severity | Category | File | Line | Summary |")
@@ -513,6 +529,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["REVIEW_CRITICAL"] = str(sev_counts.get("critical", 0))
         ctx["REVIEW_HIGH"] = str(sev_counts.get("high", 0))
 
+    sections = gate_sections  # gate decision block
     gate = _read_json(workspace / "gate_result.json")
     if gate:
         needs = gate.get("needs_approval", False)
@@ -522,7 +539,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         has_critical = gate.get("has_critical_findings", False)
         findings_count = gate.get("findings_count", 0)
         emoji = "🚦" if needs else "✅"
-        action = "**Human approval required** before merge" if needs else "**Eligible for auto-merge**"
+        action = "**Human approval required** before merge" if needs else "**Safe to merge**"
         sections.append("## Gate Decision")
         sections.append("")
         sections.append(f"{emoji} {action}")
@@ -538,6 +555,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["GATE_APPROVAL"] = str(needs).lower()
         ctx["GATE_REASON"] = reason
 
+    sections = lane_sections  # lanes block
     lanes = _read_json(workspace / "lane_groups.json")
     if lanes:
         lane_list = lanes.get("lanes", [])
@@ -558,7 +576,16 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["LANE_COUNT"] = str(len(lane_list))
         ctx["QUEUED_PRS"] = str(total_prs)
 
-    return "\n".join(sections), ctx
+    ordered = (
+        header_sections
+        + findings_sections
+        + gate_sections
+        + risk_sections
+        + scope_sections
+        + test_sections
+        + lane_sections
+    )
+    return "\n".join(ordered), ctx
 
 
 def main() -> None:
@@ -570,7 +597,7 @@ def main() -> None:
 
     from scripts.mq._shared import parse_pr_ref
     pr_number, _ = parse_pr_ref(config.get("PR_NUMBER", ""))
-    title = config.get("REPORT_TITLE", "Merge Queue Report")
+    title = config.get("REPORT_TITLE", "PR Review Report")
 
     report_text, ctx = _build_report(workspace, pr_number, title)
 

@@ -76,7 +76,7 @@ class TestBuildReport:
         assert "42.5" in md
         assert "Human approval required" in md
         assert "Evidence" in md
-        assert "Description" in md
+        assert "Description" not in md  # removed for Slack verbosity
         assert "350 lines" in md
         assert "no sensitive files" in md
         assert ctx["RISK_TIER"] == "HIGH"
