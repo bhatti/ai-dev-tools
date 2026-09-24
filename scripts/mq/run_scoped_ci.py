@@ -46,8 +46,13 @@ _PROJECT_TYPE_MARKERS = [
 ]
 
 
-def _detect_project_type(repo_dir: str) -> str:
-    """Detect project type from marker files."""
+def _detect_project_type(repo_dir: str, tests: list[str] | None = None) -> str:
+    """Detect project type from marker files at the repo root.
+
+    Falls back to inferring from shard test-file extensions when filesystem
+    markers are absent (e.g. clone into a subdirectory or missing file).
+    Marker priority is intentional: more specific languages first.
+    """
     repo_path = Path(repo_dir)
     for marker, ptype in _PROJECT_TYPE_MARKERS:
         if "*" in marker:
@@ -55,6 +60,26 @@ def _detect_project_type(repo_dir: str) -> str:
                 return ptype
         elif (repo_path / marker).exists():
             return ptype
+
+    # Filesystem check failed (wrong CWD, subdirectory clone, etc.).
+    # Infer from test file extensions so Go/Rust/TS shards are never misrouted.
+    if tests:
+        exts = {Path(t).suffix.lower() for t in tests}
+        names = {Path(t).name.lower() for t in tests}
+        if any(n.endswith("_test.go") for n in names):
+            return "go"
+        if any(n.endswith("_test.rs") or n.endswith(".rs") for n in names):
+            return "rust"
+        if ".ts" in exts or ".tsx" in exts or ".js" in exts or ".jsx" in exts:
+            return "node"
+        if ".java" in exts:
+            return "java"
+        if ".kt" in exts:
+            return "kotlin"
+        if ".rb" in exts:
+            return "ruby"
+        if ".py" in exts:
+            return "python"
     return "python"
 
 
@@ -350,7 +375,7 @@ def main(shard: str, shard_id: str | None) -> None:
         project_type = "custom"
         print(f"[run_scoped_ci] using TEST_CMD override: {test_cmd_override}", flush=True)
     else:
-        project_type = _detect_project_type(repo_dir)
+        project_type = _detect_project_type(repo_dir, tests)
         junit_path = str(workspace / "test_output.xml")
         cmd, extra_env = _build_test_command(project_type, tests, repo_dir, junit_path)
 

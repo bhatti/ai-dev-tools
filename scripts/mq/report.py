@@ -20,6 +20,7 @@ Reads (whichever exist):
     /workspace/shard_result_*.json
 
 Writes:
+    /workspace/test_summary.json      (when absent and shard files or API data are available)
     /workspace/reports/report.md
     /workspace/reports/post_result.json
 
@@ -37,7 +38,8 @@ import requests
 import urllib3
 
 # Formicary public URLs typically use self-signed certs in dev/staging.
-# Suppress the per-request InsecureRequestWarning that would otherwise flood logs.
+# This module is always a standalone entrypoint — no other HTTP clients share this process,
+# so the module-level suppression does not affect unrelated code.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from scripts.common.config import get_workspace_dir, load_config
@@ -299,6 +301,15 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
     if not summary:
         # Primary: artifact files; fallback: API task context if artifacts are absent.
+        if not shard_results:
+            # Compat: old images wrote the un-indexed shard_result.json; the glob above
+            # (shard_result_*.json) won't match it. Handle gracefully during rolling deploy.
+            compat = workspace / "shard_result.json"
+            if compat.exists():
+                try:
+                    shard_results = [json.loads(compat.read_text())]
+                except (json.JSONDecodeError, OSError):
+                    pass
         if not shard_results:
             shard_results = _fetch_shard_results_from_api()
         if shard_results:

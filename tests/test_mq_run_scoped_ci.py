@@ -42,6 +42,26 @@ class TestDetectProjectType:
     def test_default_python(self, tmp_path):
         assert _detect_project_type(str(tmp_path)) == "python"
 
+    # Extension fallback — when no marker file exists, infer from test file names.
+    # This handles repos cloned into subdirectories or markers outside the root.
+    def test_go_fallback_from_test_extension(self, tmp_path):
+        assert _detect_project_type(str(tmp_path), ["queen/fsm/job_test.go"]) == "go"
+
+    def test_go_fallback_no_filesystem_markers(self, tmp_path):
+        # No marker files in tmp_path — extension fallback infers Go from _test.go suffix.
+        # Note: filesystem markers take priority when present; this tests the fallback path only.
+        assert _detect_project_type(str(tmp_path), ["pkg/foo_test.go"]) == "go"
+
+    def test_rust_fallback(self, tmp_path):
+        assert _detect_project_type(str(tmp_path), ["crates/core/src/lib_test.rs"]) == "rust"
+
+    def test_ts_fallback(self, tmp_path):
+        # TypeScript (.ts/.tsx) maps to "node" (Jest handles TS via ts-jest/Babel).
+        assert _detect_project_type(str(tmp_path), ["src/App.test.tsx"]) == "node"
+
+    def test_java_fallback(self, tmp_path):
+        assert _detect_project_type(str(tmp_path), ["src/test/FooTest.java"]) == "java"
+
     def test_ruby_gemfile(self, tmp_path):
         (tmp_path / "Gemfile").write_text("source 'https://rubygems.org'")
         assert _detect_project_type(str(tmp_path)) == "ruby"
