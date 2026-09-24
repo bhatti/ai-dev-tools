@@ -3787,6 +3787,134 @@ def test_36_gate_review_bb(base_env: dict[str, str]) -> TestResult:
     return _run_gate_review_pipeline(env, pr_url, "gate-review-bb")
 
 
+def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
+    """Pod test for the gate-check inline Python + bash URL-parsing used in auto-merge/reject.
+
+    Tests (read-only — no actual merge/approve):
+      1. gate-check exits 0 when needs_approval=True (critical finding)
+      2. gate-check exits 3 when needs_approval=False (low risk, no critical)
+      3. Bash URL parser correctly extracts PR num + org/repo from GitHub URL
+      4. Bash URL parser correctly extracts PR num + workspace/repo from Bitbucket URL
+      5. Bash URL parser falls back to bare number when given a plain number
+    """
+    result = TestResult("gate-check-logic")
+    with pod_fixture("gate-check-logic") as pod:
+        env = dict(base_env)
+        ws = "/workspace/gate_check_test"
+        env["WORKSPACE_DIR"] = ws
+        env["APPROVAL_THRESHOLD"] = "30"
+        env.pop("SLACK_BOT_TOKEN", None)
+        env["SLACK_BOT_TOKEN"] = ""
+
+        setup_step = exec_step(pod, "setup", f"mkdir -p {ws}", env, timeout=15)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup: {setup_step.stderr[-200:]}")
+
+        # --- Test 1: gate-check exits 0 when critical finding present ---
+        inject1 = exec_step(pod, "inject-critical",
+            f"python3 - <<'PYEOF'\n"
+            f"import json, os\n"
+            f"ws = {ws!r}\n"
+            f"open(f'{{ws}}/risk_score.json','w').write(json.dumps({{'score':25,'tier':'LOW','dimensions':{{}},'requires_human_approval':False}}))\n"
+            f"open(f'{{ws}}/review_result.json','w').write(json.dumps({{'verdict':'BLOCKED','findings':[{{'severity':'critical','summary':'SQL injection'}}]}}))\n"
+            f"PYEOF",
+            env, timeout=15)
+        result.steps.append(inject1)
+        if not inject1.ok:
+            return _fail(result, inject1, f"inject: {inject1.stderr[-200:]}")
+
+        gate_critical_cmd = (
+            f"python3 -c \"\n"
+            f"import json, os, sys\n"
+            f"risk = json.load(open('{ws}/risk_score.json'))\n"
+            f"review = json.load(open('{ws}/review_result.json'))\n"
+            f"threshold = int(os.environ.get('APPROVAL_THRESHOLD', '70'))\n"
+            f"score = risk['score']\n"
+            f"has_critical = any(f.get('severity') == 'critical' for f in review.get('findings', []))\n"
+            f"needs_approval = score >= threshold or has_critical\n"
+            f"gate = {{'risk_score':score,'risk_tier':risk['tier'],'has_critical_findings':has_critical,'findings_count':len(review.get('findings',[])),'needs_approval':needs_approval,'reason':'critical findings' if has_critical else f'score {{score}}'}}\n"
+            f"json.dump(gate, open('{ws}/gate_result.json','w'))\n"
+            f"print(f'gate: approval={{needs_approval}} critical={{has_critical}}')\n"
+            f"sys.exit(0 if needs_approval else 3)\n"
+            f"\""
+        )
+        gate1 = exec_step(pod, "gate-critical", gate_critical_cmd, env, timeout=15)
+        result.steps.append(gate1)
+        if gate1.returncode != 0:
+            return _fail(result, gate1,
+                         f"gate-check should exit 0 (needs approval) for critical finding — got {gate1.returncode}")
+
+        # --- Test 2: gate-check exits 3 when low risk, no critical ---
+        inject2 = exec_step(pod, "inject-low-risk",
+            f"python3 - <<'PYEOF'\n"
+            f"import json\n"
+            f"ws = {ws!r}\n"
+            f"open(f'{{ws}}/risk_score.json','w').write(json.dumps({{'score':10,'tier':'LOW','dimensions':{{}},'requires_human_approval':False}}))\n"
+            f"open(f'{{ws}}/review_result.json','w').write(json.dumps({{'verdict':'DONE','findings':[{{'severity':'medium','summary':'minor style'}}]}}))\n"
+            f"PYEOF",
+            env, timeout=15)
+        result.steps.append(inject2)
+        if not inject2.ok:
+            return _fail(result, inject2, f"inject2: {inject2.stderr[-200:]}")
+
+        gate2 = exec_step(pod, "gate-low-risk", gate_critical_cmd, env, timeout=15)
+        result.steps.append(gate2)
+        if gate2.returncode != 3:
+            return _fail(result, gate2,
+                         f"gate-check should exit 3 (auto-merge) for low risk — got {gate2.returncode}")
+
+        # --- Tests 3-5: bash URL parser used in auto-merge/merge/reject ---
+        url_parse_cmd = (
+            "python3 - <<'PYEOF'\n"
+            "import subprocess, sys\n"
+            "cases = [\n"
+            "    ('https://github.com/bhatti/todo-sample/pull/9',  'github', 'bhatti', 'todo-sample', '9'),\n"
+            "    ('https://bitbucket.org/cribl/cribl/pull-requests/48776', 'bitbucket', 'cribl', 'cribl', '48776'),\n"
+            "    ('42', 'bare', '', '', '42'),\n"
+            "]\n"
+            "errors = []\n"
+            "for url, tracker, org, repo, pr in cases:\n"
+            "    script = f'''\n"
+            "PR_URL=\"{url}\"\n"
+            "if echo \"$PR_URL\" | grep -q \"bitbucket.org\"; then\n"
+            "  PR_NUM=$(echo \"$PR_URL\" | grep -oE '[0-9]+$')\n"
+            "  BB_WS=$(echo \"$PR_URL\" | sed 's|https://bitbucket.org/||' | cut -d'/' -f1)\n"
+            "  BB_REPO=$(echo \"$PR_URL\" | sed 's|https://bitbucket.org/||' | cut -d'/' -f2)\n"
+            "  echo \"tracker=bitbucket org=$BB_WS repo=$BB_REPO pr=$PR_NUM\"\n"
+            "elif echo \"$PR_URL\" | grep -q \"github.com\"; then\n"
+            "  PR_NUM=$(echo \"$PR_URL\" | grep -oE '[0-9]+$')\n"
+            "  GH_SLUG=$(echo \"$PR_URL\" | sed 's|https://github.com/||' | sed 's|/pull/.*||')\n"
+            "  GH_ORG_PART=$(echo \"$GH_SLUG\" | cut -d'/' -f1)\n"
+            "  GH_REPO_PART=$(echo \"$GH_SLUG\" | cut -d'/' -f2)\n"
+            "  echo \"tracker=github org=$GH_ORG_PART repo=$GH_REPO_PART pr=$PR_NUM\"\n"
+            "else\n"
+            "  echo \"tracker=bare org= repo= pr=$PR_URL\"\n"
+            "fi\n"
+            "'''\n"
+            "    r = subprocess.run(['bash','-c',script], capture_output=True, text=True)\n"
+            "    out = r.stdout.strip()\n"
+            "    print(f'  [{url[:40]}] → {out}')\n"
+            "    if f'tracker={tracker}' not in out: errors.append(f'{url}: expected tracker={tracker} got: {out}')\n"
+            "    if org and f'org={org}' not in out: errors.append(f'{url}: expected org={org} got: {out}')\n"
+            "    if repo and f'repo={repo}' not in out: errors.append(f'{url}: expected repo={repo} got: {out}')\n"
+            "    if f'pr={pr}' not in out: errors.append(f'{url}: expected pr={pr} got: {out}')\n"
+            "if errors:\n"
+            "    for e in errors: print('ERROR: '+e, file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+            "print('::add-task-context URL_PARSE::ok')\n"
+            "PYEOF"
+        )
+        url_step = exec_step(pod, "url-parse", url_parse_cmd, env, timeout=20)
+        result.steps.append(url_step)
+        if not url_step.ok:
+            return _fail(result, url_step, f"URL parse test: {url_step.stderr[-400:]}")
+
+        result.passed = True
+        result.message = "gate-check logic: critical→exit0 ✓, low-risk→exit3 ✓, URL parsing: GH/BB/bare ✓"
+        return result
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -3826,6 +3954,7 @@ ALL_TESTS: dict[str, callable] = {
     "mq-test-impact-branch":  test_34_mq_test_impact_branch,
     "gate-review-gh":         test_35_gate_review_gh,
     "gate-review-bb":         test_36_gate_review_bb,
+    "gate-check-logic":       test_37_gate_check_logic,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
