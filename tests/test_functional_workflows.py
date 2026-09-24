@@ -364,6 +364,22 @@ ALL_TESTS: list[TestCase] = [
         timeout=1200,
         requires=["BB_PR_URL"],
     ),
+    # gate-review: full end-to-end gate-review pipeline against a public GitHub PR.
+    # Pipeline: review → gate-check → (auto-merge or approve) → done
+    # Uses a known public PR so no credentials needed beyond GH_TOKEN.
+    TestCase(
+        name="gate-review",
+        job_type="ai-gate-review",
+        params={
+            "PRNumber": os.environ.get("GH_PR_URL", "https://github.com/bhatti/todo-sample/pull/9"),
+            "ApprovalThreshold": "30",
+            **HAIKU_OVERRIDES,
+        },
+        task_type="review",
+        expected_files=["reports/report.md", "reports/report.html", "risk_score.json", "gate_result.json"],
+        timeout=900,
+        required_context_keys=["RISK_TIER", "RISK_SCORE", "GATE_APPROVAL"],
+    ),
     # parallel-test: full end-to-end fan-out CI run against a public GitHub repo.
     # Triggered with `@sb-slack parallel-test --repo https://github.com/bhatti/formicary main`.
     # analyze → run-tests (fan-out, 2 shards) → report.
