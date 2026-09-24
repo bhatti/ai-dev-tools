@@ -3910,8 +3910,67 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
         if not url_step.ok:
             return _fail(result, url_step, f"URL parse test: {url_step.stderr[-400:]}")
 
+        # --- Test 6: bb_merge exits 0 when PR is already MERGED (not OPEN) ---
+        # Simulates the cribl/cribl PR that was already closed — should not fail the job.
+        already_merged_cmd = (
+            "bash - <<'BEOF'\n"
+            "bb_merge() {\n"
+            "  local ws=$1 repo=$2 num=$3\n"
+            "  local state\n"
+            "  # Mock: pretend Bitbucket returned state=MERGED\n"
+            "  state='MERGED'\n"
+            "  if [ \"$state\" != \"OPEN\" ]; then\n"
+            "    echo \"PR #${num} is already ${state} — skipping merge\"\n"
+            "    return 0\n"
+            "  fi\n"
+            "  echo 'should not reach here' >&2; return 1\n"
+            "}\n"
+            "bb_merge myws myrepo 48776\n"
+            "echo \"::add-task-context ALREADY_MERGED_EXIT::$?\"\n"
+            "BEOF"
+        )
+        merged_step = exec_step(pod, "bb-already-merged", already_merged_cmd, env, timeout=15)
+        result.steps.append(merged_step)
+        if not merged_step.ok:
+            return _fail(result, merged_step, f"already-merged: {merged_step.stderr[-200:]}")
+        if "ALREADY_MERGED_EXIT::0" not in merged_step.stdout:
+            return _fail(result, merged_step, "bb_merge should exit 0 when PR is already MERGED")
+
+        # --- Test 7: bb_merge logs HTTP error and exits non-zero on 4xx ---
+        http_error_cmd = (
+            "bash - <<'BEOF'\n"
+            "bb_merge() {\n"
+            "  local ws=$1 repo=$2 num=$3\n"
+            "  local state='OPEN'\n"
+            "  # Mock: curl returns HTTP 403\n"
+            "  echo '{\"error\":{\"message\":\"permission denied\"}}' > /tmp/bb_merge_resp.json\n"
+            "  local http_code=403\n"
+            "  if [ \"${http_code}\" -lt 400 ]; then\n"
+            "    echo \"PR merged\"\n"
+            "  else\n"
+            "    echo \"ERROR: Bitbucket merge failed HTTP ${http_code}: $(cat /tmp/bb_merge_resp.json)\" >&2\n"
+            "    return 1\n"
+            "  fi\n"
+            "}\n"
+            "if bb_merge myws myrepo 99 2>/tmp/bb_err.txt; then\n"
+            "  echo 'UNEXPECTED_SUCCESS' >&2; exit 1\n"
+            "fi\n"
+            "grep -q 'permission denied' /tmp/bb_err.txt && echo '::add-task-context HTTP_ERROR_LOGGED::yes' || echo '::add-task-context HTTP_ERROR_LOGGED::no'\n"
+            "BEOF"
+        )
+        http_err_step = exec_step(pod, "bb-http-error", http_error_cmd, env, timeout=15)
+        result.steps.append(http_err_step)
+        if not http_err_step.ok:
+            return _fail(result, http_err_step, f"http-error: {http_err_step.stderr[-200:]}")
+        if "HTTP_ERROR_LOGGED::yes" not in http_err_step.stdout:
+            return _fail(result, http_err_step, "bb_merge should log error body on HTTP 4xx")
+
         result.passed = True
-        result.message = "gate-check logic: critical→exit0 ✓, low-risk→exit3 ✓, URL parsing: GH/BB/bare ✓"
+        result.message = (
+            "gate-check logic: critical→exit0 ✓, low-risk→exit3 ✓, "
+            "URL parsing GH/BB/bare ✓, bb_merge already-merged→exit0 ✓, "
+            "bb_merge 4xx→error logged ✓"
+        )
         return result
 
 
