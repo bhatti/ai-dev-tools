@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -101,9 +102,18 @@ class TestBuildTestCommand:
         assert env["GOMAXPROCS"] == "2"
 
     def test_go_with_gotestsum(self, tmp_path):
-        cmd, env = _build_test_command("go", ["pkg/foo_test.go"], str(tmp_path),
-                                       junit_path="/out.xml", concurrency=2)
+        with patch("scripts.mq.run_scoped_ci.shutil.which", return_value="/usr/bin/gotestsum"):
+            cmd, env = _build_test_command("go", ["pkg/foo_test.go"], str(tmp_path),
+                                           junit_path="/out.xml", concurrency=2)
         assert cmd[0] == "gotestsum"
+        assert "-parallel=2" in cmd
+
+    def test_go_falls_back_to_go_test_when_gotestsum_missing(self, tmp_path):
+        with patch("scripts.mq.run_scoped_ci.shutil.which", return_value=None):
+            cmd, env = _build_test_command("go", ["pkg/foo_test.go"], str(tmp_path),
+                                           junit_path="/out.xml", concurrency=2)
+        assert cmd[0] == "go"
+        assert "test" in cmd
         assert "-parallel=2" in cmd
 
     def test_rust_crate(self, tmp_path):

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -135,10 +136,11 @@ def _build_test_command(
             pkg = str(Path(t).parent)
             packages.add("./..." if pkg == "." else f"./{pkg}/...")
         extra_env["GOMAXPROCS"] = str(n)
-        if junit_path:
+        if junit_path and shutil.which("gotestsum"):
             cmd = ["gotestsum", "--junitfile", junit_path, "--",
                    "-count=1", f"-parallel={n}"] + sorted(packages)
         else:
+            # gotestsum not installed — fall back to plain go test
             cmd = ["go", "test", "-v", "-count=1", f"-parallel={n}"]
             cmd.extend(sorted(packages))
         return cmd, extra_env

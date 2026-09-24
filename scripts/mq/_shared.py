@@ -30,9 +30,13 @@ def is_branch_or_tag(ref: str) -> bool:
 def resolve_tracker(config: dict, repo_url: str = "") -> str:
     """Resolve effective tracker from repo URL and config. Returns 'github' or 'bitbucket'.
 
+    Vocabulary: this function uses the clone/API vocabulary ('github' | 'bitbucket').
+    It is intentionally different from scripts/skill/flags.py:resolve_tracker, which uses
+    the Slack-routing vocabulary ('github' | 'jira'). Do not unify them.
+
     Priority:
       1. repo_url domain  (github.com → github, bitbucket.org → bitbucket)
-      2. DEFAULT_TRACKER from config
+      2. DEFAULT_TRACKER from config  ('jira' and 'jira/bitbucket' both map to 'bitbucket')
     """
     if repo_url:
         if "github.com" in repo_url:

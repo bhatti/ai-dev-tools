@@ -174,6 +174,10 @@ def parse_skill_flags(raw: str) -> SkillFlags:
 def resolve_tracker(flags: SkillFlags, config: dict) -> str:
     """Resolve effective tracker from flags, repo URL, and config.
 
+    Vocabulary: this function uses the Slack-routing vocabulary ('github' | 'jira').
+    It is intentionally different from scripts/mq/_shared.py:resolve_tracker, which uses
+    the clone/API vocabulary ('github' | 'bitbucket'). Do not unify them.
+
     Priority:
       1. Explicit --tracker flag
       2. Auto-detect from --repo URL domain
