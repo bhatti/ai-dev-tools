@@ -44,7 +44,6 @@ def _apply_repo_override(config: dict, repo_url: str) -> None:
         config["BITBUCKET_REPO"] = bb.group(2)
         os.environ["BITBUCKET_WORKSPACE"] = bb.group(1)
         os.environ["BITBUCKET_REPO"] = bb.group(2)
-        print(f"[clone_pr] repo override: {bb.group(1)}/{bb.group(2)}", flush=True)
 
 
 @click.command()
@@ -59,7 +58,9 @@ def main(pr_number: str | None, repo: str | None, branch: str | None) -> None:
     if not pr_number and branch:
         pr_number = branch
 
-    tracker = resolve_tracker(config)
+    # Explicit --repo URL wins over DEFAULT_TRACKER (e.g. "jira" would resolve to
+    # "bitbucket", cloning the wrong org repo instead of the specified GitHub one).
+    tracker = resolve_tracker(config, repo_url=repo or "")
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
     repo_dir = workspace / "repo"
@@ -70,7 +71,7 @@ def main(pr_number: str | None, repo: str | None, branch: str | None) -> None:
     if repo_dir.exists() and (repo_dir / ".git").exists():
         print("[clone_pr] repo already cloned — skipping", flush=True)
     else:
-        clone_by_tracker(config, repo_dir)
+        clone_by_tracker(config, repo_dir, tracker)
         print(f"[clone_pr] cloned to {repo_dir}", flush=True)
 
     if not pr_number:

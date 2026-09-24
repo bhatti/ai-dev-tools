@@ -26,6 +26,34 @@ class TestResolveTracker:
     def test_bitbucket_direct(self):
         assert resolve_tracker({"DEFAULT_TRACKER": "bitbucket"}) == "bitbucket"
 
+    # URL-override tests: repo_url takes priority over DEFAULT_TRACKER config.
+    # Root cause of the Go-project-runs-npx bug: DEFAULT_TRACKER=jira caused
+    # clone_by_tracker to clone the Bitbucket repo (cribl/cribl, ~3872 Node.js
+    # tests) instead of the GitHub repo specified via --repo.
+    def test_github_url_overrides_jira_config(self):
+        cfg = {"DEFAULT_TRACKER": "jira"}
+        assert resolve_tracker(cfg, repo_url="https://github.com/bhatti/formicary") == "github"
+
+    def test_github_url_overrides_bitbucket_config(self):
+        cfg = {"DEFAULT_TRACKER": "bitbucket"}
+        assert resolve_tracker(cfg, repo_url="https://github.com/org/repo") == "github"
+
+    def test_bitbucket_url_overrides_github_config(self):
+        cfg = {"DEFAULT_TRACKER": "github"}
+        assert resolve_tracker(cfg, repo_url="https://bitbucket.org/ws/repo") == "bitbucket"
+
+    def test_empty_url_falls_back_to_config(self):
+        cfg = {"DEFAULT_TRACKER": "jira"}
+        assert resolve_tracker(cfg, repo_url="") == "bitbucket"
+
+    def test_no_url_falls_back_to_config(self):
+        cfg = {"DEFAULT_TRACKER": "jira"}
+        assert resolve_tracker(cfg) == "bitbucket"
+
+    def test_unrecognized_url_falls_back_to_config(self):
+        cfg = {"DEFAULT_TRACKER": "jira"}
+        assert resolve_tracker(cfg, repo_url="https://gitlab.com/org/repo") == "bitbucket"
+
 
 class TestRepoSlug:
     def test_github_slug(self):

@@ -27,8 +27,18 @@ def is_branch_or_tag(ref: str) -> bool:
     return True
 
 
-def resolve_tracker(config: dict) -> str:
-    """Resolve effective tracker from config. Returns 'github' or 'bitbucket'."""
+def resolve_tracker(config: dict, repo_url: str = "") -> str:
+    """Resolve effective tracker from repo URL and config. Returns 'github' or 'bitbucket'.
+
+    Priority:
+      1. repo_url domain  (github.com → github, bitbucket.org → bitbucket)
+      2. DEFAULT_TRACKER from config
+    """
+    if repo_url:
+        if "github.com" in repo_url:
+            return "github"
+        if "bitbucket.org" in repo_url:
+            return "bitbucket"
     tracker = (config.get("DEFAULT_TRACKER") or "github").lower().strip()
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
         return "bitbucket"

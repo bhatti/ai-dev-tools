@@ -155,6 +155,34 @@ class TestClonePr:
         assert calls[2][0][0] == ["git", "checkout", "origin/develop"]
 
 
+class TestTrackerOverrideFromRepoUrl:
+    """Regression: DEFAULT_TRACKER=jira must not override an explicit --repo GitHub URL.
+
+    Bug: with DEFAULT_TRACKER=jira, resolve_tracker() returned "bitbucket", so
+    clone_by_tracker cloned cribl/cribl (~3872 Node.js tests) instead of the
+    GitHub repo passed via --repo, causing project_type=node for a Go project.
+    """
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_github_url_wins_over_jira_default_tracker(self, mock_ws, mock_cfg, mock_clone, tmp_path):
+        mock_cfg.return_value = {
+            "DEFAULT_TRACKER": "jira",
+            "GH_ORG": "bhatti",
+            "GH_REPO": "formicary",
+        }
+        mock_ws.return_value = tmp_path
+        result = CliRunner().invoke(main, ["--repo", "https://github.com/bhatti/formicary"])
+        assert result.exit_code == 0
+        mock_clone.assert_called_once()
+        _, _, tracker = mock_clone.call_args[0]
+        assert tracker == "github", (
+            "When --repo is a github.com URL, tracker must be 'github' even if "
+            "DEFAULT_TRACKER=jira in pod env"
+        )
+
+
 class TestApplyRepoOverride:
     def test_github_url(self):
         cfg = {"GH_ORG": "old", "GH_REPO": "old"}
