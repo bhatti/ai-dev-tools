@@ -338,7 +338,7 @@ def main(shard: str, shard_id: str | None) -> None:
             "duration_s": 0,
             "status": "skipped",
         }
-        (workspace / f"shard_result_{sid}.json").write_text(json.dumps(result, indent=2))
+        (workspace / "shard_result.json").write_text(json.dumps(result, indent=2))
         sys.exit(0)
 
     # TEST_CMD override — lets users specify their own test runner
@@ -351,7 +351,7 @@ def main(shard: str, shard_id: str | None) -> None:
         print(f"[run_scoped_ci] using TEST_CMD override: {test_cmd_override}", flush=True)
     else:
         project_type = _detect_project_type(repo_dir)
-        junit_path = str(workspace / f"shard_{sid}_junit.xml")
+        junit_path = str(workspace / "test_output.xml")
         cmd, extra_env = _build_test_command(project_type, tests, repo_dir, junit_path)
 
     print(f"[run_scoped_ci] project_type={project_type} repo={repo_dir}", flush=True)
@@ -393,9 +393,18 @@ def main(shard: str, shard_id: str | None) -> None:
         "slow_tests": slow_tests,
     }
 
-    out_path = workspace / f"shard_result_{sid}.json"
+    # Write shard_result.json (matches YAML artifact path — each fan-out child runs in
+    # its own isolated pod so there's no filename collision at upload time).
+    out_path = workspace / "shard_result.json"
     out_path.write_text(json.dumps(result, indent=2))
     print(f"[run_scoped_ci] wrote {out_path}", flush=True)
+
+    # Emit result as task context so FanOutTasklet can aggregate across shards.
+    # The tasklet prefixes each child's context with "{item_var}_{idx}_", so the
+    # parent task execution ends up with shard_0_ShardResult, shard_1_ShardResult etc.
+    summary = {"shard_id": sid, "passed": passed, "failed": failed,
+               "skipped": skipped, "duration_s": round(duration, 1), "status": status}
+    print(f"::add-task-context ShardResult::{json.dumps(summary)}", flush=True)
 
     if failed > 0:
         sys.exit(3)

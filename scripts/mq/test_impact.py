@@ -322,9 +322,16 @@ def _emit_results(
         f"{' (full suite)' if fallback_full_suite else ''}",
         flush=True,
     )
-    # TestShards: job-context so fan_out.source resolves it across task boundaries.
-    # Format matches test_impact.json["shards"] directly — run_scoped_ci receives full shard dict.
-    print(f"::add-job-context TestShards::{json.dumps(shards)}", flush=True)
+    # Emit compact shard metadata as job-context so fan_out.source resolves it.
+    # The full test lists are in test_impact.json (artifact), which run_scoped_ci reads
+    # via its fallback path. Omitting 'tests' here keeps the message well under the 1 MB
+    # formicary queue limit — a large repo can have 500 KB+ of test file paths.
+    compact_shards = [
+        {"shard_id": s["shard_id"], "test_count": s.get("test_count", 0),
+         "est_duration_s": s.get("est_duration_s", 0)}
+        for s in shards
+    ]
+    print(f"::add-job-context TestShards::{json.dumps(compact_shards)}", flush=True)
     # Remaining metrics are task-scoped (visible in task logs and reports).
     print(f"::add-task-context SELECTED_TESTS::{len(all_selected)}", flush=True)
     print(f"::add-task-context TOTAL_TESTS::{total_tests}", flush=True)

@@ -364,6 +364,22 @@ ALL_TESTS: list[TestCase] = [
         timeout=1200,
         requires=["BB_PR_URL"],
     ),
+    # parallel-test: full end-to-end fan-out CI run against a public GitHub repo.
+    # Triggered with `@sb-slack parallel-test --repo https://github.com/bhatti/formicary main`.
+    # analyze → run-tests (fan-out, 2 shards) → report.
+    TestCase(
+        name="parallel-test",
+        job_type="ai-parallel-test",
+        params={
+            "Repo": "https://github.com/bhatti/formicary",
+            "Branch": "main",
+            "MaxShards": "2",
+        },
+        task_type="report",
+        expected_files=["reports/report.md"],
+        timeout=1800,
+        required_context_keys=["TEST_STATUS"],
+    ),
 ]
 
 

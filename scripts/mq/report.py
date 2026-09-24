@@ -33,6 +33,8 @@ import os
 import sys
 from pathlib import Path
 
+import requests
+
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.slack_format import format_for_slack
 from scripts.standup.slack_client import post_report
@@ -45,6 +47,61 @@ def _read_json(path: Path) -> dict | None:
         except (json.JSONDecodeError, OSError):
             pass
     return None
+
+
+def _fetch_shard_results_from_api(item_var: str = "shard") -> list[dict]:
+    """Fetch per-shard results from the Formicary API using task context variables.
+
+    FanOutTasklet prefixes each fan-out child's task context with "{item_var}_{idx}_".
+    run_scoped_ci emits ::add-task-context ShardResult::{json}, so the parent
+    run-tests task execution has keys like shard_0_ShardResult, shard_1_ShardResult.
+
+    Returns a list of shard result dicts, sorted by shard_id. Returns [] on any error.
+    """
+    base_url = os.environ.get("FORMICARY_PUBLIC_URL", "").rstrip("/")
+    token = os.environ.get("FORMICARY_TOKEN", "")
+    job_id = os.environ.get("JOB_ID", "")
+    if not (base_url and token and job_id):
+        return []
+
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        # Get job request to find execution id
+        resp = requests.get(f"{base_url}/api/jobs/requests/{job_id}",
+                            headers=headers, timeout=15, verify=False)
+        if not resp.ok:
+            return []
+        exec_id = (resp.json().get("job_request") or resp.json()).get("job_execution_id", "")
+        if not exec_id:
+            return []
+
+        # Get job execution with task contexts
+        resp = requests.get(f"{base_url}/api/v1/jobs/executions/{exec_id}",
+                            headers=headers, timeout=15, verify=False)
+        if not resp.ok:
+            return []
+        je = resp.json().get("job_execution") or resp.json()
+
+        # Find the run-tests task execution and extract shard context keys
+        for task in je.get("tasks") or []:
+            if task.get("task_type") != "run-tests":
+                continue
+            prefix = f"{item_var}_"
+            suffix = "_ShardResult"
+            shard_results = []
+            for ctx in task.get("contexts") or []:
+                name = ctx.get("name", "")
+                # Key format: shard_0_ShardResult, shard_1_ShardResult ...
+                if name.startswith(prefix) and name.endswith(suffix):
+                    try:
+                        shard_results.append(json.loads(ctx.get("value", "{}")))
+                    except json.JSONDecodeError:
+                        pass
+            if shard_results:
+                return sorted(shard_results, key=lambda r: r.get("shard_id", 0))
+    except Exception:
+        pass
+    return []
 
 
 _SCOPE_DESCRIPTIONS = {
@@ -224,29 +281,32 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
     summary = _read_json(workspace / "test_summary.json")
     if not summary:
+        # Primary: read from formicary API task context (aggregated by FanOutTasklet).
+        # Fallback: glob shard_result_*.json for local/test runs.
+        api_shards = _fetch_shard_results_from_api()
         shard_files = sorted(glob.glob(str(workspace / "shard_result_*.json")))
-        if shard_files:
-            results = []
+        results = api_shards or []
+        if not results and shard_files:
             for f in shard_files:
                 try:
                     results.append(json.loads(Path(f).read_text()))
                 except (json.JSONDecodeError, OSError):
                     pass
-            if results:
-                passed = sum(r.get("passed", 0) for r in results)
-                failed = sum(r.get("failed", 0) for r in results)
-                skipped = sum(r.get("skipped", 0) for r in results)
-                total = passed + failed + skipped
-                duration = max((r.get("duration_s", 0) for r in results), default=0)
-                summary = {
-                    "shards": len(results),
-                    "total": total,
-                    "passed": passed,
-                    "failed": failed,
-                    "skipped": skipped,
-                    "wall_clock_s": round(duration, 1),
-                    "status": "PASS" if failed == 0 else "FAIL",
-                }
+        if results:
+            passed = sum(r.get("passed", 0) for r in results)
+            failed = sum(r.get("failed", 0) for r in results)
+            skipped = sum(r.get("skipped", 0) for r in results)
+            total = passed + failed + skipped
+            duration = max((r.get("duration_s", 0) for r in results), default=0)
+            summary = {
+                "shards": len(results),
+                "total": total,
+                "passed": passed,
+                "failed": failed,
+                "skipped": skipped,
+                "wall_clock_s": round(duration, 1),
+                "status": "PASS" if failed == 0 else "FAIL",
+            }
 
     if summary:
         passed = summary.get("passed", 0)
@@ -267,13 +327,14 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sections.append(f"  ⏱️ {wall:.0f}s wall clock across {n_shards} shards")
         sections.append("")
 
-        shard_files = sorted(glob.glob(str(workspace / "shard_result_*.json")))
-        shard_results = []
-        for f in shard_files:
-            try:
-                shard_results.append(json.loads(Path(f).read_text()))
-            except (json.JSONDecodeError, OSError):
-                pass
+        # API context is the canonical source; file glob is for local/test runs only.
+        shard_results = _fetch_shard_results_from_api()
+        if not shard_results:
+            for f in sorted(glob.glob(str(workspace / "shard_result_*.json"))):
+                try:
+                    shard_results.append(json.loads(Path(f).read_text()))
+                except (json.JSONDecodeError, OSError):
+                    pass
         if len(shard_results) > 1:
             durations = [r.get("duration_s", 0) for r in shard_results]
             total_sequential = sum(durations)
