@@ -472,21 +472,71 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["TESTS_PASSED"] = str(passed)
         ctx["TESTS_FAILED"] = str(failed)
 
+    review = _read_json(workspace / "review_result.json")
+    if review:
+        verdict = review.get("verdict", "UNKNOWN")
+        all_findings = review.get("findings", [])
+        verdict_emoji = {"DONE": "✅", "DONE_WITH_CONCERNS": "⚠️", "BLOCKED": "🚫"}.get(verdict, "📋")
+        _SEV_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "info": "ℹ️"}
+        sev_counts: dict[str, int] = {}
+        for f in all_findings:
+            s = f.get("severity", "info").lower()
+            sev_counts[s] = sev_counts.get(s, 0) + 1
+        sev_summary = ", ".join(
+            f"{c} {s}" for s, c in sorted(sev_counts.items(),
+                                           key=lambda x: ["critical","high","medium","low","info"].index(x[0])
+                                           if x[0] in ["critical","high","medium","low","info"] else 99)
+        )
+        sections.append("## Review Findings")
+        sections.append("")
+        sections.append(f"{verdict_emoji} **{verdict}** — {len(all_findings)} finding(s)"
+                        + (f" ({sev_summary})" if sev_summary else ""))
+        sections.append("")
+        if all_findings:
+            sections.append("| Severity | Category | File | Line | Summary |")
+            sections.append("|----------|----------|------|------|---------|")
+            for f in all_findings[:20]:
+                sev = f.get("severity", "info").lower()
+                cat = f.get("category", "")
+                fpath = f.get("file", "")
+                line = f.get("line", "")
+                summary = f.get("summary", f.get("short_summary", ""))
+                # Truncate long summaries for table readability
+                if len(summary) > 80:
+                    summary = summary[:77] + "..."
+                sections.append(f"| {_SEV_EMOJI.get(sev,'')}{sev} | {cat} | `{fpath}` | {line} | {summary} |")
+            if len(all_findings) > 20:
+                sections.append(f"| ... | | | | {len(all_findings) - 20} more findings in review_result.json |")
+            sections.append("")
+        ctx["REVIEW_VERDICT"] = verdict
+        ctx["REVIEW_FINDINGS_COUNT"] = str(len(all_findings))
+        ctx["REVIEW_CRITICAL"] = str(sev_counts.get("critical", 0))
+        ctx["REVIEW_HIGH"] = str(sev_counts.get("high", 0))
+
     gate = _read_json(workspace / "gate_result.json")
     if gate:
         needs = gate.get("needs_approval", False)
         reason = gate.get("reason", "")
-        findings = gate.get("findings_count", 0)
+        risk_score_val = gate.get("risk_score", "?")
+        risk_tier = gate.get("risk_tier", "?")
+        has_critical = gate.get("has_critical_findings", False)
+        findings_count = gate.get("findings_count", 0)
         emoji = "🚦" if needs else "✅"
+        action = "**Human approval required** before merge" if needs else "**Eligible for auto-merge**"
         sections.append("## Gate Decision")
         sections.append("")
-        sections.append(f"{emoji} Approval required: **{needs}**")
-        if reason:
-            sections.append(f"  Reason: {reason}")
-        if findings:
-            sections.append(f"  Findings: {findings}")
+        sections.append(f"{emoji} {action}")
+        sections.append("")
+        sections.append("| Field | Value |")
+        sections.append("|-------|-------|")
+        sections.append(f"| Needs approval | {needs} |")
+        sections.append(f"| Reason | {reason} |")
+        sections.append(f"| Risk score | {risk_score_val} ({risk_tier}) |")
+        sections.append(f"| Critical findings | {has_critical} |")
+        sections.append(f"| Total findings | {findings_count} |")
         sections.append("")
         ctx["GATE_APPROVAL"] = str(needs).lower()
+        ctx["GATE_REASON"] = reason
 
     lanes = _read_json(workspace / "lane_groups.json")
     if lanes:
@@ -518,7 +568,8 @@ def main() -> None:
     reports_dir = workspace / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    pr_number = config.get("PR_NUMBER", "")
+    from scripts.mq._shared import parse_pr_ref
+    pr_number, _ = parse_pr_ref(config.get("PR_NUMBER", ""))
     title = config.get("REPORT_TITLE", "Merge Queue Report")
 
     report_text, ctx = _build_report(workspace, pr_number, title)
@@ -546,7 +597,7 @@ def main() -> None:
     thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
     slack_ok = post_report(config, slack_text, report_text,
                            title=title, filename="report.html",
-                           thread_ts=thread_ts, task_type="report")
+                           thread_ts=thread_ts, task_type=config.get("TASK_TYPE", "report"))
 
     result = {
         "status": "DONE",

@@ -3535,6 +3535,258 @@ def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
                  f"reduction={reduction}% shard_balance={balance}")
 
 
+def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
+                               pod_label: str) -> TestResult:
+    """Shared read-only gate-review pipeline: clone → scope → risk → report.
+
+    Does NOT run review.run (requires Claude) or gate-check/merge/approve (write ops).
+    Validates:
+      - parse_pr_ref correctly extracts bare PR number and repo from full URL
+      - apply_repo_override injects correct GH_ORG/GH_REPO or BITBUCKET_WORKSPACE/BITBUCKET_REPO
+      - scope_router and risk_score run against the correct repo
+      - report.md title uses bare PR number (not the full URL)
+      - report.html is rendered
+    """
+    result = TestResult(pod_label)
+    ws = f"/workspace/gate_review_{pod_label.replace('-', '_')}"
+
+    env = dict(base_env)
+    env["WORKSPACE_DIR"] = ws
+    env["CODEBASE_DIR"] = f"{ws}/repo"
+    env["TASK_TYPE"] = "review"
+    env["PR_NUMBER"] = pr_url
+    # Suppress Slack to keep test read-only and fast
+    env.pop("SLACK_BOT_TOKEN", None)
+    env["SLACK_BOT_TOKEN"] = ""
+
+    with pod_fixture(pod_label) as pod:
+        setup_step = exec_step(pod, "setup",
+                               f"mkdir -p {ws}/reports {ws}/logs",
+                               env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        # clone_pr — verifies parse_pr_ref + apply_repo_override
+        clone_step = exec_step(pod, "clone",
+                               f"python3 -m scripts.mq.clone_pr --pr-number '{pr_url}'",
+                               env, timeout=180)
+        result.steps.append(clone_step)
+        if not clone_step.ok:
+            return _fail(result, clone_step,
+                         f"clone_pr exit {clone_step.returncode}: {clone_step.stderr[-400:]}")
+
+        # scope_router — read-only (label_pr skips for Bitbucket; GitHub label is fine on own repo)
+        scope_step = exec_step(pod, "scope-router",
+                               f"python3 -m scripts.mq.scope_router --pr-number '{pr_url}'",
+                               env, timeout=120)
+        result.steps.append(scope_step)
+        if not scope_step.ok:
+            return _fail(result, scope_step,
+                         f"scope_router exit {scope_step.returncode}: {scope_step.stderr[-400:]}")
+
+        err = _check_keys(scope_step, ["SCOPE_KEY", "BLAST_RADIUS", "CHANGED_FILES"])
+        if err:
+            return _fail(result, scope_step, err)
+
+        # risk_score — read-only
+        risk_step = exec_step(pod, "risk-score",
+                              f"python3 -m scripts.mq.risk_score --pr-number '{pr_url}'",
+                              env, timeout=120)
+        result.steps.append(risk_step)
+        if not risk_step.ok:
+            return _fail(result, risk_step,
+                         f"risk_score exit {risk_step.returncode}: {risk_step.stderr[-400:]}")
+
+        err = _check_keys(risk_step, ["RISK_TIER", "RISK_SCORE"])
+        if err:
+            return _fail(result, risk_step, err)
+
+        # Inject mock review_result.json + gate_result.json so report includes all sections.
+        # review.run (Claude) is not run in pod tests — too slow/costly.  The mock has a
+        # realistic schema with critical + high findings so we can assert the report renders them.
+        mock_review = json.dumps({
+            "verdict": "DONE_WITH_CONCERNS",
+            "findings": [
+                {"severity": "critical", "category": "security",
+                 "file": "auth/login.py", "line": 45,
+                 "summary": "SQL injection via unsanitized user input in login handler",
+                 "short_summary": "SQL injection in login handler",
+                 "failure_scenario": "User passes ' OR 1=1 -- causing full table scan"},
+                {"severity": "high", "category": "correctness",
+                 "file": "api/handler.py", "line": 123,
+                 "summary": "Off-by-one in pagination loop skips last result",
+                 "short_summary": "Off-by-one in pagination"},
+                {"severity": "medium", "category": "test-coverage",
+                 "file": "billing/charge.py", "line": 0,
+                 "summary": "No tests for the charge refund path",
+                 "short_summary": "Missing refund path tests"},
+            ],
+        })
+        # gate_result.json: mirrors what gate-check task writes
+        mock_gate = json.dumps({
+            "risk_score": 41.5,
+            "risk_tier": "HIGH",
+            "has_critical_findings": True,
+            "findings_count": 3,
+            "needs_approval": True,
+            "reason": "critical findings",
+        })
+        inject_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import os\n"
+            f"ws = {ws!r}\n"
+            f"open(os.path.join(ws, 'review_result.json'), 'w').write({mock_review!r})\n"
+            f"open(os.path.join(ws, 'gate_result.json'), 'w').write({mock_gate!r})\n"
+            f"print('injected review_result.json and gate_result.json')\n"
+            f"PYEOF"
+        )
+        inject_step = exec_step(pod, "inject-mock-review",
+                                inject_cmd, env, timeout=15)
+        result.steps.append(inject_step)
+        if not inject_step.ok:
+            return _fail(result, inject_step, f"inject failed: {inject_step.stderr[-200:]}")
+
+        # report — read-only, no Slack
+        report_step = exec_step(pod, "report",
+                                "python3 -m scripts.mq.report",
+                                env, timeout=60)
+        result.steps.append(report_step)
+        if not report_step.ok:
+            return _fail(result, report_step,
+                         f"report exit {report_step.returncode}: {report_step.stderr[-400:]}")
+
+        # Verify all report sections present and correct
+        verify_cmd = (
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys, os\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"# scope.json\n"
+            f"sp = os.path.join(ws, 'scope.json')\n"
+            f"if not os.path.exists(sp): issues.append('scope.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(sp).read())\n"
+            f"    for k in ('scope', 'blast_radius', 'changed_files'):\n"
+            f"        if k not in d: issues.append(f'scope.json missing {{k}}')\n"
+            f"    print(f'::add-task-context SCOPE::{{d.get(\"scope\",\"?\")}}')\n"
+            f"    print(f'::add-task-context BLAST_RADIUS::{{d.get(\"blast_radius\",\"?\")}}')\n"
+            f"# risk_score.json\n"
+            f"rp = os.path.join(ws, 'risk_score.json')\n"
+            f"if not os.path.exists(rp): issues.append('risk_score.json missing')\n"
+            f"else:\n"
+            f"    d = json.loads(open(rp).read())\n"
+            f"    for k in ('tier', 'score', 'dimensions', 'requires_human_approval'):\n"
+            f"        if k not in d: issues.append(f'risk_score.json missing {{k}}')\n"
+            f"    print(f'::add-task-context RISK_TIER::{{d.get(\"tier\",\"?\")}}')\n"
+            f"    print(f'::add-task-context RISK_SCORE::{{d.get(\"score\",\"?\")}}')\n"
+            f"# report.md — must contain all gate-review sections\n"
+            f"md = os.path.join(ws, 'reports', 'report.md')\n"
+            f"if not os.path.exists(md): issues.append('reports/report.md missing')\n"
+            f"else:\n"
+            f"    content = open(md).read()\n"
+            f"    md_size = os.path.getsize(md)\n"
+            f"    print(f'::add-task-context REPORT_MD_BYTES::{{md_size}}')\n"
+            f"    if md_size < 100: issues.append(f'report.md too small ({{md_size}}B)')\n"
+            f"    # Full URL must not appear in PR # heading — parse_pr_ref must normalise it\n"
+            f"    if 'PR #http' in content:\n"
+            f"        issues.append('report.md title contains full URL — parse_pr_ref not called')\n"
+            f"    print(f'::add-task-context PR_URL_NORMALISED::{{\"no\" if \"PR #http\" in content else \"yes\"}}')\n"
+            f"    # All gate-review sections must be present\n"
+            f"    for section in ('## Risk Score', '## Review Findings', '## Gate Decision'):\n"
+            f"        if section not in content:\n"
+            f"            issues.append(f'report.md missing section: {{section}}')\n"
+            f"    # Review findings table must contain the critical finding\n"
+            f"    if 'critical' not in content:\n"
+            f"        issues.append('report.md Review Findings missing critical severity')\n"
+            f"    if 'SQL injection' not in content:\n"
+            f"        issues.append('report.md Review Findings missing expected finding summary')\n"
+            f"    # Gate decision must mention approval\n"
+            f"    if 'Human approval required' not in content and 'Eligible for auto-merge' not in content:\n"
+            f"        issues.append('report.md Gate Decision missing approval decision text')\n"
+            f"    print(f'::add-task-context SECTIONS_OK::{{\"yes\" if not issues else \"no\"}}')\n"
+            f"# report.html\n"
+            f"html = os.path.join(ws, 'reports', 'report.html')\n"
+            f"if not os.path.exists(html): issues.append('reports/report.html missing')\n"
+            f"else:\n"
+            f"    hsize = os.path.getsize(html)\n"
+            f"    print(f'::add-task-context REPORT_HTML_BYTES::{{hsize}}')\n"
+            f"    if hsize < 200: issues.append(f'report.html too small ({{hsize}}B)')\n"
+            f"    hcontent = open(html).read()\n"
+            f"    if 'Review Findings' not in hcontent:\n"
+            f"        issues.append('report.html missing Review Findings section')\n"
+            f"    if 'Gate Decision' not in hcontent:\n"
+            f"        issues.append('report.html missing Gate Decision section')\n"
+            f"if issues:\n"
+            f"    print('ISSUES: ' + '; '.join(issues), file=sys.stderr)\n"
+            f"    sys.exit(1)\n"
+            f"print('::add-task-context VERIFY::ok')\n"
+            f"PYEOF"
+        )
+        verify_step = exec_step(pod, "verify", verify_cmd, env, timeout=30)
+        result.steps.append(verify_step)
+        if not verify_step.ok:
+            return _fail(result, verify_step, f"verify failed: {verify_step.stderr[-400:]}")
+
+    scope = verify_step.context.get("SCOPE", "?")
+    blast = verify_step.context.get("BLAST_RADIUS", "?")
+    tier = verify_step.context.get("RISK_TIER", "?")
+    score = verify_step.context.get("RISK_SCORE", "?")
+    md_bytes = verify_step.context.get("REPORT_MD_BYTES", "?")
+    html_bytes = verify_step.context.get("REPORT_HTML_BYTES", "?")
+    url_norm = verify_step.context.get("PR_URL_NORMALISED", "?")
+    total_s = sum(s.elapsed for s in result.steps)
+    return _pass(result,
+                 f"pr_url={pr_url} scope={scope} blast={blast} tier={tier} score={score} "
+                 f"url_normalised={url_norm} report.md={md_bytes}B html={html_bytes}B "
+                 f"elapsed={total_s:.0f}s")
+
+
+def test_35_gate_review_gh(base_env: dict[str, str]) -> TestResult:
+    """Gate-review read-only pipeline against a GitHub PR full URL.
+
+    Exercises parse_pr_ref + apply_repo_override end-to-end in a pod:
+      clone_pr → scope_router → risk_score → report
+    Verifies report title shows bare PR number (not full URL).
+    No write operations — does not run review.run, gate-check, merge, or approve.
+
+    Override via GH_PR_URL env var.
+    """
+    pr_url = os.environ.get("GH_PR_URL", f"https://github.com/{GH_ORG}/{GH_REPO}/pull/9")
+    env = dict(base_env)
+    # Clear any Bitbucket vars so GitHub path is clean
+    for k in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "DEFAULT_TRACKER"):
+        env.pop(k, None)
+    return _run_gate_review_pipeline(env, pr_url, "gate-review-gh")
+
+
+def test_36_gate_review_bb(base_env: dict[str, str]) -> TestResult:
+    """Gate-review read-only pipeline against a Bitbucket PR full URL.
+
+    Exercises parse_pr_ref + apply_repo_override end-to-end in a pod:
+      clone_pr → scope_router → risk_score → report
+    Verifies apply_repo_override sets BITBUCKET_WORKSPACE/BITBUCKET_REPO and
+    DEFAULT_TRACKER=bitbucket, so all downstream API calls use Bitbucket.
+    No write operations — label_pr skips for Bitbucket; no merge/approve.
+
+    Override via BB_PR_URL env var.
+    Skipped when BITBUCKET_TOKEN not set.
+    """
+    result = TestResult("gate-review-bb")
+    if not base_env.get("BITBUCKET_TOKEN") and not base_env.get("BITBUCKET_APP_PASSWORD"):
+        result.passed = True
+        result.message = "SKIPPED — BITBUCKET_TOKEN/BITBUCKET_APP_PASSWORD not set"
+        return result
+
+    pr_url = os.environ.get("BB_PR_URL",
+                             "https://bitbucket.org/cribl/cribl/pull-requests/45974")
+    env = dict(base_env)
+    # Unset GitHub vars and pre-set tracker vars to ensure apply_repo_override drives config
+    for k in ("GH_ORG", "GH_REPO", "DEFAULT_TRACKER", "BITBUCKET_WORKSPACE", "BITBUCKET_REPO"):
+        env.pop(k, None)
+    return _run_gate_review_pipeline(env, pr_url, "gate-review-bb")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -3572,6 +3824,8 @@ ALL_TESTS: dict[str, callable] = {
     "mq-test-impact":         test_32_mq_test_impact,
     "mq-full-pipeline":       test_33_mq_full_pipeline,
     "mq-test-impact-branch":  test_34_mq_test_impact_branch,
+    "gate-review-gh":         test_35_gate_review_gh,
+    "gate-review-bb":         test_36_gate_review_bb,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

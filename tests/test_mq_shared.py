@@ -316,6 +316,17 @@ class TestApplyRepoOverride:
         assert config["BITBUCKET_WORKSPACE"] == "my-ws"
         assert config["BITBUCKET_REPO"] == "my-repo"
 
+    def test_bitbucket_sets_default_tracker(self):
+        config = {}
+        apply_repo_override(config, "https://bitbucket.org/my-ws/my-repo.git")
+        assert config["DEFAULT_TRACKER"] == "bitbucket"
+
+    def test_bitbucket_tracker_makes_resolve_tracker_return_bitbucket(self):
+        from scripts.mq._shared import resolve_tracker
+        config = {}
+        apply_repo_override(config, "https://bitbucket.org/ws/repo.git")
+        assert resolve_tracker(config) == "bitbucket"
+
     def test_empty_url_is_noop(self):
         config = {"GH_ORG": "existing"}
         apply_repo_override(config, "")

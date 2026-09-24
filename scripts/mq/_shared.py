@@ -69,8 +69,10 @@ def apply_repo_override(config: dict, repo_url: str) -> None:
     if bb:
         config["BITBUCKET_WORKSPACE"] = bb.group(1)
         config["BITBUCKET_REPO"] = bb.group(2)
+        config["DEFAULT_TRACKER"] = "bitbucket"
         os.environ["BITBUCKET_WORKSPACE"] = bb.group(1)
         os.environ["BITBUCKET_REPO"] = bb.group(2)
+        os.environ["DEFAULT_TRACKER"] = "bitbucket"
 
 
 def is_branch_or_tag(ref: str) -> bool:

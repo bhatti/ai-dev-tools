@@ -194,8 +194,59 @@ class TestBuildReport:
             "findings_count": 3,
         }))
         md, ctx = _build_report(tmp_path, "", "Gate")
-        assert "Approval required" in md
+        assert "approval required" in md.lower()
         assert "risk score" in md
+        assert ctx["GATE_APPROVAL"] == "true"
+
+    def test_review_findings(self, tmp_path):
+        (tmp_path / "review_result.json").write_text(json.dumps({
+            "verdict": "DONE_WITH_CONCERNS",
+            "findings": [
+                {"severity": "critical", "category": "security",
+                 "file": "auth/login.py", "line": 45,
+                 "summary": "SQL injection via unsanitized input"},
+                {"severity": "high", "category": "correctness",
+                 "file": "api/handler.py", "line": 123,
+                 "summary": "Off-by-one in pagination loop"},
+                {"severity": "medium", "category": "test-coverage",
+                 "file": "billing/charge.py", "line": 0,
+                 "summary": "No tests for refund path"},
+            ],
+        }))
+        md, ctx = _build_report(tmp_path, "", "ReviewFindings")
+        assert "## Review Findings" in md
+        assert "DONE_WITH_CONCERNS" in md
+        assert "critical" in md
+        assert "SQL injection" in md
+        assert ctx["REVIEW_VERDICT"] == "DONE_WITH_CONCERNS"
+        assert ctx["REVIEW_FINDINGS_COUNT"] == "3"
+        assert ctx["REVIEW_CRITICAL"] == "1"
+        assert ctx["REVIEW_HIGH"] == "1"
+
+    def test_review_findings_with_gate(self, tmp_path):
+        (tmp_path / "review_result.json").write_text(json.dumps({
+            "verdict": "BLOCKED",
+            "findings": [
+                {"severity": "critical", "category": "security",
+                 "file": "src/auth.py", "line": 10,
+                 "summary": "Hardcoded secret in source"},
+            ],
+        }))
+        (tmp_path / "gate_result.json").write_text(json.dumps({
+            "needs_approval": True,
+            "reason": "critical findings",
+            "risk_score": 55.0,
+            "risk_tier": "HIGH",
+            "has_critical_findings": True,
+            "findings_count": 1,
+        }))
+        md, ctx = _build_report(tmp_path, "", "ReviewGate")
+        assert "## Review Findings" in md
+        assert "## Gate Decision" in md
+        assert "BLOCKED" in md
+        assert "critical" in md
+        assert "approval required" in md.lower()
+        assert ctx["REVIEW_VERDICT"] == "BLOCKED"
         assert ctx["GATE_APPROVAL"] == "true"
 
     def test_lane_groups(self, tmp_path):
