@@ -246,3 +246,34 @@ class TestParseSlowTests:
 
     def test_empty_output(self):
         assert _parse_slow_tests("", "") == []
+
+
+class TestShardResultFilename:
+    """Regression tests for the indexed shard result filename.
+
+    Each fan-out child writes shard_result_{shard_id}.json so that when the report
+    task downloads all fan-out artifacts into a shared workspace, files from different
+    shards don't overwrite each other.  The report task globs shard_result_*.json.
+    """
+
+    def test_no_tests_writes_indexed_file(self, tmp_path, monkeypatch):
+        import sys
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("CODEBASE_DIR", str(tmp_path))
+        # Patch the main function to use a no-tests shard
+        from scripts.mq import run_scoped_ci
+        shard_json = json.dumps({"shard_id": 3, "tests": []})
+        with pytest.raises(SystemExit) as exc:
+            run_scoped_ci.main.main(["--shard", shard_json], standalone_mode=False)
+        # Either exits 0 (skipped) or runs — either way the indexed file must exist
+        assert (tmp_path / "shard_result_3.json").exists(), \
+            "Expected shard_result_3.json; plain shard_result.json would collide between fan-out children"
+        assert not (tmp_path / "shard_result.json").exists(), \
+            "shard_result.json (un-indexed) must not be written — it would be overwritten on artifact download"
+
+    def test_indexed_file_matches_glob_pattern(self, tmp_path):
+        import glob
+        (tmp_path / "shard_result_0.json").write_text("{}")
+        (tmp_path / "shard_result_1.json").write_text("{}")
+        matches = glob.glob(str(tmp_path / "shard_result_*.json"))
+        assert len(matches) == 2, "Report task glob must find all shards"

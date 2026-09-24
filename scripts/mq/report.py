@@ -34,6 +34,11 @@ import sys
 from pathlib import Path
 
 import requests
+import urllib3
+
+# Formicary public URLs typically use self-signed certs in dev/staging.
+# Suppress the per-request InsecureRequestWarning that would otherwise flood logs.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.slack_format import format_for_slack
@@ -49,14 +54,18 @@ def _read_json(path: Path) -> dict | None:
     return None
 
 
-def _fetch_shard_results_from_api(item_var: str = "shard") -> list[dict]:
+def _fetch_shard_results_from_api(
+        item_var: str = "shard",
+        fan_out_task_type: str = "run-tests",
+) -> list[dict]:
     """Fetch per-shard results from the Formicary API using task context variables.
 
     FanOutTasklet prefixes each fan-out child's task context with "{item_var}_{idx}_".
     run_scoped_ci emits ::add-task-context ShardResult::{json}, so the parent
     run-tests task execution has keys like shard_0_ShardResult, shard_1_ShardResult.
 
-    Returns a list of shard result dicts, sorted by shard_id. Returns [] on any error.
+    Returns a list of shard result dicts, sorted by shard_id. Returns [] on any error
+    or when FORMICARY_TOKEN / FORMICARY_PUBLIC_URL / JOB_ID env vars are absent.
     """
     base_url = os.environ.get("FORMICARY_PUBLIC_URL", "").rstrip("/")
     token = os.environ.get("FORMICARY_TOKEN", "")
@@ -82,9 +91,9 @@ def _fetch_shard_results_from_api(item_var: str = "shard") -> list[dict]:
             return []
         je = resp.json().get("job_execution") or resp.json()
 
-        # Find the run-tests task execution and extract shard context keys
+        # Find the fan-out task execution and extract shard context keys
         for task in je.get("tasks") or []:
-            if task.get("task_type") != "run-tests":
+            if task.get("task_type") != fan_out_task_type:
                 continue
             prefix = f"{item_var}_"
             suffix = "_ShardResult"
@@ -280,26 +289,26 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["TOTAL_TESTS"] = str(total)
 
     summary = _read_json(workspace / "test_summary.json")
+    # Load shard files once; reused for both building summary (when absent) and the perf table.
+    shard_results: list[dict] = []
+    for f in sorted(glob.glob(str(workspace / "shard_result_*.json"))):
+        try:
+            shard_results.append(json.loads(Path(f).read_text()))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     if not summary:
-        # Primary: read from formicary API task context (aggregated by FanOutTasklet).
-        # Fallback: glob shard_result_*.json for local/test runs.
-        api_shards = _fetch_shard_results_from_api()
-        shard_files = sorted(glob.glob(str(workspace / "shard_result_*.json")))
-        results = api_shards or []
-        if not results and shard_files:
-            for f in shard_files:
-                try:
-                    results.append(json.loads(Path(f).read_text()))
-                except (json.JSONDecodeError, OSError):
-                    pass
-        if results:
-            passed = sum(r.get("passed", 0) for r in results)
-            failed = sum(r.get("failed", 0) for r in results)
-            skipped = sum(r.get("skipped", 0) for r in results)
+        # Primary: artifact files; fallback: API task context if artifacts are absent.
+        if not shard_results:
+            shard_results = _fetch_shard_results_from_api()
+        if shard_results:
+            passed = sum(r.get("passed", 0) for r in shard_results)
+            failed = sum(r.get("failed", 0) for r in shard_results)
+            skipped = sum(r.get("skipped", 0) for r in shard_results)
             total = passed + failed + skipped
-            duration = max((r.get("duration_s", 0) for r in results), default=0)
+            duration = max((r.get("duration_s", 0) for r in shard_results), default=0)
             summary = {
-                "shards": len(results),
+                "shards": len(shard_results),
                 "total": total,
                 "passed": passed,
                 "failed": failed,
@@ -307,6 +316,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 "wall_clock_s": round(duration, 1),
                 "status": "PASS" if failed == 0 else "FAIL",
             }
+            # Write test_summary.json as an artifact for downstream consumers and dashboards.
+            (workspace / "test_summary.json").write_text(json.dumps(summary, indent=2))
 
     if summary:
         passed = summary.get("passed", 0)
@@ -327,14 +338,6 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sections.append(f"  ⏱️ {wall:.0f}s wall clock across {n_shards} shards")
         sections.append("")
 
-        # API context is the canonical source; file glob is for local/test runs only.
-        shard_results = _fetch_shard_results_from_api()
-        if not shard_results:
-            for f in sorted(glob.glob(str(workspace / "shard_result_*.json"))):
-                try:
-                    shard_results.append(json.loads(Path(f).read_text()))
-                except (json.JSONDecodeError, OSError):
-                    pass
         if len(shard_results) > 1:
             durations = [r.get("duration_s", 0) for r in shard_results]
             total_sequential = sum(durations)
@@ -445,11 +448,6 @@ def main() -> None:
         print(f"[mq-report] HTML render failed (non-fatal): {e}", flush=True)
 
     slack_text = format_for_slack(report_text)
-
-    from scripts.common.slack_format import build_artifact_links
-    html_url, job_url = build_artifact_links(config, "report", "report.html")
-    if html_url:
-        slack_text += f"\n\n📎 <{html_url}|View full report>  |  <{job_url}|Job details>"
 
     thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
     slack_ok = post_report(config, slack_text, report_text,

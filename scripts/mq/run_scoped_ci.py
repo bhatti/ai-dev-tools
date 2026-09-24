@@ -10,7 +10,7 @@ Usage:
 Required env: (none required, CODEBASE_DIR recommended)
 Optional env: TEST_CMD — override auto-detected test command (e.g. "make test")
 Reads:  shard definition from --shard JSON or /workspace/test_impact.json
-Writes: /workspace/shard_result_{shard_id}.json
+Writes: /workspace/shard_result_{shard_id}.json (indexed so fan-out siblings don't collide on download)
 
 Exit codes: 0=all pass, 1=error, 3=test failures
 """
@@ -338,7 +338,7 @@ def main(shard: str, shard_id: str | None) -> None:
             "duration_s": 0,
             "status": "skipped",
         }
-        (workspace / "shard_result.json").write_text(json.dumps(result, indent=2))
+        (workspace / f"shard_result_{sid}.json").write_text(json.dumps(result, indent=2))
         sys.exit(0)
 
     # TEST_CMD override — lets users specify their own test runner
@@ -393,9 +393,11 @@ def main(shard: str, shard_id: str | None) -> None:
         "slow_tests": slow_tests,
     }
 
-    # Write shard_result.json (matches YAML artifact path — each fan-out child runs in
-    # its own isolated pod so there's no filename collision at upload time).
-    out_path = workspace / "shard_result.json"
+    # Write shard_result_{sid}.json — each fan-out child writes its own indexed file so
+    # that when the report task downloads all fan-out artifacts into a shared workspace,
+    # files from different shards don't overwrite each other.  The report task globs
+    # shard_result_*.json to aggregate across all shards.
+    out_path = workspace / f"shard_result_{sid}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print(f"[run_scoped_ci] wrote {out_path}", flush=True)
 
