@@ -13,37 +13,15 @@ Exit codes: 0=done, 1=error
 """
 from __future__ import annotations
 
-import os
-import re
 import subprocess
 
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.git_utils import clone_by_tracker
-from scripts.mq._shared import is_branch_or_tag, repo_slug, resolve_pr_number, resolve_tracker
+from scripts.mq._shared import apply_repo_override, is_branch_or_tag, parse_pr_ref, repo_slug, resolve_pr_number, resolve_tracker
 
 
-def _apply_repo_override(config: dict, repo_url: str) -> None:
-    """Parse a GitHub/Bitbucket URL and override config org/repo fields."""
-    if not repo_url:
-        return
-    gh = re.search(r"github\.com[:/]([^/]+)/([^/.]+)", repo_url)
-    if gh:
-        config["GH_ORG"] = gh.group(1)
-        config["GH_REPO"] = gh.group(2)
-        os.environ["GH_ORG"] = gh.group(1)
-        os.environ["GH_REPO"] = gh.group(2)
-        if not config.get("DEFAULT_TRACKER"):
-            config["DEFAULT_TRACKER"] = "github"
-        print(f"[clone_pr] repo override: {gh.group(1)}/{gh.group(2)}", flush=True)
-        return
-    bb = re.search(r"bitbucket\.org[:/]([^/]+)/([^/.]+)", repo_url)
-    if bb:
-        config["BITBUCKET_WORKSPACE"] = bb.group(1)
-        config["BITBUCKET_REPO"] = bb.group(2)
-        os.environ["BITBUCKET_WORKSPACE"] = bb.group(1)
-        os.environ["BITBUCKET_REPO"] = bb.group(2)
 
 
 @click.command()
@@ -53,7 +31,14 @@ def _apply_repo_override(config: dict, repo_url: str) -> None:
 def main(pr_number: str | None, repo: str | None, branch: str | None) -> None:
     config = load_config(required=[])
 
-    _apply_repo_override(config, repo)
+    # Normalize full PR URLs (e.g. https://github.com/org/repo/pull/24) to bare number
+    # and extract the repo URL so --repo is not required when a full URL is given.
+    if pr_number:
+        pr_number, extracted_repo = parse_pr_ref(pr_number)
+        if extracted_repo and not repo:
+            repo = extracted_repo
+
+    apply_repo_override(config, repo or "")
 
     if not pr_number and branch:
         pr_number = branch

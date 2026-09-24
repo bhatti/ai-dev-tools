@@ -22,7 +22,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.mq._shared import fetch_pr_files, is_test_file, repo_slug
+from scripts.mq._shared import apply_repo_override, fetch_pr_files, is_test_file, parse_pr_ref, repo_slug
 
 _SKIP_DIRS = frozenset({
     "node_modules", "vendor", "target", ".git", "__pycache__",
@@ -404,7 +404,9 @@ def main(pr_number: str, num_shards: int, head: str, diff_scope: bool) -> None:
       against (defaults to BASE_BRANCH env var when omitted).
     Always falls back to the full suite when no tests map to changed files.
     """
+    pr_number, extracted_repo = parse_pr_ref(pr_number)
     config = load_config(required=[])
+    apply_repo_override(config, extracted_repo or "")
     slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)

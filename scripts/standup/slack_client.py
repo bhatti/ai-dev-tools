@@ -484,42 +484,6 @@ def post_message(config: dict, text: str, channel: str | None = None,
                             thread_ts=thread_ts, blocks=blocks) is not None
 
 
-def _upload_html_to_formicary(config: dict, html: str, filename: str) -> str | None:
-    """Upload HTML content directly to the formicary artifact store.
-
-    Returns the direct download URL (dashboard/artifacts/{sha256}/download) or None on failure.
-    Used as a fallback when Slack file upload is unavailable.
-    """
-    public_url = (config.get("FORMICARY_PUBLIC_URL") or config.get("FORMICARY_URL") or "").rstrip("/")
-    token = config.get("FORMICARY_TOKEN", "")
-    if not public_url or not token or not html:
-        return None
-    try:
-        # formicary's artifact API reads all request headers as metadata params;
-        # "name" sets the artifact filename. Content-Type is preserved as-is.
-        # verify=False: formicary nip.io deployments use self-signed certs.
-        resp = requests.post(
-            f"{public_url}/api/artifacts",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "text/html",
-                "name": filename,
-            },
-            data=html.encode("utf-8"),
-            timeout=30,
-            verify=False,
-        )
-        if resp.ok:
-            sha256 = resp.json().get("sha256", "")
-            if sha256:
-                url = f"{public_url}/dashboard/artifacts/{sha256}/download"
-                print(f"[slack] uploaded '{filename}' to formicary → {url}", flush=True)
-                return url
-        print(f"[slack] formicary artifact upload HTTP {resp.status_code}", flush=True)
-    except Exception as e:
-        print(f"[slack] formicary artifact upload error: {e}", flush=True)
-    return None
-
 
 def upload_html_report(config: dict, html_content: str, filename: str,
                        thread_ts: str | None, task_type: str = "run",

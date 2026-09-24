@@ -15,6 +15,63 @@ from scripts.common.shell import run_cmd
 
 _JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
+_GH_PR_URL_RE = re.compile(
+    r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)"
+)
+_BB_PR_URL_RE = re.compile(
+    r"https://bitbucket\.org/([^/]+/[^/]+)/pull-requests?/(\d+)"
+)
+
+
+def parse_pr_ref(ref: str) -> tuple[str, str | None]:
+    """Normalize a PR ref to (pr_number_or_branch, repo_clone_url_or_none).
+
+    Accepts full GitHub/Bitbucket PR URLs, bare numbers, branches, or Jira keys.
+    Returns a repo clone URL when the ref is a full URL so callers can pass it to
+    apply_repo_override() without requiring a separate --repo flag.
+
+    Examples:
+      https://github.com/org/repo/pull/24              → ("24", "https://github.com/org/repo.git")
+      https://bitbucket.org/ws/repo/pull-requests/456  → ("456", "https://bitbucket.org/ws/repo.git")
+      42 / feature/branch / PROJ-123                   → (ref, None)
+    """
+    m = _GH_PR_URL_RE.search(ref)
+    if m:
+        return m.group(2), f"https://github.com/{m.group(1)}.git"
+    m = _BB_PR_URL_RE.search(ref)
+    if m:
+        return m.group(2), f"https://bitbucket.org/{m.group(1)}.git"
+    return ref, None
+
+
+def apply_repo_override(config: dict, repo_url: str) -> None:
+    """Parse a GitHub/Bitbucket URL and inject org/repo fields into config and os.environ.
+
+    Sets GH_ORG + GH_REPO (GitHub) or BITBUCKET_WORKSPACE + BITBUCKET_REPO (Bitbucket)
+    so that repo_slug(), resolve_tracker(), and gh/bitbucket CLI calls all pick up the
+    correct repo from a full PR URL without requiring separate --repo env vars.
+
+    No-op when repo_url is empty or unrecognised.
+    """
+    import os
+    if not repo_url:
+        return
+    gh = re.search(r"github\.com[:/]([^/]+)/([^/.]+)", repo_url)
+    if gh:
+        config["GH_ORG"] = gh.group(1)
+        config["GH_REPO"] = gh.group(2)
+        os.environ["GH_ORG"] = gh.group(1)
+        os.environ["GH_REPO"] = gh.group(2)
+        if not config.get("DEFAULT_TRACKER"):
+            config["DEFAULT_TRACKER"] = "github"
+        return
+    bb = re.search(r"bitbucket\.org[:/]([^/]+)/([^/.]+)", repo_url)
+    if bb:
+        config["BITBUCKET_WORKSPACE"] = bb.group(1)
+        config["BITBUCKET_REPO"] = bb.group(2)
+        os.environ["BITBUCKET_WORKSPACE"] = bb.group(1)
+        os.environ["BITBUCKET_REPO"] = bb.group(2)
+
 
 def is_branch_or_tag(ref: str) -> bool:
     """Return True if ref looks like a branch/tag rather than a PR number or Jira key."""

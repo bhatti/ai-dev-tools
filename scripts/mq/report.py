@@ -174,6 +174,7 @@ def _dim_evidence(dim: str, score: int, additions: int, deletions: int,
 
 
 _SLEEP_KEYWORDS = ("sleep", "async", "wait", "delay", "timeout", "poll", "retry", "init")
+_SLEEP_THRESHOLD_S = 5.0
 
 
 def _emit_test_health_insights(
@@ -215,7 +216,6 @@ def _emit_test_health_insights(
                 )
 
     # Detect sleep-based / timing-sensitive tests from slow list
-    _SLEEP_THRESHOLD_S = 5.0
     sleep_suspects: list[str] = []
     seen_slow_names: dict[str, int] = {}
     for st in all_slow:

@@ -5,7 +5,8 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from scripts.mq.clone_pr import _apply_repo_override, main
+from scripts.mq._shared import apply_repo_override as _apply_repo_override
+from scripts.mq.clone_pr import main
 
 
 class TestClonePr:

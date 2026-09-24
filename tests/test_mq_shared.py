@@ -4,9 +4,11 @@ from unittest.mock import MagicMock, patch
 
 from scripts.mq._shared import (
     _bb_find_pr_by_jira_key,
+    apply_repo_override,
     fetch_changed_files_from_diff,
     is_branch_or_tag,
     label_pr,
+    parse_pr_ref,
     resolve_pr_number,
     resolve_tracker,
     repo_slug,
@@ -252,3 +254,82 @@ class TestLabelPrSkipsBranch:
     def test_runs_for_pr_number(self, mock_cmd):
         label_pr({"DEFAULT_TRACKER": "github", "GH_ORG": "o", "GH_REPO": "r"}, "42", "scope:api")
         mock_cmd.assert_called_once()
+
+
+class TestParsePrRef:
+    def test_github_full_url(self):
+        num, repo = parse_pr_ref("https://github.com/org/myrepo/pull/24")
+        assert num == "24"
+        assert repo == "https://github.com/org/myrepo.git"
+
+    def test_bitbucket_full_url(self):
+        num, repo = parse_pr_ref("https://bitbucket.org/ws/myrepo/pull-requests/456/overview")
+        assert num == "456"
+        assert repo == "https://bitbucket.org/ws/myrepo.git"
+
+    def test_bare_number_passthrough(self):
+        num, repo = parse_pr_ref("42")
+        assert num == "42"
+        assert repo is None
+
+    def test_branch_passthrough(self):
+        num, repo = parse_pr_ref("feature/my-branch")
+        assert num == "feature/my-branch"
+        assert repo is None
+
+    def test_jira_key_passthrough(self):
+        num, repo = parse_pr_ref("PROJ-123")
+        assert num == "PROJ-123"
+        assert repo is None
+
+    def test_github_url_with_trailing_slash(self):
+        num, repo = parse_pr_ref("https://github.com/my-org/repo-name/pull/99/")
+        assert num == "99"
+        assert repo == "https://github.com/my-org/repo-name.git"
+
+    def test_bitbucket_pull_request_singular(self):
+        num, repo = parse_pr_ref("https://bitbucket.org/ws/repo/pull-request/7")
+        assert num == "7"
+        assert repo == "https://bitbucket.org/ws/repo.git"
+
+
+class TestApplyRepoOverride:
+    def test_github_sets_org_and_repo(self):
+        config = {}
+        apply_repo_override(config, "https://github.com/my-org/my-repo.git")
+        assert config["GH_ORG"] == "my-org"
+        assert config["GH_REPO"] == "my-repo"
+
+    def test_github_sets_default_tracker(self):
+        config = {}
+        apply_repo_override(config, "https://github.com/org/repo.git")
+        assert config["DEFAULT_TRACKER"] == "github"
+
+    def test_github_does_not_overwrite_existing_tracker(self):
+        config = {"DEFAULT_TRACKER": "jira"}
+        apply_repo_override(config, "https://github.com/org/repo.git")
+        assert config["DEFAULT_TRACKER"] == "jira"
+
+    def test_bitbucket_sets_workspace_and_repo(self):
+        config = {}
+        apply_repo_override(config, "https://bitbucket.org/my-ws/my-repo.git")
+        assert config["BITBUCKET_WORKSPACE"] == "my-ws"
+        assert config["BITBUCKET_REPO"] == "my-repo"
+
+    def test_empty_url_is_noop(self):
+        config = {"GH_ORG": "existing"}
+        apply_repo_override(config, "")
+        assert config["GH_ORG"] == "existing"
+
+    def test_unrecognized_url_is_noop(self):
+        config = {"GH_ORG": "existing"}
+        apply_repo_override(config, "https://gitlab.com/org/repo.git")
+        assert config.get("GH_ORG") == "existing"
+        assert "BITBUCKET_WORKSPACE" not in config
+
+    def test_full_pr_url_works(self):
+        config = {}
+        _, repo_url = parse_pr_ref("https://github.com/bhatti/todo-sample/pull/24")
+        apply_repo_override(config, repo_url or "")
+        assert config["GH_ORG"] == "bhatti"
+        assert config["GH_REPO"] == "todo-sample"

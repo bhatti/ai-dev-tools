@@ -19,7 +19,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.mq._shared import SENSITIVE_PATHS, fetch_pr_files, label_pr, repo_slug, top_level_module
+from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, label_pr, parse_pr_ref, repo_slug, top_level_module
 
 _CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
 
@@ -111,7 +111,9 @@ def _compute_scope(
 @click.command()
 @click.option("--pr-number", required=True, help="PR number to analyze")
 def main(pr_number: str) -> None:
+    pr_number, extracted_repo = parse_pr_ref(pr_number)
     config = load_config(required=[])
+    apply_repo_override(config, extracted_repo or "")
     slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)

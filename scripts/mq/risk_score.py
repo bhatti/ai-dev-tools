@@ -19,7 +19,7 @@ import click
 
 from scripts.common.config import get_workspace_dir, load_config
 
-from scripts.mq._shared import SENSITIVE_PATHS, is_test_file as _is_test_file
+from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, is_test_file as _is_test_file, parse_pr_ref
 
 _BLAST_RADIUS_SCORES = {"low": 2, "medium": 5, "high": 9}
 
@@ -134,8 +134,10 @@ def _tier_for_score(score: int) -> str:
 @click.command()
 @click.option("--pr-number", required=True, help="PR number to assess risk")
 def main(pr_number: str) -> None:
+    pr_number, extracted_repo = parse_pr_ref(pr_number)
     config = load_config(required=[])
     from scripts.mq._shared import fetch_pr_stats, repo_slug
+    apply_repo_override(config, extracted_repo or "")
     slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)

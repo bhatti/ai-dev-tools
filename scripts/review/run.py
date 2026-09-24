@@ -28,6 +28,7 @@ from scripts.common.artifacts import read_text
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, get_issue_dir, load_config, validate_claude_config
 from scripts.common.skills import apply_project_skills, inline_shared_refs as _inline_shared_refs
+from scripts.mq._shared import parse_pr_ref
 from scripts.review.post_findings import render_report_md, render_report_html
 
 
@@ -194,14 +195,14 @@ def main(pr_url: str | None, skill: str, issue_id: str | None, mode: str, base_b
 
 def _clone_repo_skills(pr_url: str, workspace: Path) -> None:
     """Sparse-clone only .claude/skills/ from the PR repo into workspace/repo."""
-    import re as _re
     import subprocess
-    bb = _re.match(r'https://bitbucket\.org/([^/]+)/([^/]+)/pull-requests?/\d+', pr_url)
-    gh = _re.match(r'https://github\.com/([^/]+)/([^/]+)/pull/\d+', pr_url)
-    if bb:
+    _, repo_base_url = parse_pr_ref(pr_url)
+    if not repo_base_url:
+        print("[review] unrecognized PR URL format — skipping repo skills clone", flush=True)
+        return
+    if "bitbucket.org" in repo_base_url:
         token = os.environ.get("BITBUCKET_TOKEN", os.environ.get("BITBUCKET_APP_PASSWORD", ""))
         if token:
-            # ATATT* = Bitbucket access token → x-token-auth; otherwise app password → user:pass
             if token.startswith("ATATT"):
                 auth = f"x-token-auth:{token}@"
             else:
@@ -209,14 +210,11 @@ def _clone_repo_skills(pr_url: str, workspace: Path) -> None:
                 auth = f"{user}:{token}@" if user else f"x-token-auth:{token}@"
         else:
             auth = ""
-        clone_url = f"https://{auth}bitbucket.org/{bb.group(1)}/{bb.group(2)}.git"
-    elif gh:
+        clone_url = repo_base_url.replace("https://", f"https://{auth}")
+    else:
         token = os.environ.get("GH_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
         auth = f"x-token-auth:{token}@" if token else ""
-        clone_url = f"https://{auth}github.com/{gh.group(1)}/{gh.group(2)}.git"
-    else:
-        print("[review] unrecognized PR URL format — skipping repo skills clone", flush=True)
-        return
+        clone_url = repo_base_url.replace("https://", f"https://{auth}")
     dest = workspace / "repo"
     if (dest / ".git").exists():
         print("[review] repo already cloned — skipping sparse-checkout", flush=True)
