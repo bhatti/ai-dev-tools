@@ -21,7 +21,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     unzip \
     openssh-client \
+    gcc \
+    libc6-dev \
   && rm -rf /var/lib/apt/lists/*
+
+# Go toolchain — architecture-aware
+ARG GO_VERSION=1.23.4
+RUN ARCH=$(dpkg --print-architecture) \
+  && GO_ARCH=$([ "$ARCH" = "arm64" ] && echo "arm64" || echo "amd64") \
+  && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
+     | tar -C /usr/local -xz \
+  && /usr/local/go/bin/go version
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Create non-root user — claude refuses --dangerously-skip-permissions as root
 RUN useradd -m -u 1000 -s /bin/bash agent
