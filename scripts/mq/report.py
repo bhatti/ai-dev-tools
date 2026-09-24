@@ -173,6 +173,86 @@ def _dim_evidence(dim: str, score: int, additions: int, deletions: int,
     return ""
 
 
+_SLEEP_KEYWORDS = ("sleep", "async", "wait", "delay", "timeout", "poll", "retry", "init")
+
+
+def _emit_test_health_insights(
+    sections: list[str],
+    shard_results: list[dict],
+    all_slow: list[dict],
+    passed: int,
+    failed: int,
+) -> None:
+    """Append a Test Health Insights section with actionable analysis."""
+    insights: list[str] = []
+
+    # Pass rate
+    total = passed + failed
+    if total > 0:
+        pass_rate = passed / total * 100
+        if pass_rate < 100:
+            insights.append(f"⚠️ Pass rate: {pass_rate:.1f}% ({failed} failure{'s' if failed != 1 else ''})")
+        else:
+            insights.append(f"✅ Pass rate: 100% ({passed} tests)")
+
+    # Shard balance — how evenly tests were distributed
+    if len(shard_results) > 1:
+        durations = [r.get("duration_s", 0) for r in shard_results]
+        max_dur = max(durations)
+        min_dur = min(durations)
+        if max_dur > 0:
+            imbalance_pct = (max_dur - min_dur) / max_dur * 100
+            if imbalance_pct > 30:
+                insights.append(
+                    f"⚠️ Shard imbalance: {imbalance_pct:.0f}% — "
+                    f"slowest shard ({max_dur:.0f}s) vs fastest ({min_dur:.0f}s); "
+                    "redistribute tests by duration for better parallelism"
+                )
+            else:
+                insights.append(
+                    f"✅ Shard balance: {imbalance_pct:.0f}% imbalance "
+                    f"({min_dur:.0f}s – {max_dur:.0f}s)"
+                )
+
+    # Detect sleep-based / timing-sensitive tests from slow list
+    _SLEEP_THRESHOLD_S = 5.0
+    sleep_suspects: list[str] = []
+    seen_slow_names: dict[str, int] = {}
+    for st in all_slow:
+        name = st.get("name", "")
+        dur = st.get("duration_s", 0)
+        name_lower = name.lower()
+        if dur >= _SLEEP_THRESHOLD_S and any(kw in name_lower for kw in _SLEEP_KEYWORDS):
+            sleep_suspects.append(f"`{name}` ({dur:.1f}s)")
+        # Track duplicates across shards (same test name in multiple shards)
+        seen_slow_names[name] = seen_slow_names.get(name, 0) + 1
+
+    if sleep_suspects:
+        insights.append(
+            f"🕐 {len(sleep_suspects)} slow test{'s' if len(sleep_suspects) != 1 else ''} "
+            f"likely using real sleeps — consider mocking time or reducing timeouts: "
+            + ", ".join(sleep_suspects[:5])
+        )
+
+    # Detect tests appearing in multiple shards (name collision = same test ran in 2+ shards)
+    dup_names = [n for n, c in seen_slow_names.items() if c > 1]
+    if dup_names:
+        insights.append(
+            f"⚠️ {len(dup_names)} slow test name{'s' if len(dup_names) != 1 else ''} "
+            f"appear in multiple shards (possible test duplication): "
+            + ", ".join(f"`{n}`" for n in dup_names[:5])
+        )
+
+    if not insights:
+        return
+
+    sections.append("### Test Health Insights")
+    sections.append("")
+    for item in insights:
+        sections.append(f"- {item}")
+    sections.append("")
+
+
 def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dict]:
     """Build markdown report from available MQ result files.
 
@@ -371,19 +451,22 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                             f"{wall_parallel:.0f}s parallel ({speedup:.1f}x across {len(shard_results)} shards)")
             sections.append("")
 
-            all_slow: list[dict] = []
-            for r in shard_results:
-                for st in r.get("slow_tests", []):
-                    all_slow.append(st)
-            all_slow.sort(key=lambda x: x.get("duration_s", 0), reverse=True)
-            if all_slow:
-                sections.append("### Slowest Tests")
-                sections.append("")
-                sections.append("| Duration | Test |")
-                sections.append("|----------|------|")
-                for st in all_slow[:10]:
-                    sections.append(f"| {st['duration_s']:.2f}s | `{st['name']}` |")
-                sections.append("")
+        # Slowest tests and health insights apply for any number of shards.
+        all_slow: list[dict] = []
+        for r in shard_results:
+            for st in r.get("slow_tests", []):
+                all_slow.append(st)
+        all_slow.sort(key=lambda x: x.get("duration_s", 0), reverse=True)
+        if all_slow:
+            sections.append("### Slowest Tests")
+            sections.append("")
+            sections.append("| Duration | Test |")
+            sections.append("|----------|------|")
+            for st in all_slow[:10]:
+                sections.append(f"| {st['duration_s']:.2f}s | `{st['name']}` |")
+            sections.append("")
+
+        _emit_test_health_insights(sections, shard_results, all_slow, passed, failed)
 
         ctx["TEST_STATUS"] = status
         ctx["TESTS_PASSED"] = str(passed)

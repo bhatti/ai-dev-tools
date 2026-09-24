@@ -562,12 +562,11 @@ def upload_html_report(config: dict, html_content: str, filename: str,
                 pass
 
     if not upload_ok:
-        direct_url = _upload_html_to_formicary(config, html_content, filename)
+        # Always use the by-job URL — it extracts the HTML from the job's artifact zip.
+        # The direct SHA256 upload path creates an orphaned artifact unrelated to the job.
         by_job_url, job_link = build_artifact_links(config, task_type, filename)
-        if direct_url and job_link:
-            fallback_text = f"📎 Full report: <{direct_url}|{filename}>  |  <{job_link}|All artifacts>"
-        elif by_job_url:
-            fallback_text = f"📎 Full report: <{by_job_url}|View {filename}>  |  <{job_link}|All artifacts>"
+        if by_job_url:
+            fallback_text = f"📎 Full report: <{by_job_url}|{filename}>  |  <{job_link}|All artifacts>"
         else:
             fallback_text = None
         if fallback_text:
