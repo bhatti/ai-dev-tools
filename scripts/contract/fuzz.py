@@ -99,63 +99,60 @@ def main() -> None:
     # 30 retries × 2s = 60s max — enough for JVM-based services to start.
     ams_ready = wait_for_service(f"{ams_base}/_health", "api-mock-service", retries=30)
 
-    if not ams_ready:
-        print("[fuzz] WARNING: api-mock-service not reachable — skipping", flush=True)
-        fuzz: dict = {"iterations": 0, "findings": [], "ams_used": False,
-                      "note": "api-mock-service not reachable; run with --service flag"}
-        (ws / "fuzz_result.json").write_text(json.dumps(fuzz, indent=2))
-        _write_junit(ws, [], 0)
-        status = "PASS"
-        summary = {
-            "pr_number": os.environ.get("PR_NUMBER", ""),
-            "contract_breaking_changes": 0,
-            "fuzz_iterations": 0,
-            "fuzz_findings": 0,
-            "critical_findings": 0,
-            "status": status,
-        }
-        (ws / "contract_test_summary.json").write_text(json.dumps(summary, indent=2))
-        return
+    # Contract replay requires AMS; security probes use recordings and run regardless.
+    contract_resp: dict = {"succeeded": 0, "failed": 0}
+    if ams_ready:
+        _upload_openapi_spec(ams_base, ws)
+        contract_resp = _run_contract_replay(ams_base, service_url)
+    else:
+        print("[fuzz] api-mock-service not reachable — skipping contract replay", flush=True)
 
-    _upload_openapi_spec(ams_base, ws)
-    contract_resp = _run_contract_replay(ams_base, service_url)
-
+    # Discover endpoints from record-task artifact recordings; probes run against the
+    # live service regardless of AMS so findings are always collected.
     endpoints = discover_endpoints(ws / "recordings")
     print(f"[fuzz] discovered {len(endpoints)} endpoints: {endpoints}", flush=True)
 
-    findings = run_security_probes(service_url, endpoints)
+    findings = run_security_probes(service_url, endpoints) if endpoints else []
     critical = sum(1 for f in findings if f.get("severity") == "critical")
     print(f"[fuzz] {len(endpoints)} endpoints, {len(findings)} findings, {critical} critical",
           flush=True)
 
-    # Count matches what run_security_probes actually sends:
-    # GET endpoints → 2 probes each; write endpoints → 3 probes each.
+    # Iteration count: GET→2 probes, write→3 probes (matches run_security_probes).
     capped = endpoints[:20]
     get_count = sum(1 for m, _ in capped if m == "GET")
     write_count = len(capped) - get_count
     iterations = get_count * 2 + write_count * 3
-    fuzz = {
+
+    fuzz: dict = {
         "iterations": iterations,
         "findings": findings,
         "contract_results": contract_resp,
-        "ams_used": True,
+        "ams_used": ams_ready,
     }
     (ws / "fuzz_result.json").write_text(json.dumps(fuzz, indent=2))
     _write_junit(ws, findings, iterations)
 
     # Summary consumed by mq.report for Slack notification.
     status = "FAIL" if critical else "PASS"
+    methods = {m for m, _ in capped}
+    probe_type_names = ["SQLi", "path-traversal"] if capped else []
+    if methods - {"GET"}:
+        probe_type_names += ["XSS", "oversized-payload"]
+    if any(f.get("cred_leak") for f in findings):
+        probe_type_names.append("credential-exposure")
     summary = {
         "pr_number": os.environ.get("PR_NUMBER", ""),
         "contract_breaking_changes": contract_resp.get("failed", 0),
         "fuzz_iterations": iterations,
         "fuzz_findings": len(findings),
         "critical_findings": critical,
+        "endpoints_scanned": len(capped),
+        "probe_types": probe_type_names,
         "status": status,
     }
     (ws / "contract_test_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"[fuzz] complete: iterations={iterations} findings={len(findings)} "
-          f"critical={critical} status={status}", flush=True)
+          f"critical={critical} status={status} ams_used={ams_ready}", flush=True)
 
 
 if __name__ == "__main__":

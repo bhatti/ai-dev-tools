@@ -334,6 +334,8 @@ class TestContractTestReport:
             "fuzz_iterations": 27,
             "fuzz_findings": 2,
             "critical_findings": 1,
+            "endpoints_scanned": 9,
+            "probe_types": ["SQLi", "path-traversal", "credential-exposure"],
             "status": "FAIL",
         }))
         md, ctx = _build_report(tmp_path, "42", "Contract Test")
@@ -342,6 +344,9 @@ class TestContractTestReport:
         assert "❌" in md
         assert "27" in md
         assert "2" in md
+        assert "9" in md  # endpoints scanned
+        assert "SQLi" in md
+        assert "credential-exposure" in md
         assert ctx["CONTRACT_STATUS"] == "FAIL"
         assert ctx["CONTRACT_FINDINGS"] == "2"
         assert ctx["CONTRACT_CRITICAL"] == "1"

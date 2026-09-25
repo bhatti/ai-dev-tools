@@ -546,12 +546,11 @@ def test_post_report_render_exception_is_nonfatal(mock_post, mock_render, config
 # post_report — fallback link when upload fails
 # ---------------------------------------------------------------------------
 
-@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value="https://formicary.example.com/dashboard/artifacts/abc123/download")
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_uses_direct_formicary_link(mock_post, mock_render, mock_upload, mock_fmc):
-    """When Slack upload fails, fallback uses direct formicary artifact download link."""
+def test_post_report_fallback_uses_by_job_link(mock_post, mock_render, mock_upload):
+    """When Slack upload fails, fallback posts the by-job formicary artifact link."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000020.000001"}
     )
@@ -559,7 +558,6 @@ def test_post_report_fallback_uses_direct_formicary_link(mock_post, mock_render,
         "SLACK_BOT_TOKEN": "xoxb-test",
         "SLACK_CHANNEL": "#test",
         "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
-        "FORMICARY_TOKEN": "tok",
         "JOB_ID": "job-abc-123",
     }
 
@@ -569,19 +567,18 @@ def test_post_report_fallback_uses_direct_formicary_link(mock_post, mock_render,
     # Two posts: main message + fallback
     assert mock_post.call_count == 2
     fallback_text = mock_post.call_args_list[1].kwargs["json"].get("text", "")
-    # Direct SHA256 artifact download link for the HTML file
-    assert "dashboard/artifacts/abc123/download" in fallback_text
+    # by-job endpoint in fallback
+    assert "by-job" in fallback_text
     assert "pr_audit_report.html" in fallback_text
     # Job page link for "All artifacts"
     assert "dashboard/jobs/requests/job-abc-123" in fallback_text
 
 
-@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_degrades_to_by_job_link(mock_post, mock_render, mock_upload, mock_fmc):
-    """When both Slack and formicary uploads fail, fallback uses by-job endpoint."""
+def test_post_report_fallback_posts_by_job_link(mock_post, mock_render, mock_upload):
+    """Fallback posts the by-job artifact endpoint link."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000021.000001"}
     )
@@ -605,11 +602,10 @@ def test_post_report_fallback_degrades_to_by_job_link(mock_post, mock_render, mo
     assert "dashboard/jobs/requests/job-xyz-456" in fallback_text
 
 
-@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_uses_caller_task_type(mock_post, mock_render, mock_upload, mock_fmc):
+def test_post_report_fallback_uses_caller_task_type(mock_post, mock_render, mock_upload):
     """Fallback uses the task_type passed by the caller, not a hardcoded default."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000025.000001"}
@@ -714,27 +710,25 @@ def test_upload_html_report_empty_content(config_with_slack):
     assert ok is False
 
 
-@patch("scripts.standup.slack_client._upload_html_to_formicary",
-       return_value="https://formicary.example.com/dashboard/artifacts/abc/download")
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.standup.slack_client.requests.post")
-def test_upload_html_report_fallback_to_formicary(mock_post, mock_upload, mock_fmc, config_with_slack):
-    """Falls back to formicary link when Slack upload fails."""
+def test_upload_html_report_fallback_to_formicary(mock_post, mock_upload, config_with_slack):
+    """Falls back to by-job formicary link when Slack upload fails."""
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000002.000001"})
     config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
-              "FORMICARY_TOKEN": "tok", "JOB_ID": "job-1"}
+              "JOB_ID": "job-1"}
     ok = upload_html_report(config, "<html/>", "report.html", thread_ts="1700000001.0")
     assert ok is True
     assert mock_post.call_count == 1
     fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
-    assert "dashboard/artifacts/abc/download" in fallback_text
+    assert "by-job" in fallback_text
+    assert "report.html" in fallback_text
 
 
-@patch("scripts.standup.slack_client._upload_html_to_formicary", return_value=None)
 @patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.standup.slack_client.requests.post")
-def test_upload_html_report_fallback_to_by_job_link(mock_post, mock_upload, mock_fmc, config_with_slack):
-    """Falls back to by-job link when formicary upload also fails."""
+def test_upload_html_report_fallback_to_by_job_link(mock_post, mock_upload, config_with_slack):
+    """Falls back to by-job link when Slack upload fails."""
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000003.000001"})
     config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
               "JOB_ID": "job-2"}

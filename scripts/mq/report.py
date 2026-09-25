@@ -564,14 +564,19 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         c_critical = contract.get("critical_findings", 0)
         c_breaking = contract.get("contract_breaking_changes", 0)
         status_emoji = "✅" if c_status == "PASS" else "❌"
+        c_endpoints = contract.get("endpoints_scanned", 0)
+        c_probes = contract.get("probe_types", [])
         sections.append("## Contract + Fuzz Results")
         sections.append("")
         sections.append("| Field | Value |")
         sections.append("|-------|-------|")
         sections.append(f"| Status | {status_emoji} **{c_status}** |")
+        sections.append(f"| Endpoints scanned | {c_endpoints} |")
         sections.append(f"| Fuzz iterations | {c_iters} |")
         sections.append(f"| Security findings | {c_findings} ({c_critical} critical) |")
         sections.append(f"| Contract breaking changes | {c_breaking} |")
+        if c_probes:
+            sections.append(f"| Probe types | {', '.join(c_probes)} |")
         sections.append("")
         ctx["CONTRACT_STATUS"] = c_status
         ctx["CONTRACT_FINDINGS"] = str(c_findings)

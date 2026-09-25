@@ -101,15 +101,65 @@ class TestFuzzMain:
     def test_writes_artifacts_when_ams_not_ready(self, mock_ws, mock_cfg, mock_wait, tmp_path: Path):
         mock_ws.return_value = tmp_path
         mock_cfg.return_value = {}
-
+        # No recordings → 0 endpoints → 0 iterations; AMS not used but all files written.
         main()
 
-        # Still writes all three artifacts even without AMS
         assert (tmp_path / "fuzz_result.json").exists()
         assert (tmp_path / "fuzz_results.xml").exists()
         assert (tmp_path / "contract_test_summary.json").exists()
         data = json.loads((tmp_path / "fuzz_result.json").read_text())
         assert data["ams_used"] is False
+        assert data["iterations"] == 0
+
+    @patch("scripts.contract.fuzz.run_security_probes",
+           return_value=[{"probe": "sqli:/api/items", "severity": "medium"}])
+    @patch("scripts.contract.fuzz.discover_endpoints",
+           return_value=[("GET", "/api/items")])
+    @patch("scripts.contract.fuzz.wait_for_service", return_value=False)
+    @patch("scripts.contract.fuzz.load_config")
+    @patch("scripts.contract.fuzz.get_workspace_dir")
+    def test_runs_probes_when_ams_not_ready_but_recordings_exist(
+            self, mock_ws, mock_cfg, mock_wait, mock_discover, mock_probe, tmp_path: Path):
+        """Security probes must run even without AMS so findings are always collected."""
+        mock_ws.return_value = tmp_path
+        mock_cfg.return_value = {}
+        (tmp_path / "recordings").mkdir()
+
+        main()
+
+        data = json.loads((tmp_path / "fuzz_result.json").read_text())
+        assert data["ams_used"] is False
+        assert data["iterations"] == 2  # 1 GET endpoint × 2 probes
+        assert len(data["findings"]) == 1
+        summary = json.loads((tmp_path / "contract_test_summary.json").read_text())
+        assert summary["fuzz_iterations"] == 2
+        assert summary["fuzz_findings"] == 1
+        assert summary["contract_breaking_changes"] == 0  # no AMS → replay skipped
+
+    @patch("scripts.contract.fuzz.run_security_probes",
+           return_value=[{"probe": "sqli:/actuator/env", "severity": "critical",
+                          "sqli_leak": False, "stack_leak": False, "cred_leak": True}])
+    @patch("scripts.contract.fuzz.discover_endpoints",
+           return_value=[("GET", "/actuator/env"), ("GET", "/api/users")])
+    @patch("scripts.contract.fuzz._run_contract_replay", return_value={"succeeded": 5, "failed": 0})
+    @patch("scripts.contract.fuzz._upload_openapi_spec")
+    @patch("scripts.contract.fuzz.wait_for_service", return_value=True)
+    @patch("scripts.contract.fuzz.load_config")
+    @patch("scripts.contract.fuzz.get_workspace_dir")
+    def test_enriched_summary_with_cred_leak(self, mock_ws, mock_cfg, mock_wait, mock_upload,
+                                              mock_replay, mock_discover, mock_probe, tmp_path: Path):
+        mock_ws.return_value = tmp_path
+        mock_cfg.return_value = {}
+        (tmp_path / "recordings").mkdir()
+
+        main()
+
+        summary = json.loads((tmp_path / "contract_test_summary.json").read_text())
+        assert summary["status"] == "FAIL"
+        assert summary["critical_findings"] == 1
+        assert summary["endpoints_scanned"] == 2
+        assert "SQLi" in summary["probe_types"]
+        assert "credential-exposure" in summary["probe_types"]
 
     @patch("scripts.contract.fuzz.run_security_probes", return_value=[])
     @patch("scripts.contract.fuzz.discover_endpoints",

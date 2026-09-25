@@ -163,6 +163,23 @@ class TestRunSecurityProbes:
         # 20 endpoints × 2 GET probes = 40 probes, all OSError → 0 findings
         assert findings == []
 
+    def test_critical_finding_on_credential_exposure(self):
+        """Actuator endpoint returning Spring env dump is a critical info-disclosure finding."""
+        body = b'{"propertySources":[{"properties":{"spring.datasource.password":{"value":"s3cr3t"}}}]}'
+        resp = self._make_response(200, body)
+        with patch("scripts.contract._shared.urllib.request.urlopen", return_value=resp):
+            findings = run_security_probes("http://localhost:8080", [("GET", "/actuator/env")])
+        assert any(f["severity"] == "critical" for f in findings)
+        assert any(f.get("cred_leak") for f in findings)
+
+    def test_no_false_positive_for_normal_json(self):
+        """Normal API response with token field in expected structure is not a finding."""
+        body = b'{"user_id": 42, "expires_in": 3600}'
+        resp = self._make_response(200, body)
+        with patch("scripts.contract._shared.urllib.request.urlopen", return_value=resp):
+            findings = run_security_probes("http://localhost:8080", [("GET", "/api/session")])
+        assert findings == []
+
     def test_post_endpoint_gets_three_probes(self):
         responses = []
         call_count = 0

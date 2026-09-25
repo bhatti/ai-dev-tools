@@ -37,7 +37,14 @@ def probe_through_proxy(service_url: str, proxy_url: str) -> None:
         urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
     )
     for path in ["/", "/health", "/api", "/api/Challenges", "/api/challenges",
-                 "/docs", "/swagger", "/openapi.json", "/v1"]:
+                 "/docs", "/swagger", "/openapi.json", "/v1",
+                 # Spring Boot actuator: often exposes env vars, secrets, heap dumps
+                 "/actuator/env", "/actuator/health", "/actuator/info",
+                 "/actuator/mappings", "/actuator/beans",
+                 # Common admin/debug surfaces
+                 "/debug", "/admin", "/metrics", "/status",
+                 # WrongSecrets challenge paths
+                 "/challenge/1", "/challenge/21", "/challenge/28"]:
         try:
             req = urllib.request.Request(f"{service_url}{path}")
             try:
@@ -109,15 +116,23 @@ def run_security_probes(
         except Exception as ex:
             status, resp_body = -1, str(ex)
 
-        sqli_leak = any(kw in resp_body.lower() for kw in
+        body_lower = resp_body.lower()
+        sqli_leak = any(kw in body_lower for kw in
                         ["sql", "syntax error", "pg_", "mysql", "sqlite", "hibernateexception"])
         stack_leak = any(kw in resp_body for kw in
                          ["java.lang.", "Caused by:", "at org.springframework"])
-        is_finding = status >= 500 or sqli_leak or stack_leak
+        # Credential/secret exposure: diagnostic endpoints (actuator, debug) returning
+        # raw env vars or config values constitute an information-disclosure finding.
+        cred_leak = any(kw in body_lower for kw in
+                        ["propertysources", "spring.datasource.password", "datasource.password",
+                         "\"password\":", "\"secret\":", "\"apikey\":", "\"api_key\":",
+                         "challenge_", "wrongpassword"])
+        is_finding = status >= 500 or sqli_leak or stack_leak or cred_leak
         if is_finding:
-            severity = "critical" if (sqli_leak or stack_leak) else "medium"
+            severity = "critical" if (sqli_leak or stack_leak or cred_leak) else "medium"
             findings.append({"probe": name, "status": status, "severity": severity,
-                              "sqli_leak": sqli_leak, "stack_leak": stack_leak})
+                              "sqli_leak": sqli_leak, "stack_leak": stack_leak,
+                              "cred_leak": cred_leak})
         print(f"[contract] probe {name} → {status} finding={is_finding}", flush=True)
 
     return findings
