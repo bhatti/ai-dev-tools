@@ -23,24 +23,40 @@ _BB_PR_URL_RE = re.compile(
 )
 
 
+def _strip_slack_url(ref: str) -> str:
+    """Strip Slack's angle-bracket URL formatting: <https://url|display> → https://url."""
+    m = re.match(r"^<([^|>]+)(?:\|[^>]*)?>$", ref.strip())
+    return m.group(1) if m else ref
+
+
 def parse_pr_ref(ref: str) -> tuple[str, str | None]:
     """Normalize a PR ref to (pr_number_or_branch, repo_clone_url_or_none).
 
-    Accepts full GitHub/Bitbucket PR URLs, bare numbers, branches, or Jira keys.
+    Accepts full GitHub/Bitbucket PR URLs, bare numbers, branches, Jira keys,
+    or Slack-formatted URLs (<https://...|display>).
     Returns a repo clone URL when the ref is a full URL so callers can pass it to
     apply_repo_override() without requiring a separate --repo flag.
 
     Examples:
       https://github.com/org/repo/pull/24              → ("24", "https://github.com/org/repo.git")
       https://bitbucket.org/ws/repo/pull-requests/456  → ("456", "https://bitbucket.org/ws/repo.git")
+      <https://github.com/org/repo/pull/24|...>        → ("24", "https://github.com/org/repo.git")
       42 / feature/branch / PROJ-123                   → (ref, None)
     """
+    ref = _strip_slack_url(ref)
     m = _GH_PR_URL_RE.search(ref)
     if m:
         return m.group(2), f"https://github.com/{m.group(1)}.git"
     m = _BB_PR_URL_RE.search(ref)
     if m:
         return m.group(2), f"https://bitbucket.org/{m.group(1)}.git"
+    # Bare repo URL (no PR number) — e.g. https://github.com/org/repo
+    m = re.search(r"https://github\.com/([^/]+/[^/.\s]+?)(?:\.git)?$", ref)
+    if m:
+        return "", f"https://github.com/{m.group(1)}.git"
+    m = re.search(r"https://bitbucket\.org/([^/]+/[^/.\s]+?)(?:\.git)?$", ref)
+    if m:
+        return "", f"https://bitbucket.org/{m.group(1)}.git"
     return ref, None
 
 

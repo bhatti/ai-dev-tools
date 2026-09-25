@@ -292,6 +292,40 @@ class TestParsePrRef:
         assert num == "7"
         assert repo == "https://bitbucket.org/ws/repo.git"
 
+    def test_slack_angle_bracket_gh_pr_url(self):
+        # Slack wraps URLs as <https://...|display> — must be stripped before parsing
+        num, repo = parse_pr_ref("<https://github.com/org/repo/pull/24|github.com/org/repo/pull/24>")
+        assert num == "24"
+        assert repo == "https://github.com/org/repo.git"
+
+    def test_slack_angle_bracket_bb_pr_url(self):
+        num, repo = parse_pr_ref("<https://bitbucket.org/ws/repo/pull-requests/99|bitbucket.org/ws/repo/pull-requests/99>")
+        assert num == "99"
+        assert repo == "https://bitbucket.org/ws/repo.git"
+
+    def test_slack_angle_bracket_bare_repo_url(self):
+        # @bot contract-test https://github.com/org/repo → Slack wraps it
+        num, repo = parse_pr_ref("<https://github.com/bhatti/todo-api-errors|github.com/bhatti/todo-api-errors>")
+        assert num == ""
+        assert repo == "https://github.com/bhatti/todo-api-errors.git"
+
+    def test_bare_github_repo_url(self):
+        # No PR number — just a repo URL (for contract-test, codebase-audit etc.)
+        num, repo = parse_pr_ref("https://github.com/bhatti/todo-api-errors")
+        assert num == ""
+        assert repo == "https://github.com/bhatti/todo-api-errors.git"
+
+    def test_bare_bitbucket_repo_url(self):
+        num, repo = parse_pr_ref("https://bitbucket.org/myws/myrepo")
+        assert num == ""
+        assert repo == "https://bitbucket.org/myws/myrepo.git"
+
+    def test_slack_angle_bracket_no_display(self):
+        # Some Slack clients omit the display part: <https://url>
+        num, repo = parse_pr_ref("<https://github.com/org/repo/pull/5>")
+        assert num == "5"
+        assert repo == "https://github.com/org/repo.git"
+
 
 class TestApplyRepoOverride:
     def test_github_sets_org_and_repo(self):
