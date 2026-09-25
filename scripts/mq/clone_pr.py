@@ -13,6 +13,7 @@ Exit codes: 0=done, 1=error
 """
 from __future__ import annotations
 
+import os
 import subprocess
 
 import click
@@ -30,6 +31,11 @@ from scripts.mq._shared import apply_repo_override, is_branch_or_tag, parse_pr_r
 @click.option("--branch", default=None, help="Branch name (used when --pr-number is empty)")
 def main(pr_number: str | None, repo: str | None, branch: str | None) -> None:
     config = load_config(required=[])
+
+    # Fall back to PR_NUMBER env var so callers don't need to pass shell arguments
+    # that may contain Slack-formatted URLs (e.g. <https://...|display>).
+    if not pr_number:
+        pr_number = os.environ.get("PR_NUMBER") or None
 
     # Normalize full PR URLs (e.g. https://github.com/org/repo/pull/24) to bare number
     # and extract the repo URL so --repo is not required when a full URL is given.

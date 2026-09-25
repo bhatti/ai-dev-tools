@@ -324,3 +324,40 @@ class TestBuildReport:
         }))
         md, ctx = _build_report(tmp_path, "1", "Single Shard")
         assert "### Shard Performance" not in md
+
+
+class TestContractTestReport:
+    def test_renders_contract_summary(self, tmp_path):
+        (tmp_path / "contract_test_summary.json").write_text(json.dumps({
+            "pr_number": "42",
+            "contract_breaking_changes": 0,
+            "fuzz_iterations": 27,
+            "fuzz_findings": 2,
+            "critical_findings": 1,
+            "status": "FAIL",
+        }))
+        md, ctx = _build_report(tmp_path, "42", "Contract Test")
+        assert "Contract + Fuzz Results" in md
+        assert "FAIL" in md
+        assert "27" in md
+        assert "2" in md
+        assert ctx["CONTRACT_STATUS"] == "FAIL"
+        assert ctx["CONTRACT_FINDINGS"] == "2"
+        assert ctx["CONTRACT_CRITICAL"] == "1"
+
+    def test_renders_pass_status(self, tmp_path):
+        (tmp_path / "contract_test_summary.json").write_text(json.dumps({
+            "status": "PASS",
+            "fuzz_iterations": 18,
+            "fuzz_findings": 0,
+            "critical_findings": 0,
+            "contract_breaking_changes": 0,
+        }))
+        md, ctx = _build_report(tmp_path, "99", "Contract Test")
+        assert "PASS" in md
+        assert ctx["CONTRACT_STATUS"] == "PASS"
+
+    def test_no_contract_section_when_file_absent(self, tmp_path):
+        md, ctx = _build_report(tmp_path, "1", "Test")
+        assert "Contract + Fuzz Results" not in md
+        assert "CONTRACT_STATUS" not in ctx

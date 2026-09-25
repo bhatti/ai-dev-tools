@@ -208,6 +208,59 @@ class TestApplyRepoOverride:
         assert cfg["GH_ORG"] == "org"
 
 
+class TestPRNumberEnvFallback:
+    """PR_NUMBER env var must be used when --pr-number flag is not passed.
+
+    Formicary substitutes ${PR_NUMBER} before the shell sees the command, so
+    Slack-formatted URLs like <https://...|display> would hit /bin/sh unquoted.
+    The fix: clone_pr reads PR_NUMBER from os.environ as fallback.
+    """
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_reads_pr_number_from_env(self, mock_ws, mock_cfg, mock_clone, tmp_path, monkeypatch):
+        mock_cfg.return_value = {"GH_ORG": "OWASP", "GH_REPO": "wrongsecrets"}
+        mock_ws.return_value = tmp_path
+        monkeypatch.setenv("PR_NUMBER", "https://github.com/OWASP/wrongsecrets")
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, [])
+        assert result.exit_code == 0
+        mock_clone.assert_called_once()
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_strips_slack_url_from_env(self, mock_ws, mock_cfg, mock_clone, tmp_path, monkeypatch):
+        """Slack angle-bracket URLs in PR_NUMBER env are stripped by parse_pr_ref."""
+        mock_cfg.return_value = {"GH_ORG": "OWASP", "GH_REPO": "wrongsecrets"}
+        mock_ws.return_value = tmp_path
+        slack_url = "<https://github.com/OWASP/wrongsecrets|github.com/OWASP/wrongsecrets>"
+        monkeypatch.setenv("PR_NUMBER", slack_url)
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, [])
+        assert result.exit_code == 0
+        # Should still clone successfully (parse_pr_ref extracts repo URL)
+        mock_clone.assert_called_once()
+
+    @patch("scripts.mq.clone_pr.clone_by_tracker")
+    @patch("scripts.mq.clone_pr.load_config")
+    @patch("scripts.mq.clone_pr.get_workspace_dir")
+    def test_flag_takes_precedence_over_env(self, mock_ws, mock_cfg, mock_clone, tmp_path, monkeypatch):
+        """Explicit --pr-number flag overrides PR_NUMBER env var."""
+        mock_cfg.return_value = {"GH_ORG": "org", "GH_REPO": "repo"}
+        mock_ws.return_value = tmp_path
+        monkeypatch.setenv("PR_NUMBER", "env-value")
+        with patch("scripts.mq.clone_pr.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            result = CliRunner().invoke(main, ["--pr-number", "42"])
+        assert result.exit_code == 0
+        args = mock_sub.run.call_args_list[0][0][0]
+        assert "42" in args
+
+
 class TestRepoAndBranchFlags:
     @patch("scripts.mq.clone_pr.clone_by_tracker")
     @patch("scripts.mq.clone_pr.load_config")

@@ -555,6 +555,28 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["GATE_APPROVAL"] = str(needs).lower()
         ctx["GATE_REASON"] = reason
 
+    sections = test_sections  # contract-test block
+    contract = _read_json(workspace / "contract_test_summary.json")
+    if contract:
+        c_status = contract.get("status", "?")
+        c_iters = contract.get("fuzz_iterations", 0)
+        c_findings = contract.get("fuzz_findings", 0)
+        c_critical = contract.get("critical_findings", 0)
+        c_breaking = contract.get("contract_breaking_changes", 0)
+        status_emoji = ":white_check_mark:" if c_status == "PASS" else ":x:"
+        sections.append("## Contract + Fuzz Results")
+        sections.append("")
+        sections.append("| Field | Value |")
+        sections.append("|-------|-------|")
+        sections.append(f"| Status | {status_emoji} **{c_status}** |")
+        sections.append(f"| Fuzz iterations | {c_iters} |")
+        sections.append(f"| Security findings | {c_findings} ({c_critical} critical) |")
+        sections.append(f"| Contract breaking changes | {c_breaking} |")
+        sections.append("")
+        ctx["CONTRACT_STATUS"] = c_status
+        ctx["CONTRACT_FINDINGS"] = str(c_findings)
+        ctx["CONTRACT_CRITICAL"] = str(c_critical)
+
     sections = lane_sections  # lanes block
     lanes = _read_json(workspace / "lane_groups.json")
     if lanes:

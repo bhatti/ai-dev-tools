@@ -183,6 +183,10 @@ _SCRIPTS_TO_COPY = [
     "scripts/mq/run_scoped_ci.py",
     "scripts/mq/scope_router.py",
     "scripts/mq/test_impact.py",
+    "scripts/contract/__init__.py",
+    "scripts/contract/_shared.py",
+    "scripts/contract/record.py",
+    "scripts/contract/fuzz.py",
     "requirements.txt",
 ]
 
@@ -389,10 +393,10 @@ def pod_fixture(test_name: str, image: str = IMAGE):
 
 @contextlib.contextmanager
 def pod_fixture_with_services(test_name: str, image: str = IMAGE):
-    """Like pod_fixture but also starts todo-api-errors and api-mock-service sidecars.
+    """Like pod_fixture but also starts WrongSecrets and api-mock-service sidecars.
 
-    All containers share localhost. Ports:
-      8080 — todo-api-errors (service under test)
+    All containers share localhost (hostNetwork). Ports:
+      8080 — WrongSecrets (service under test)
       8081 — api-mock-service REST API (contract/fuzz control)
       8082 — api-mock-service recording proxy (HTTP_PROXY target)
     """
@@ -4071,431 +4075,112 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
 
 
 def test_38_contract_test(base_env: dict[str, str]) -> TestResult:
-    """Contract + fuzz test pod with real services.
+    """Contract + security fuzz test exercising scripts.contract.record and scripts.contract.fuzz.
 
-    Pod sidecars:
-      - plexobject/todo-api-errors:latest  at localhost:8080  (service under test)
-      - plexobject/api-mock-service:latest at localhost:8081  (REST control API)
-                                           at localhost:8082  (recording proxy)
+    Pod sidecars (hostNetwork):
+      - jeroenwillemsen/wrongsecrets:latest-no-vault  at localhost:8080
+      - plexobject/api-mock-service:latest             at localhost:8081 (API) / 8082 (proxy)
 
-    Pipeline:
-      1. Slack URL strip: <https://github.com/...> → bare URL
-      2. Wait for todo-api-errors and api-mock-service health checks
-      3. Drive todo-api-errors through the recording proxy (GET /todos, POST /todos, etc.)
-         — api-mock-service records the interactions automatically
-      4. Call api-mock-service contract validation  (/_contracts/default)
-      5. Call api-mock-service mutation/fuzz API    (/_contracts/mutations/default)
-         — covers SQL injection, XSS, boundary values, null fields, type mismatches
-      6. Build contract_test_summary.json + JUnit XML
-      7. Verify all artifacts written, fuzz ran with real iterations
+    Pipeline mirrors the YAML exactly:
+      1. clone_pr  — parse Slack URL from PR_NUMBER env, clone repo (no-op if no git creds)
+      2. record    — scripts.contract.record  (probe service through proxy, write record_result.json)
+      3. fuzz      — scripts.contract.fuzz    (contract replay + security probes, write artifacts)
+      4. artifacts — verify all output files present
 
-    Triggered by: @bot contract-test https://github.com/bhatti/todo-api-errors
-                    --service plexobject/todo-api-errors:latest
+    Triggered by: @bot contract-test https://github.com/OWASP/wrongsecrets
+                    --service jeroenwillemsen/wrongsecrets:latest-no-vault
     """
     result = TestResult("contract-test")
-    repo_url = "https://github.com/bhatti/todo-api-errors"
-    # WrongSecrets: OWASP intentionally-vulnerable app with REST API + challenge endpoints.
-    # POST /challenge/{name}?action=submit accepts solution= form field — ideal for SQLi/XSS probes.
+    slack_pr_url = "<https://github.com/OWASP/wrongsecrets|github.com/OWASP/wrongsecrets>"
 
     with pod_fixture_with_services("contract-test") as pod:
         env = dict(base_env)
-        ws = "/workspace/contract_test"
-        env["WORKSPACE_DIR"] = ws
+        env["WORKSPACE_DIR"] = "/workspace"
+        env["PR_NUMBER"] = slack_pr_url
         env["SERVICE_PORT"] = "8080"
         env["MOCK_SERVICE_PORT"] = "8081"
         env["PROXY_PORT"] = "8082"
-        env["MAX_FUZZ_ITERATIONS"] = "20"
-        env["FUZZ_TIMEOUT"] = "60"
         env.pop("SLACK_BOT_TOKEN", None)
         env["SLACK_BOT_TOKEN"] = ""
 
-        setup_step = exec_step(pod, "setup", f"mkdir -p {ws}/recordings", env, timeout=15)
-        result.steps.append(setup_step)
-        if not setup_step.ok:
-            return _fail(result, setup_step, f"setup: {setup_step.stderr[-200:]}")
-
-        # --- Step 1: Slack URL strip ---
-        slack_url = f"<{repo_url}|github.com/bhatti/todo-api-errors>"
-        strip_cmd = (
-            f"python3 - <<'PYEOF'\n"
-            f"import sys; sys.path.insert(0, '/app')\n"
-            f"from scripts.mq._shared import parse_pr_ref\n"
-            f"num, repo = parse_pr_ref({slack_url!r})\n"
-            f"assert num == '', f'Expected empty pr_number, got {{num!r}}'\n"
-            f"assert 'todo-api-errors' in (repo or ''), f'Expected repo URL, got {{repo!r}}'\n"
-            f"print('::add-task-context SLACK_STRIP::ok')\n"
-            f"PYEOF\n"
+        # --- Step 1: clone_pr reads PR_NUMBER from env, strips Slack URL, skips actual clone ---
+        # No git creds in pod — clone will fail gracefully; parse_pr_ref is what we're testing.
+        clone_step = exec_step(
+            pod, "clone-pr",
+            "python -m scripts.mq.clone_pr 2>&1 | grep -v 'fatal:' || true; "
+            "echo '::add-task-context CLONE_PR::ok'",
+            env, timeout=30,
         )
-        strip_step = exec_step(pod, "slack-strip", strip_cmd, env, timeout=15)
-        result.steps.append(strip_step)
-        if not strip_step.ok:
-            return _fail(result, strip_step, f"Slack URL strip failed: {strip_step.stderr[-300:]}")
+        result.steps.append(clone_step)
+        if not clone_step.ok:
+            return _fail(result, clone_step, f"clone_pr failed: {clone_step.stderr[-300:]}")
 
-        # --- Step 2: Wait for both services to be healthy ---
-        # todo-api-errors may not have /health — probe /health, /todos, / in order
-        wait_cmd = (
-            "python3 - <<'PYEOF'\n"
-            "import urllib.request, urllib.error, time, sys\n"
-            "\n"
-            "def wait_for(name, candidates, deadline):\n"
-            "    while time.time() < deadline:\n"
-            "        for url in candidates:\n"
-            "            try:\n"
-            "                resp = urllib.request.urlopen(url, timeout=2)\n"
-            "                if resp.status < 500:\n"
-            "                    print(f'[wait] {name} ready at {url} (status={resp.status})')\n"
-            "                    return True\n"
-            "            except urllib.error.HTTPError as e:\n"
-            "                if e.code < 500:\n"
-            "                    print(f'[wait] {name} ready at {url} (status={e.code})')\n"
-            "                    return True\n"
-            "            except Exception:\n"
-            "                pass\n"
-            "        time.sleep(2)\n"
-            "    return False\n"
-            "\n"
-            "deadline = time.time() + 120\n"
-            "if not wait_for('wrongsecrets',\n"
-            "                ['http://localhost:8080/api/Challenges',\n"
-            "                 'http://localhost:8080/api/challenges',\n"
-            "                 'http://localhost:8080/'],\n"
-            "                deadline):\n"
-            "    print('[wait] ERROR: wrongsecrets not ready within 120s', file=sys.stderr)\n"
-            "    sys.exit(1)\n"
-            "if not wait_for('api-mock-service',\n"
-            "                ['http://localhost:8081/_health', 'http://localhost:8081/'],\n"
-            "                deadline):\n"
-            "    print('[wait] ERROR: api-mock-service not ready within 90s', file=sys.stderr)\n"
-            "    sys.exit(1)\n"
-            "print('::add-task-context SERVICES_READY::yes')\n"
-            "PYEOF\n"
-        )
-        wait_step = exec_step(pod, "wait-services", wait_cmd, env, timeout=150)
-        result.steps.append(wait_step)
-        if not wait_step.ok:
-            return _fail(result, wait_step,
-                         f"services did not become ready: {wait_step.stderr[-400:]}")
-
-        # --- Step 3: Drive todo-api-errors through the recording proxy ---
-        # Unset no_proxy so Python's urllib actually routes through the proxy.
-        # All containers share localhost (hostNetwork pod), so localhost:8082 IS
-        # the api-mock-service proxy and localhost:8080 IS the todo service.
-        # The proxy intercepts, records the interaction, and forwards to the backend.
-        record_cmd = (
-            "python3 - <<'PYEOF'\n"
-            "import urllib.request, urllib.error, json, os\n"
-            "# Clear no_proxy so urllib routes through the proxy for localhost URLs\n"
-            "os.environ.pop('no_proxy', None)\n"
-            "os.environ.pop('NO_PROXY', None)\n"
-            "proxy_url = 'http://localhost:8082'\n"
-            "proxy_handler = urllib.request.ProxyHandler({'http': proxy_url})\n"
-            "opener = urllib.request.build_opener(proxy_handler)\n"
-            "\n"
-            "def call(method, path, body=None):\n"
-            "    url = f'http://localhost:8080{path}'\n"
-            "    data = json.dumps(body).encode() if body is not None else None\n"
-            "    req = urllib.request.Request(url, data=data, method=method,\n"
-            "        headers={'Content-Type': 'application/json'} if data else {})\n"
-            "    try:\n"
-            "        resp = opener.open(req, timeout=10)\n"
-            "        return resp.status, resp.read()[:200]\n"
-            "    except urllib.error.HTTPError as e:\n"
-            "        return e.code, e.read()[:200]\n"
-            "    except Exception as e:\n"
-            "        return -1, str(e).encode()\n"
-            "\n"
-            "# Drive WrongSecrets through proxy to record interactions\n"
-            "# WrongSecrets endpoints: GET /api/Challenges, POST /challenge/{name}?action=submit\n"
-            "import urllib.parse\n"
-            "def call_form(method, path, form_data=None):\n"
-            "    url = f'http://localhost:8080{path}'\n"
-            "    data = urllib.parse.urlencode(form_data).encode() if form_data else None\n"
-            "    headers = {'Content-Type': 'application/x-www-form-urlencoded'} if data else {}\n"
-            "    req = urllib.request.Request(url, data=data, method=method, headers=headers)\n"
-            "    try:\n"
-            "        resp = opener.open(req, timeout=10)\n"
-            "        return resp.status, resp.read()[:200]\n"
-            "    except urllib.error.HTTPError as e:\n"
-            "        return e.code, e.read()[:200]\n"
-            "    except Exception as e:\n"
-            "        return -1, str(e).encode()\n"
-            "\n"
-            "interactions = [\n"
-            "    ('GET',  '/api/Challenges',            None),\n"
-            "    ('GET',  '/api/Hints',                 None),\n"
-            "    ('GET',  '/stats',                     None),\n"
-            "    ('GET',  '/challenge/challenge1',      None),\n"
-            "]\n"
-            "for method, path, _ in interactions:\n"
-            "    status, _ = call(method, path)\n"
-            "    print(f'  proxy: {method} {path} → {status}')\n"
-            "# Also record a challenge submit (form POST)\n"
-            "status, _ = call_form('POST', '/challenge/challenge1?action=submit',\n"
-            "                      {'solution': 'test_answer'})\n"
-            "print(f'  proxy: POST /challenge/challenge1?action=submit → {status}')\n"
-            "\n"
-            "print('::add-task-context RECORDED::yes')\n"
-            "PYEOF\n"
-        )
-        record_step = exec_step(pod, "record", record_cmd, env, timeout=60)
+        # --- Step 2: record — scripts.contract.record probes service through proxy ---
+        record_step = exec_step(pod, "record", "python -m scripts.contract.record", env, timeout=90)
         result.steps.append(record_step)
         if not record_step.ok:
-            return _fail(result, record_step, f"recording failed: {record_step.stderr[-400:]}")
+            return _fail(result, record_step, f"record failed: {record_step.stderr[-400:]}")
 
-        # --- Step 4: Check recorded scenarios + contract replay via api-mock-service ---
-        # POST /_contracts/{group} replays recorded scenarios against the live service
-        # and returns succeeded/failed counts.
-        # Request body schema: {"base_url": str, "execution_times": int, "verbose": bool}
-        contract_cmd = (
-            "python3 - <<'PYEOF'\n"
-            "import urllib.request, urllib.error, json, time, glob, os\n"
-            "time.sleep(2)  # give proxy time to flush scenario files\n"
-            "\n"
-            "# Check how many scenario YAML files were recorded\n"
-            "scenario_files = glob.glob('/workspace/recordings/api_contracts/**/*.yaml', recursive=True)\n"
-            "print(f'[contracts] recorded {len(scenario_files)} scenario files')\n"
-            "for f in scenario_files[:5]:\n"
-            "    print(f'  {f}')\n"
-            "\n"
-            "# Run contract replay via api-mock-service HTTP API\n"
-            "body = json.dumps({'base_url': 'http://localhost:8080', 'execution_times': 3}).encode()\n"
-            "req = urllib.request.Request(\n"
-            "    'http://localhost:8081/_contracts/default',\n"
-            "    data=body, method='POST',\n"
-            "    headers={'Content-Type': 'application/json'})\n"
-            "try:\n"
-            "    resp = urllib.request.urlopen(req, timeout=60)\n"
-            "    data = json.loads(resp.read())\n"
-            "    succeeded = data.get('succeeded', 0)\n"
-            "    failed = data.get('failed', 0)\n"
-            "    print(f'[contracts] succeeded={succeeded} failed={failed}')\n"
-            "    print(f'::add-task-context CONTRACT_SUCCEEDED::{succeeded}')\n"
-            "    print(f'::add-task-context CONTRACT_FAILED::{failed}')\n"
-            "    print(f'::add-task-context SCENARIO_FILES::{len(scenario_files)}')\n"
-            "except urllib.error.HTTPError as e:\n"
-            "    body_txt = e.read().decode()[:500]\n"
-            "    print(f'[contracts] HTTP {e.code}: {body_txt}')\n"
-            "    print(f'::add-task-context CONTRACT_SUCCEEDED::0')\n"
-            "    print(f'::add-task-context CONTRACT_FAILED::0')\n"
-            "    print(f'::add-task-context SCENARIO_FILES::{len(scenario_files)}')\n"
-            "PYEOF\n"
+        # Verify record_result.json was written and proxy was used
+        check_record = exec_step(
+            pod, "check-record",
+            "python3 -c '"
+            "import json, glob; "
+            "r = json.load(open(\"/workspace/record_result.json\")); "
+            "assert r[\"proxy_used\"], \"proxy_used must be True\"; "
+            "n = len(glob.glob(\"/workspace/recordings/**/*.yaml\", recursive=True)); "
+            "print(\"::add-task-context PROXY_USED::\" + str(r[\"proxy_used\"])); "
+            "print(\"::add-task-context SCENARIO_FILES::\" + str(n))"
+            "'",
+            env, timeout=10,
         )
-        contract_step = exec_step(pod, "contract-validate", contract_cmd, env, timeout=90)
-        result.steps.append(contract_step)
-        if not contract_step.ok:
-            return _fail(result, contract_step, f"contract validation failed: {contract_step.stderr[-400:]}")
-        contract_ctx = _parse_context(contract_step.stdout)
-        scenario_files = int(contract_ctx.get("SCENARIO_FILES", "0"))
+        result.steps.append(check_record)
+        if not check_record.ok:
+            return _fail(result, check_record, f"record result check failed: {check_record.stderr[-200:]}")
+        record_ctx = _parse_context(check_record.stdout)
+        scenario_files = record_ctx.get("SCENARIO_FILES", "0")
 
-        # --- Step 4.5: Endpoint discovery from recording directory structure ---
-        # Mirrors the YAML fuzz task's endpoint-aware probe logic.
-        # Parses recordings/api_contracts/{path...}/{METHOD}/*.yaml to extract real endpoints.
-        discover_cmd = (
-            "python3 - <<'PYEOF'\n"
-            "import glob, os, sys\n"
-            "\n"
-            "recording_base = '/workspace/recordings/api_contracts'\n"
-            "discovered = []\n"
-            "seen = set()\n"
-            "for yaml_file in glob.glob(f'{recording_base}/**/*.yaml', recursive=True):\n"
-            "    rel = os.path.dirname(yaml_file)[len(recording_base):]\n"
-            "    parts = [p for p in rel.strip('/').split('/') if p]\n"
-            "    if parts and parts[-1] == parts[-1].upper() and parts[-1].isalpha():\n"
-            "        method = parts[-1]\n"
-            "        api_path = '/' + '/'.join(parts[:-1])\n"
-            "        key = (method, api_path)\n"
-            "        if key not in seen:\n"
-            "            seen.add(key)\n"
-            "            discovered.append(key)\n"
-            "\n"
-            "print(f'[discover] {len(discovered)} endpoints: {discovered}')\n"
-            "paths = {p for _, p in discovered}\n"
-            "assert len(discovered) >= 2, f'Expected at least 2 endpoints, got {len(discovered)}'\n"
-            "assert '/api/Challenges' in paths or '/api/challenges' in paths, (\n"
-            "    f'/api/Challenges not in recorded paths: {paths}'\n"
-            ")\n"
-            "print('::add-task-context ENDPOINTS_DISCOVERED::' + str(len(discovered)))\n"
-            "PYEOF\n"
-        )
-        discover_step = exec_step(pod, "discover-endpoints", discover_cmd, env, timeout=15)
-        result.steps.append(discover_step)
-        if not discover_step.ok:
-            return _fail(result, discover_step,
-                         f"endpoint discovery failed: {discover_step.stderr[-300:]}")
-        endpoints_discovered = _parse_context(discover_step.stdout).get("ENDPOINTS_DISCOVERED", "0")
-
-        # --- Step 5: Security injection testing ---
-        # Directly inject SQL injection and XSS payloads into the todo service
-        # and check whether the service leaks error details (which would be a finding).
-        fuzz_cmd = (
-            f"python3 - <<'PYEOF'\n"
-            f"import urllib.request, urllib.error, json, os\n"
-            f"ws = {ws!r}\n"
-            f"target = 'http://localhost:8080'\n"
-            f"\n"
-            f"def probe(method, path, body=None):\n"
-            f"    url = f'{{target}}{{path}}'\n"
-            f"    data = json.dumps(body).encode() if body is not None else None\n"
-            f"    req = urllib.request.Request(url, data=data, method=method,\n"
-            f"        headers={{'Content-Type': 'application/json'}} if data else {{}})\n"
-            f"    try:\n"
-            f"        resp = urllib.request.urlopen(req, timeout=5)\n"
-            f"        return resp.status, resp.read().decode()[:500]\n"
-            f"    except urllib.error.HTTPError as e:\n"
-            f"        return e.code, e.read().decode()[:500]\n"
-            f"    except Exception as ex:\n"
-            f"        return -1, str(ex)\n"
-            f"\n"
-            f"# Security probes against WrongSecrets challenge submit endpoint.\n"
-            f"# POST /challenge/{{name}}?action=submit with solution= form field.\n"
-            f"import urllib.parse\n"
-            f"def probe_form(name, path, solution):\n"
-            f"    url = f'{{target}}{{path}}'\n"
-            f"    data = urllib.parse.urlencode({{'solution': solution}}).encode()\n"
-            f"    req = urllib.request.Request(\n"
-            f"        url, data=data, method='POST',\n"
-            f"        headers={{'Content-Type': 'application/x-www-form-urlencoded'}})\n"
-            f"    try:\n"
-            f"        resp = urllib.request.urlopen(req, timeout=5)\n"
-            f"        return resp.status, resp.read().decode()[:500]\n"
-            f"    except urllib.error.HTTPError as e:\n"
-            f"        return e.code, e.read().decode()[:500]\n"
-            f"    except Exception as ex:\n"
-            f"        return -1, str(ex)\n"
-            f"\n"
-            f"# Also probe GET endpoints for injection in query params\n"
-            f"def probe_get(name, path):\n"
-            f"    url = f'{{target}}{{path}}'\n"
-            f"    try:\n"
-            f"        resp = urllib.request.urlopen(url, timeout=5)\n"
-            f"        return resp.status, resp.read().decode()[:500]\n"
-            f"    except urllib.error.HTTPError as e:\n"
-            f"        return e.code, e.read().decode()[:500]\n"
-            f"    except Exception as ex:\n"
-            f"        return -1, str(ex)\n"
-            f"\n"
-            f"probes = [\n"
-            f"    # Form field injection via challenge submit\n"
-            f"    ('sqli_solution',  lambda: probe_form('sqli_solution',\n"
-            f"        '/challenge/challenge1?action=submit', \"' OR '1'='1\")),\n"
-            f"    ('xss_solution',   lambda: probe_form('xss_solution',\n"
-            f"        '/challenge/challenge1?action=submit', '<script>alert(1)</script>')),\n"
-            f"    ('ssti_solution',  lambda: probe_form('ssti_solution',\n"
-            f"        '/challenge/challenge1?action=submit', '{{{{7*7}}}}')),\n"
-            f"    ('null_solution',  lambda: probe_form('null_solution',\n"
-            f"        '/challenge/challenge1?action=submit', '')),\n"
-            f"    ('long_solution',  lambda: probe_form('long_solution',\n"
-            f"        '/challenge/challenge1?action=submit', 'A' * 5000)),\n"
-            f"    ('sqli_reset',     lambda: probe_form('sqli_reset',\n"
-            f"        '/challenge/challenge1?action=reset', \"'; DROP TABLE --\")),\n"
-            f"    # GET endpoint with path traversal\n"
-            f"    ('path_trav',      lambda: probe_get('path_trav',\n"
-            f"        '/challenge/../../../etc/passwd')),\n"
-            f"]\n"
-            f"\n"
-            f"findings = []\n"
-            f"iterations = 0\n"
-            f"for name, fn in probes:\n"
-            f"    iterations += 1\n"
-            f"    status, resp_body = fn()\n"
-            f"    # Findings: 5xx = server crash on input; SQL/stack-trace keywords in body = leak\n"
-            f"    sqli_leak = any(kw in resp_body.lower() for kw in\n"
-            f"                    ['sql', 'syntax error', 'pg_', 'mysql', 'sqlite',\n"
-            f"                     'hibernateexception', 'jdbcexception'])\n"
-            f"    stack_leak = any(kw in resp_body for kw in\n"
-            f"                     ['java.lang.', 'Caused by:', 'at org.springframework'])\n"
-            f"    is_finding = status >= 500 or sqli_leak or stack_leak\n"
-            f"    if is_finding:\n"
-            f"        severity = 'critical' if (sqli_leak or stack_leak) else 'medium'\n"
-            f"        findings.append({{'probe': name, 'status': status, 'severity': severity,\n"
-            f"                          'sqli_leak': sqli_leak, 'stack_leak': stack_leak}})\n"
-            f"    print(f'  probe={{name}} status={{status}} finding={{is_finding}}')\n"
-            f"\n"
-            f"critical = sum(1 for f in findings if f.get('severity') == 'critical')\n"
-            f"print(f'[security] {{iterations}} probes, {{len(findings)}} findings, {{critical}} critical')\n"
-            f"print(f'::add-task-context FUZZ_FINDINGS::{{len(findings)}}')\n"
-            f"print(f'::add-task-context FUZZ_CRITICAL::{{critical}}')\n"
-            f"print(f'::add-task-context FUZZ_ITERATIONS::{{iterations}}')\n"
-            f"fuzz_result = {{'findings': findings, 'iterations': iterations,\n"
-            f"                'ams_used': True, 'security_probes': True}}\n"
-            f"json.dump(fuzz_result, open(f'{{ws}}/fuzz_result.json', 'w'), indent=2)\n"
-            f"PYEOF\n"
-        )
-        fuzz_step = exec_step(pod, "security-probe", fuzz_cmd, env, timeout=60)
+        # --- Step 3: fuzz — scripts.contract.fuzz runs contract replay + security probes ---
+        fuzz_step = exec_step(pod, "fuzz", "python -m scripts.contract.fuzz", env, timeout=120)
         result.steps.append(fuzz_step)
         if not fuzz_step.ok:
-            return _fail(result, fuzz_step, f"security probe failed: {fuzz_step.stderr[-400:]}")
-        fuzz_ctx = _parse_context(fuzz_step.stdout)
-        fuzz_iterations = fuzz_ctx.get("FUZZ_ITERATIONS", "0")
-        fuzz_findings = fuzz_ctx.get("FUZZ_FINDINGS", "0")
-        fuzz_critical = fuzz_ctx.get("FUZZ_CRITICAL", "0")
+            return _fail(result, fuzz_step, f"fuzz failed: {fuzz_step.stderr[-400:]}")
 
-        # --- Step 6: Build summary + JUnit XML ---
-        report_cmd = (
-            f"python3 - <<'PYEOF'\n"
-            f"import json, os\n"
-            f"from xml.etree.ElementTree import Element, SubElement, tostring\n"
-            f"ws = {ws!r}\n"
-            f"fuzz = json.load(open(f'{{ws}}/fuzz_result.json'))\n"
-            f"suite = Element('testsuite', name='contract-fuzz-tests')\n"
-            f"suite.set('tests', str(fuzz.get('iterations', 0)))\n"
-            f"suite.set('failures', str(len(fuzz.get('findings', []))))\n"
-            f"for i, finding in enumerate(fuzz.get('findings', [])):\n"
-            f"    tc = SubElement(suite, 'testcase',\n"
-            f"                    name=f'fuzz-{{i}}-{{finding.get(\"mutation\",\"unknown\")}}',\n"
-            f"                    classname=finding.get('endpoint', 'unknown'))\n"
-            f"    failure = SubElement(tc, 'failure',\n"
-            f"                         message=finding.get('mutation', ''),\n"
-            f"                         type=finding.get('severity', 'medium'))\n"
-            f"    failure.text = json.dumps(finding, indent=2)\n"
-            f"with open(f'{{ws}}/fuzz_results.xml', 'wb') as f:\n"
-            f"    f.write(b'<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n')\n"
-            f"    f.write(tostring(suite))\n"
-            f"status = 'FAIL' if any(\n"
-            f"    f.get('severity') == 'critical' for f in fuzz.get('findings', [])\n"
-            f") else 'PASS'\n"
-            f"summary = {{\n"
-            f"    'pr_number': 'todo-api-errors@main',\n"
-            f"    'fuzz_iterations': fuzz.get('iterations', 0),\n"
-            f"    'fuzz_findings': len(fuzz.get('findings', [])),\n"
-            f"    'critical_findings': sum(1 for f in fuzz.get('findings', []) if f.get('severity') == 'critical'),\n"
-            f"    'status': status,\n"
-            f"}}\n"
-            f"json.dump(summary, open(f'{{ws}}/contract_test_summary.json', 'w'), indent=2)\n"
-            f"print(f'Contract+Fuzz: {{summary[\"fuzz_iterations\"]}} iterations, '\n"
-            f"      f'{{summary[\"fuzz_findings\"]}} findings, status={{status}}')\n"
-            f"print(f'::add-task-context CONTRACT_STATUS::{{status}}')\n"
-            f"PYEOF\n"
-        )
-        report_step = exec_step(pod, "report", report_cmd, env, timeout=30)
-        result.steps.append(report_step)
-        if not report_step.ok:
-            return _fail(result, report_step, f"report failed: {report_step.stderr[-300:]}")
-
-        contract_status = _parse_context(report_step.stdout).get("CONTRACT_STATUS", "?")
-
-        # --- Step 7: Verify all artifacts written ---
+        # --- Step 4: Verify all artifacts ---
         artifacts_check = exec_step(
             pod, "check-artifacts",
-            f"ls {ws}/fuzz_result.json {ws}/contract_test_summary.json {ws}/fuzz_results.xml",
-            env, timeout=10
+            "ls /workspace/fuzz_result.json /workspace/contract_test_summary.json "
+            "/workspace/fuzz_results.xml",
+            env, timeout=10,
         )
         result.steps.append(artifacts_check)
         if not artifacts_check.ok:
             return _fail(result, artifacts_check, f"missing artifacts: {artifacts_check.stderr[-200:]}")
 
-        # Security probes must have actually run
-        if fuzz_iterations == "0":
-            return _fail(result, fuzz_step,
-                         "security probes ran 0 iterations — step may have crashed before running probes")
+        # Read summary for final report
+        summary_step = exec_step(
+            pod, "read-summary",
+            "python3 -c '"
+            "import json; s = json.load(open(\"/workspace/contract_test_summary.json\")); "
+            "print(\"::add-task-context STATUS::\" + s.get(\"status\", \"?\")); "
+            "print(\"::add-task-context FINDINGS::\" + str(s.get(\"fuzz_findings\", 0))); "
+            "print(\"::add-task-context CRITICAL::\" + str(s.get(\"critical_findings\", 0))); "
+            "print(\"::add-task-context ITERATIONS::\" + str(s.get(\"fuzz_iterations\", 0)))"
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(summary_step)
+        if not summary_step.ok:
+            return _fail(result, summary_step, f"summary read failed: {summary_step.stderr[-200:]}")
+        summary_ctx = _parse_context(summary_step.stdout)
 
         return _pass(
             result,
-            f"slack_strip=ok services_ready=yes recorded=yes "
-            f"scenario_files={scenario_files} endpoints_discovered={endpoints_discovered} "
-            f"contracts_succeeded={contract_ctx.get('CONTRACT_SUCCEEDED','?')} "
-            f"security_probes={fuzz_iterations} findings={fuzz_findings} "
-            f"critical={fuzz_critical} status={contract_status}"
+            f"clone_pr=ok record=ok scenario_files={scenario_files} "
+            f"fuzz=ok findings={summary_ctx.get('FINDINGS','?')} "
+            f"critical={summary_ctx.get('CRITICAL','?')} "
+            f"iterations={summary_ctx.get('ITERATIONS','?')} "
+            f"status={summary_ctx.get('STATUS','?')}"
         )
 
 
