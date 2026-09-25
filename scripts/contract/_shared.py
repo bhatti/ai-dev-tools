@@ -126,7 +126,7 @@ def run_security_probes(
         cred_leak = any(kw in body_lower for kw in
                         ["propertysources", "spring.datasource.password", "datasource.password",
                          "\"password\":", "\"secret\":", "\"apikey\":", "\"api_key\":",
-                         "challenge_", "wrongpassword"])
+                         "challenge_answer", "wrongsecrets_flag", "wrongpassword"])
         is_finding = status >= 500 or sqli_leak or stack_leak or cred_leak
         if is_finding:
             severity = "critical" if (sqli_leak or stack_leak or cred_leak) else "medium"

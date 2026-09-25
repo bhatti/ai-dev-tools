@@ -4157,29 +4157,64 @@ def test_38_contract_test(base_env: dict[str, str]) -> TestResult:
         if not artifacts_check.ok:
             return _fail(result, artifacts_check, f"missing artifacts: {artifacts_check.stderr[-200:]}")
 
-        # Read summary for final report
+        # --- Step 5: Verify fuzz_result.json has required fields and real values ---
+        fuzz_content_check = exec_step(
+            pod, "check-fuzz-content",
+            "python3 -c '"
+            "import json, sys; "
+            "f = json.load(open(\"/workspace/fuzz_result.json\")); "
+            "assert \"iterations\" in f, \"missing iterations\"; "
+            "assert \"findings\" in f, \"missing findings\"; "
+            "assert \"ams_used\" in f, \"missing ams_used\"; "
+            "assert f[\"ams_used\"] is True, \"ams_used must be True when AMS is running: \" + str(f[\"ams_used\"]); "
+            "assert isinstance(f[\"findings\"], list), \"findings must be list\"; "
+            "assert f[\"iterations\"] > 0, \"iterations must be > 0, got \" + str(f[\"iterations\"]); "
+            "print(\"::add-task-context FUZZ_ITERATIONS::\" + str(f[\"iterations\"])); "
+            "print(\"::add-task-context FUZZ_FINDINGS::\" + str(len(f[\"findings\"]))); "
+            "print(\"::add-task-context AMS_USED::\" + str(f[\"ams_used\"]))"
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(fuzz_content_check)
+        if not fuzz_content_check.ok:
+            return _fail(result, fuzz_content_check,
+                         f"fuzz_result.json content check failed: {fuzz_content_check.stderr[-300:]}")
+        fuzz_ctx = _parse_context(fuzz_content_check.stdout)
+
+        # --- Step 6: Verify contract_test_summary.json has all enriched fields ---
         summary_step = exec_step(
-            pod, "read-summary",
+            pod, "check-summary-content",
             "python3 -c '"
             "import json; s = json.load(open(\"/workspace/contract_test_summary.json\")); "
+            "assert \"endpoints_scanned\" in s, \"missing endpoints_scanned\"; "
+            "assert \"probe_types\" in s, \"missing probe_types\"; "
+            "assert s[\"endpoints_scanned\"] > 0, \"endpoints_scanned must be > 0, got \" + str(s[\"endpoints_scanned\"]); "
+            "assert isinstance(s[\"probe_types\"], list) and len(s[\"probe_types\"]) > 0, \"probe_types must be non-empty\"; "
+            "assert s[\"fuzz_iterations\"] > 0, \"fuzz_iterations must be > 0\"; "
             "print(\"::add-task-context STATUS::\" + s.get(\"status\", \"?\")); "
             "print(\"::add-task-context FINDINGS::\" + str(s.get(\"fuzz_findings\", 0))); "
             "print(\"::add-task-context CRITICAL::\" + str(s.get(\"critical_findings\", 0))); "
-            "print(\"::add-task-context ITERATIONS::\" + str(s.get(\"fuzz_iterations\", 0)))"
+            "print(\"::add-task-context ITERATIONS::\" + str(s.get(\"fuzz_iterations\", 0))); "
+            "print(\"::add-task-context ENDPOINTS::\" + str(s.get(\"endpoints_scanned\", 0))); "
+            "print(\"::add-task-context PROBE_TYPES::\" + \",\".join(s.get(\"probe_types\", [])))"
             "'",
             env, timeout=10,
         )
         result.steps.append(summary_step)
         if not summary_step.ok:
-            return _fail(result, summary_step, f"summary read failed: {summary_step.stderr[-200:]}")
+            return _fail(result, summary_step,
+                         f"contract_test_summary.json content check failed: {summary_step.stderr[-300:]}")
         summary_ctx = _parse_context(summary_step.stdout)
 
         return _pass(
             result,
             f"clone_pr=ok record=ok scenario_files={scenario_files} "
-            f"fuzz=ok findings={summary_ctx.get('FINDINGS','?')} "
-            f"critical={summary_ctx.get('CRITICAL','?')} "
+            f"fuzz=ok ams_used={fuzz_ctx.get('AMS_USED','?')} "
             f"iterations={summary_ctx.get('ITERATIONS','?')} "
+            f"endpoints={summary_ctx.get('ENDPOINTS','?')} "
+            f"probe_types={summary_ctx.get('PROBE_TYPES','?')} "
+            f"findings={summary_ctx.get('FINDINGS','?')} "
+            f"critical={summary_ctx.get('CRITICAL','?')} "
             f"status={summary_ctx.get('STATUS','?')}"
         )
 

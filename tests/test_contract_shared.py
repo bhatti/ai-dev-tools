@@ -180,6 +180,14 @@ class TestRunSecurityProbes:
             findings = run_security_probes("http://localhost:8080", [("GET", "/api/session")])
         assert findings == []
 
+    def test_no_false_positive_for_challenges_api(self):
+        """WrongSecrets /api/Challenges returns challenge_id/challenge_name — must not be a finding."""
+        body = b'[{"challenge_id":1,"challenge_name":"Logging","challenge_type":"CLOUD"}]'
+        resp = self._make_response(200, body)
+        with patch("scripts.contract._shared.urllib.request.urlopen", return_value=resp):
+            findings = run_security_probes("http://localhost:8080", [("GET", "/api/Challenges")])
+        assert findings == [], f"false positive cred_leak on challenges API: {findings}"
+
     def test_post_endpoint_gets_three_probes(self):
         responses = []
         call_count = 0

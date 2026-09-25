@@ -181,3 +181,90 @@ class TestFuzzMain:
         fuzz = json.loads((tmp_path / "fuzz_result.json").read_text())
         # 15 GET endpoints × 2 probes each = 30
         assert fuzz["iterations"] == 30
+
+    @patch("scripts.contract.fuzz.run_security_probes", return_value=[
+        {"probe": "sqli:/api/items?q=' OR 1=1--", "status": 200, "severity": "critical",
+         "sqli_leak": True, "stack_leak": False, "cred_leak": False},
+    ])
+    @patch("scripts.contract.fuzz.discover_endpoints",
+           return_value=[("GET", "/api/items"), ("POST", "/api/orders")])
+    @patch("scripts.contract.fuzz._run_contract_replay", return_value={"succeeded": 4, "failed": 1})
+    @patch("scripts.contract.fuzz._upload_openapi_spec")
+    @patch("scripts.contract.fuzz.wait_for_service", return_value=True)
+    @patch("scripts.contract.fuzz.load_config")
+    @patch("scripts.contract.fuzz.get_workspace_dir")
+    def test_sqli_finding_produces_correct_output_structure(
+            self, mock_ws, mock_cfg, mock_wait, mock_upload, mock_replay, mock_discover,
+            mock_probe, tmp_path: Path):
+        """SQLi finding must appear in fuzz_result.json, summary, and JUnit XML with correct fields."""
+        mock_ws.return_value = tmp_path
+        mock_cfg.return_value = {}
+        (tmp_path / "recordings").mkdir()
+
+        main()
+
+        # fuzz_result.json: full finding detail preserved
+        fuzz = json.loads((tmp_path / "fuzz_result.json").read_text())
+        assert fuzz["iterations"] == 1 * 2 + 1 * 3  # 1 GET×2 + 1 POST×3 = 5
+        assert fuzz["ams_used"] is True
+        assert len(fuzz["findings"]) == 1
+        finding = fuzz["findings"][0]
+        assert finding["severity"] == "critical"
+        assert finding["sqli_leak"] is True
+        assert finding["stack_leak"] is False
+        assert finding["cred_leak"] is False
+
+        # contract_test_summary.json: aggregates and probe_types
+        summary = json.loads((tmp_path / "contract_test_summary.json").read_text())
+        assert summary["status"] == "FAIL"
+        assert summary["critical_findings"] == 1
+        assert summary["fuzz_findings"] == 1
+        assert summary["contract_breaking_changes"] == 1
+        assert summary["endpoints_scanned"] == 2
+        assert "SQLi" in summary["probe_types"]
+        assert "XSS" in summary["probe_types"]          # POST endpoint triggers write probes
+        assert "oversized-payload" in summary["probe_types"]
+
+        # JUnit XML: failures count matches finding count
+        xml = (tmp_path / "fuzz_results.xml").read_text()
+        assert 'failures="1"' in xml
+        assert "sqli" in xml.lower()
+
+    @patch("scripts.contract.fuzz.run_security_probes", return_value=[
+        {"probe": "sqli:/health", "status": 500, "severity": "critical",
+         "sqli_leak": False, "stack_leak": True, "cred_leak": False},
+        {"probe": "path-trav:/health", "status": 500, "severity": "medium",
+         "sqli_leak": False, "stack_leak": False, "cred_leak": False},
+    ])
+    @patch("scripts.contract.fuzz.discover_endpoints",
+           return_value=[("GET", "/health"), ("GET", "/api/users")])
+    @patch("scripts.contract.fuzz._run_contract_replay", return_value={"succeeded": 2, "failed": 0})
+    @patch("scripts.contract.fuzz._upload_openapi_spec")
+    @patch("scripts.contract.fuzz.wait_for_service", return_value=True)
+    @patch("scripts.contract.fuzz.load_config")
+    @patch("scripts.contract.fuzz.get_workspace_dir")
+    def test_stack_trace_finding_is_critical_in_output(
+            self, mock_ws, mock_cfg, mock_wait, mock_upload, mock_replay, mock_discover,
+            mock_probe, tmp_path: Path):
+        """Java stack trace leak must produce a critical finding with stack_leak=True."""
+        mock_ws.return_value = tmp_path
+        mock_cfg.return_value = {}
+        (tmp_path / "recordings").mkdir()
+
+        main()
+
+        fuzz = json.loads((tmp_path / "fuzz_result.json").read_text())
+        assert fuzz["iterations"] == 4  # 2 GET endpoints × 2 probes
+        critical = [f for f in fuzz["findings"] if f["severity"] == "critical"]
+        assert len(critical) == 1
+        assert critical[0]["stack_leak"] is True
+
+        summary = json.loads((tmp_path / "contract_test_summary.json").read_text())
+        assert summary["status"] == "FAIL"
+        assert summary["critical_findings"] == 1
+        assert summary["fuzz_findings"] == 2    # both findings captured
+        assert summary["endpoints_scanned"] == 2
+
+        xml = (tmp_path / "fuzz_results.xml").read_text()
+        assert 'failures="2"' in xml
+        assert 'tests="4"' in xml
