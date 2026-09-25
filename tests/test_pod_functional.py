@@ -4082,10 +4082,9 @@ def test_38_contract_test(base_env: dict[str, str]) -> TestResult:
       - plexobject/api-mock-service:latest             at localhost:8081 (API) / 8082 (proxy)
 
     Pipeline mirrors the YAML exactly:
-      1. clone_pr  — parse Slack URL from PR_NUMBER env, clone repo (no-op if no git creds)
-      2. record    — scripts.contract.record  (probe service through proxy, write record_result.json)
-      3. fuzz      — scripts.contract.fuzz    (contract replay + security probes, write artifacts)
-      4. artifacts — verify all output files present
+      1. record    — scripts.contract.record  (probe service through proxy, write record_result.json)
+      2. fuzz      — scripts.contract.fuzz    (contract replay + security probes, write artifacts)
+      3. artifacts — verify all output files present and content is correct
 
     Triggered by: @bot contract-test https://github.com/OWASP/wrongsecrets
                     --service jeroenwillemsen/wrongsecrets:latest-no-vault
@@ -4103,19 +4102,8 @@ def test_38_contract_test(base_env: dict[str, str]) -> TestResult:
         env.pop("SLACK_BOT_TOKEN", None)
         env["SLACK_BOT_TOKEN"] = ""
 
-        # --- Step 1: clone_pr reads PR_NUMBER from env, strips Slack URL, skips actual clone ---
-        # No git creds in pod — clone will fail gracefully; parse_pr_ref is what we're testing.
-        clone_step = exec_step(
-            pod, "clone-pr",
-            "python -m scripts.mq.clone_pr 2>&1 | grep -v 'fatal:' || true; "
-            "echo '::add-task-context CLONE_PR::ok'",
-            env, timeout=30,
-        )
-        result.steps.append(clone_step)
-        if not clone_step.ok:
-            return _fail(result, clone_step, f"clone_pr failed: {clone_step.stderr[-300:]}")
-
-        # --- Step 2: record — scripts.contract.record probes service through proxy ---
+        # --- Step 1: record — scripts.contract.record probes service through proxy ---
+        # clone_pr is NOT in the record task (removed to avoid OOM from git clone during JVM startup).
         record_step = exec_step(pod, "record", "python -m scripts.contract.record", env, timeout=90)
         result.steps.append(record_step)
         if not record_step.ok:
@@ -4208,7 +4196,7 @@ def test_38_contract_test(base_env: dict[str, str]) -> TestResult:
 
         return _pass(
             result,
-            f"clone_pr=ok record=ok scenario_files={scenario_files} "
+            f"record=ok scenario_files={scenario_files} "
             f"fuzz=ok ams_used={fuzz_ctx.get('AMS_USED','?')} "
             f"iterations={summary_ctx.get('ITERATIONS','?')} "
             f"endpoints={summary_ctx.get('ENDPOINTS','?')} "
