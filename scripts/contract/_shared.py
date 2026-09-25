@@ -55,12 +55,13 @@ def discover_endpoints(recordings_dir: Path) -> list[tuple[str, str]]:
     Directory structure: recordings/api_contracts/{path...}/{METHOD}/*.yaml
     """
     base = str(recordings_dir / "api_contracts")
+    _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
     seen: set[tuple[str, str]] = set()
     endpoints: list[tuple[str, str]] = []
     for yaml_file in glob.glob(f"{base}/**/*.yaml", recursive=True):
         rel = os.path.dirname(yaml_file)[len(base):]
         parts = [p for p in rel.strip("/").split("/") if p]
-        if parts and parts[-1] == parts[-1].upper() and parts[-1].isalpha():
+        if parts and parts[-1] in _HTTP_METHODS:
             key = (parts[-1], "/" + "/".join(parts[:-1]))
             if key not in seen:
                 seen.add(key)
@@ -76,8 +77,6 @@ def run_security_probes(
 
     Returns a list of findings (5xx responses or SQL keyword leaks).
     """
-    import urllib.parse
-
     sqli = "' OR '1'='1"
     xss = "<script>alert(1)</script>"
 

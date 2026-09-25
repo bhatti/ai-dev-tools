@@ -339,6 +339,7 @@ class TestContractTestReport:
         md, ctx = _build_report(tmp_path, "42", "Contract Test")
         assert "Contract + Fuzz Results" in md
         assert "FAIL" in md
+        assert "❌" in md
         assert "27" in md
         assert "2" in md
         assert ctx["CONTRACT_STATUS"] == "FAIL"
@@ -355,6 +356,7 @@ class TestContractTestReport:
         }))
         md, ctx = _build_report(tmp_path, "99", "Contract Test")
         assert "PASS" in md
+        assert "✅" in md
         assert ctx["CONTRACT_STATUS"] == "PASS"
 
     def test_no_contract_section_when_file_absent(self, tmp_path):

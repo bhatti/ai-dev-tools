@@ -24,7 +24,6 @@ from scripts.mq._shared import apply_repo_override, is_branch_or_tag, parse_pr_r
 
 
 
-
 @click.command()
 @click.option("--pr-number", default=None, help="PR number, branch, or tag to checkout")
 @click.option("--repo", default=None, help="Repository URL (overrides GH_ORG/GH_REPO)")

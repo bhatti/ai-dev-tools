@@ -115,6 +115,15 @@ class TestDiscoverEndpoints:
         (d / "Recorded1.yaml").write_text("")
         assert discover_endpoints(tmp_path) == []
 
+    def test_skips_uppercase_path_segment_that_is_not_http_method(self, tmp_path: Path):
+        # Path segments like "API", "AUTH", "BATCH" are all-uppercase alpha but not HTTP verbs.
+        # Regression test: old code used isalpha()+upper() which matched these as methods.
+        for segment in ("API", "AUTH", "BATCH", "V1"):
+            d = tmp_path / "api_contracts" / segment / "items"
+            d.mkdir(parents=True)
+            (d / "Recorded1.yaml").write_text("")
+        assert discover_endpoints(tmp_path) == []
+
 
 class TestRunSecurityProbes:
     def _make_response(self, status: int, body: bytes = b"ok"):

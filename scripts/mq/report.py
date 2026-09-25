@@ -563,7 +563,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         c_findings = contract.get("fuzz_findings", 0)
         c_critical = contract.get("critical_findings", 0)
         c_breaking = contract.get("contract_breaking_changes", 0)
-        status_emoji = ":white_check_mark:" if c_status == "PASS" else ":x:"
+        status_emoji = "✅" if c_status == "PASS" else "❌"
         sections.append("## Contract + Fuzz Results")
         sections.append("")
         sections.append("| Field | Value |")
