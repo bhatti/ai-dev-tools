@@ -35,13 +35,26 @@ def main() -> None:
 
     (ws / "recordings").mkdir(parents=True, exist_ok=True)
 
-    # 30 retries × 2s = 60s max — enough for JVM-based services (WrongSecrets) to start.
+    # Wait for AMS first (fast — Go binary starts in seconds).
     ams_ready = wait_for_service(
         f"http://localhost:{mock_port}/_health", "api-mock-service", retries=30
     )
     if not ams_ready:
         print(
             f"[record] WARNING: api-mock-service not reachable at :{mock_port} — recording skipped",
+            flush=True,
+        )
+        _write_result(ws, test_exit=0, proxy_used=False, service_url=service_url, mock_port=mock_port)
+        return
+
+    # Wait for the service under test before probing — JVM-based services (WrongSecrets,
+    # Spring Boot) take 30-90s to start and peak at 2G+ during startup.  Probing before
+    # the JVM is ready adds HTTP pressure on top of the startup burst → OOM.
+    # 45 retries × 2s = 90s max.
+    svc_ready = wait_for_service(service_url, "service-under-test", retries=45, delay=2.0)
+    if not svc_ready:
+        print(
+            f"[record] WARNING: service not reachable at {service_url} — recording skipped",
             flush=True,
         )
         _write_result(ws, test_exit=0, proxy_used=False, service_url=service_url, mock_port=mock_port)

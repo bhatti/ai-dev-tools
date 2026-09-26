@@ -63,6 +63,22 @@ class TestRecordMain:
         mock_probe.assert_not_called()
 
     @patch("scripts.contract.record.probe_through_proxy")
+    @patch("scripts.contract.record.load_config")
+    @patch("scripts.contract.record.get_workspace_dir")
+    def test_skips_probe_when_service_not_ready(self, mock_ws, mock_cfg,
+                                                mock_probe, tmp_path: Path):
+        """AMS ready but service-under-test not reachable → proxy_used=False, no probe."""
+        mock_ws.return_value = tmp_path
+        mock_cfg.return_value = {}
+        # First call (AMS) → True; second call (service) → False
+        with patch("scripts.contract.record.wait_for_service", side_effect=[True, False]):
+            record_main()
+
+        data = json.loads((tmp_path / "record_result.json").read_text())
+        assert data["proxy_used"] is False
+        mock_probe.assert_not_called()
+
+    @patch("scripts.contract.record.probe_through_proxy")
     @patch("scripts.contract.record.subprocess")
     @patch("scripts.contract.record.wait_for_service", return_value=True)
     @patch("scripts.contract.record.load_config")
