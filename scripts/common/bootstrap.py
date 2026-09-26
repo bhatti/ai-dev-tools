@@ -22,11 +22,26 @@ from pathlib import Path
 _REPO_URL = "https://github.com/bhatti/ai-dev-tools.git"
 _APP_SCRIPTS = Path("/app/scripts")
 _TMP_CLONE = Path("/tmp/ai-dev-tools-debug")
+# Marker written after a successful clone so subsequent script steps in the
+# same container don't clone again (formicary passes AI_DEV_TOOLS_DEBUG=1 to
+# every exec in the task, but the filesystem is already up-to-date after the
+# first clone).
+_DONE_MARKER = Path("/tmp/.adt_bootstrap_done")
 
 
 def ensure_debug_mode() -> None:
-    """If AI_DEV_TOOLS_DEBUG=1, clone latest code and re-exec this process."""
+    """If AI_DEV_TOOLS_DEBUG=1, clone latest code and re-exec this process.
+
+    Idempotent within a single container: after the first successful clone the
+    marker file _DONE_MARKER is created and all subsequent calls return early.
+    This prevents redundant clones when multiple script steps run in the same
+    Kubernetes pod (e.g. bootstrap step + record.py both call this function).
+    """
     if os.environ.get("AI_DEV_TOOLS_DEBUG", "0") != "1":
+        return
+
+    if _DONE_MARKER.exists():
+        print("[debug] already bootstrapped — skipping re-clone", flush=True)
         return
 
     print("[debug] AI_DEV_TOOLS_DEBUG=1 — cloning latest ai-dev-tools ...", flush=True)
@@ -46,6 +61,10 @@ def ensure_debug_mode() -> None:
     shutil.copytree(_TMP_CLONE / "scripts", _APP_SCRIPTS)
     shutil.rmtree(_TMP_CLONE, ignore_errors=True)
     print("[debug] /app/scripts overwritten from ai-dev-tools@main", flush=True)
+
+    # Write marker BEFORE re-exec so the re-exec'd process (and any later
+    # script step) finds it and skips the clone.
+    _DONE_MARKER.touch()
 
     # Set flag to 0 before re-exec so the re-invoked process skips this block
     os.environ["AI_DEV_TOOLS_DEBUG"] = "0"

@@ -4207,6 +4207,172 @@ def test_38_contract_test(base_env: dict[str, str]) -> TestResult:
         )
 
 
+def test_39_fuzz_sqli_detection(base_env: dict[str, str]) -> TestResult:
+    """Verify fuzz.py detects SQLi and stack-trace findings against a controlled
+    vulnerable service running inside the pod.
+
+    Setup inside the pod:
+      1. Inject pre-built api_contracts/ tree (simulates record-step output).
+      2. Start a Python HTTP server that returns SQL syntax errors for SQLi
+         payloads and a Java stack trace for path-traversal payloads.
+      3. Run scripts.contract.fuzz (no AMS — AMS not running in this pod).
+      4. Assert fuzz_result.json contains both findings with correct severity,
+         contract_test_summary.json has status=FAIL, critical_findings>=1,
+         and JUnit XML has failures > 0.
+    """
+    result = TestResult("fuzz-sqli-detection")
+
+    with pod_fixture("fuzz-sqli") as pod:
+        env = dict(base_env)
+        env["WORKSPACE_DIR"] = "/workspace"
+        env["SERVICE_PORT"] = "9999"
+        env["MOCK_SERVICE_PORT"] = "8081"   # AMS not running — fuzz skips replay
+        env.pop("SLACK_BOT_TOKEN", None)
+        env["SLACK_BOT_TOKEN"] = ""
+
+        # --- Step 1: Create recordings tree so fuzz.py discovers two endpoints ---
+        setup_step = exec_step(
+            pod, "setup-recordings",
+            "mkdir -p /workspace/recordings/api_contracts/api/items/GET "
+            "         /workspace/recordings/api_contracts/api/orders/POST && "
+            "echo 'resp: 200' > /workspace/recordings/api_contracts/api/items/GET/Recorded1.yaml && "
+            "echo 'resp: 200' > /workspace/recordings/api_contracts/api/orders/POST/Recorded1.yaml",
+            env, timeout=10,
+        )
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup failed: {setup_step.stderr[-200:]}")
+
+        # --- Step 2: Write and start a vulnerable mock service on port 9999 ---
+        # Responds with:
+        #   - SQL syntax error for requests with "OR 1=1" in the URL  → sqli_leak (critical)
+        #   - Java stack trace for path-traversal payloads ("../")    → stack_leak (critical)
+        #   - 200 OK for everything else
+        write_server = exec_step(
+            pod, "write-vuln-server",
+            r"""cat > /tmp/vuln_server.py << 'PYEOF'
+import http.server, urllib.parse, time, threading
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        url = urllib.parse.unquote(self.path)
+        if "OR 1=1" in url or "' OR" in url:
+            self.wfile.write(b"You have an error in your SQL syntax near OR 1=1")
+        elif "../" in url:
+            self.wfile.write(b"java.lang.RuntimeException\n\tat org.springframework.web.servlet.DispatcherServlet")
+        else:
+            self.wfile.write(b"ok")
+    do_POST = do_GET
+
+s = http.server.HTTPServer(("0.0.0.0", 9999), H)
+t = threading.Thread(target=s.serve_forever, daemon=True)
+t.start()
+time.sleep(300)
+PYEOF
+python3 /tmp/vuln_server.py &>/tmp/vuln_server.log &
+sleep 1
+curl -sf http://localhost:9999/ || echo server-check-failed""",
+            env, timeout=15,
+        )
+        result.steps.append(write_server)
+        if not write_server.ok or "server-check-failed" in write_server.stdout:
+            return _fail(result, write_server,
+                         f"vulnerable server failed to start: {write_server.stdout[-200:]}")
+
+        # --- Step 3: Run fuzz.py against the vulnerable service ---
+        fuzz_step = exec_step(pod, "fuzz", "python -m scripts.contract.fuzz", env, timeout=60)
+        result.steps.append(fuzz_step)
+        if not fuzz_step.ok:
+            return _fail(result, fuzz_step, f"fuzz failed: {fuzz_step.stderr[-400:]}")
+
+        # --- Step 4: Verify fuzz_result.json contains expected findings ---
+        findings_check = exec_step(
+            pod, "check-findings",
+            "python3 -c '"
+            "import json, sys; "
+            "f = json.load(open(\"/workspace/fuzz_result.json\")); "
+            "findings = f[\"findings\"]; "
+            "print(\"::add-task-context TOTAL_FINDINGS::\" + str(len(findings))); "
+            "sqli = [x for x in findings if x.get(\"sqli_leak\")]; "
+            "stack = [x for x in findings if x.get(\"stack_leak\")]; "
+            "print(\"::add-task-context SQLI_FINDINGS::\" + str(len(sqli))); "
+            "print(\"::add-task-context STACK_FINDINGS::\" + str(len(stack))); "
+            "assert len(sqli) > 0, \"no SQLi findings detected: \" + json.dumps(findings); "
+            "assert len(stack) > 0, \"no stack-trace findings detected: \" + json.dumps(findings); "
+            "assert all(x[\"severity\"] == \"critical\" for x in sqli), \"SQLi must be critical\"; "
+            "assert all(x[\"severity\"] == \"critical\" for x in stack), \"stack-trace must be critical\"; "
+            "print(\"::add-task-context AMS_USED::\" + str(f.get(\"ams_used\"))); "
+            "print(\"::add-task-context ITERATIONS::\" + str(f.get(\"iterations\", 0)))"
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(findings_check)
+        if not findings_check.ok:
+            return _fail(result, findings_check,
+                         f"findings check failed: {findings_check.stderr[-400:]}")
+        findings_ctx = _parse_context(findings_check.stdout)
+
+        # --- Step 5: Verify contract_test_summary.json ---
+        summary_check = exec_step(
+            pod, "check-summary",
+            "python3 -c '"
+            "import json; s = json.load(open(\"/workspace/contract_test_summary.json\")); "
+            "assert s[\"status\"] == \"FAIL\", \"status must be FAIL when critical findings exist: \" + s[\"status\"]; "
+            "assert s[\"critical_findings\"] >= 1, \"critical_findings must be >= 1\"; "
+            "assert s[\"fuzz_findings\"] >= 2, \"must have >= 2 findings (SQLi + stack-trace)\"; "
+            "assert s[\"endpoints_scanned\"] == 2, \"2 endpoints must be scanned\"; "
+            "assert s[\"fuzz_iterations\"] == 5, \"1 GET x2 + 1 POST x3 = 5, got: \" + str(s[\"fuzz_iterations\"]); "
+            "assert \"SQLi\" in s[\"probe_types\"], \"SQLi must be in probe_types\"; "
+            "print(\"::add-task-context SUMMARY_STATUS::\" + s[\"status\"]); "
+            "print(\"::add-task-context SUMMARY_CRITICAL::\" + str(s[\"critical_findings\"]))"
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(summary_check)
+        if not summary_check.ok:
+            return _fail(result, summary_check,
+                         f"summary check failed: {summary_check.stderr[-400:]}")
+        summary_ctx = _parse_context(summary_check.stdout)
+
+        # --- Step 6: Verify JUnit XML has failures ---
+        junit_check = exec_step(
+            pod, "check-junit",
+            "python3 -c '"
+            "import xml.etree.ElementTree as ET; "
+            "tree = ET.parse(\"/workspace/fuzz_results.xml\"); "
+            "root = tree.getroot(); "
+            "failures = int(root.attrib.get(\"failures\", 0)); "
+            "tests = int(root.attrib.get(\"tests\", 0)); "
+            "print(\"::add-task-context JUNIT_FAILURES::\" + str(failures)); "
+            "print(\"::add-task-context JUNIT_TESTS::\" + str(tests)); "
+            "assert failures > 0, \"JUnit must report failures, got: \" + str(failures); "
+            "assert tests > 0, \"JUnit tests count must be > 0\""
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(junit_check)
+        if not junit_check.ok:
+            return _fail(result, junit_check,
+                         f"JUnit check failed: {junit_check.stderr[-300:]}")
+        junit_ctx = _parse_context(junit_check.stdout)
+
+        return _pass(
+            result,
+            f"vuln-server=ok fuzz=ok ams_used={findings_ctx.get('AMS_USED','?')} "
+            f"iterations={findings_ctx.get('ITERATIONS','?')} "
+            f"total_findings={findings_ctx.get('TOTAL_FINDINGS','?')} "
+            f"sqli={findings_ctx.get('SQLI_FINDINGS','?')} "
+            f"stack={findings_ctx.get('STACK_FINDINGS','?')} "
+            f"status={summary_ctx.get('SUMMARY_STATUS','?')} "
+            f"critical={summary_ctx.get('SUMMARY_CRITICAL','?')} "
+            f"junit_failures={junit_ctx.get('JUNIT_FAILURES','?')} "
+            f"junit_tests={junit_ctx.get('JUNIT_TESTS','?')}"
+        )
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -4248,6 +4414,7 @@ ALL_TESTS: dict[str, callable] = {
     "gate-review-bb":         test_36_gate_review_bb,
     "gate-check-logic":       test_37_gate_check_logic,
     "contract-test":          test_38_contract_test,
+    "fuzz-sqli-detection":    test_39_fuzz_sqli_detection,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
