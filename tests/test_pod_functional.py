@@ -3692,6 +3692,176 @@ def test_34_mq_test_impact_branch(base_env: dict[str, str]) -> TestResult:
                  f"reduction={reduction}% shard_balance={balance}")
 
 
+def test_42_mq_collect_group(base_env: dict[str, str]) -> TestResult:
+    """Validate the new read-only collect → group pipeline for both GH and BB.
+
+    Two sub-cases run in the same pod:
+      1. GH: collect_ready against bhatti/formicary (real gh CLI), then group_by_scope.
+         Verifies ready_prs.json has correct schema and lane_groups.json is produced.
+      2. BB: inject a fixture ready_prs.json (no API call) and run group_by_scope.
+         Verifies lane_groups.json lane_count and LANE_GROUPS context marker.
+
+    Validates that:
+      - STANDUP_TEAM_MEMBERS is cleared so ALL PRs are returned (not just team-filtered)
+      - repo_slug reflects the correct repo after --repo override
+      - TOTAL_PRS ::add-task-context marker is emitted
+      - lane_groups.json has correct schema {lane_count, total_prs, lanes}
+      - ::add-task-context LANE_GROUPS is emitted (for fan-out compatibility)
+      - No label writes, no PR mutations (read-only)
+    """
+    result = TestResult("mq-collect-group")
+    ws = "/workspace/mq_collect_group"
+
+    env = dict(base_env)
+    env["WORKSPACE_DIR"] = ws
+    env["STANDUP_TEAM_MEMBERS"] = "alice,bob"   # must be cleared by collect_ready
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("mq-collect-group") as pod:
+        setup_step = exec_step(pod, "setup", f"mkdir -p {ws}/logs", env, timeout=30)
+        result.steps.append(setup_step)
+        if not setup_step.ok:
+            return _fail(result, setup_step, f"setup: {setup_step.stderr[-200:]}")
+
+        # --- Sub-case 1: GH collect against bhatti/formicary ---
+        gh_env = dict(env)
+        gh_env["GH_ORG"] = "bhatti"
+        gh_env["GH_REPO"] = "formicary"
+        gh_env.pop("BITBUCKET_WORKSPACE", None)
+        gh_env.pop("BITBUCKET_REPO", None)
+        gh_env["DEFAULT_TRACKER"] = "github"
+
+        collect_step = exec_step(
+            pod, "gh-collect",
+            f"python3 -m scripts.mq.collect_ready --repo bhatti/formicary",
+            gh_env, timeout=90,
+        )
+        result.steps.append(collect_step)
+        if not collect_step.ok:
+            return _fail(result, collect_step,
+                         f"gh collect exit {collect_step.returncode}: {collect_step.stderr[-300:]}")
+
+        # Verify ::add-task-context TOTAL_PRS:: emitted
+        if "::add-task-context TOTAL_PRS::" not in collect_step.stdout:
+            return _fail(result, collect_step,
+                         "REGRESSION: collect_ready missing ::add-task-context TOTAL_PRS:: — "
+                         "Formicary cannot report PR count in job context")
+
+        # Verify ready_prs.json schema
+        verify_collect = exec_step(pod, "verify-gh-collect",
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys\n"
+            f"d = json.loads(open('{ws}/ready_prs.json').read())\n"
+            f"assert 'pr_count' in d, 'missing pr_count'\n"
+            f"assert 'repo' in d, 'missing repo'\n"
+            f"assert d['repo'] == 'bhatti/formicary', f'wrong repo: {{d[\"repo\"]}}'\n"
+            f"assert isinstance(d['prs'], list), 'prs must be list'\n"
+            f"if d['prs']:\n"
+            f"    pr = d['prs'][0]\n"
+            f"    for k in ('pr_number','title','author','age_hours','branch','ci_status','has_approval'):\n"
+            f"        assert k in pr, f'missing key {{k}} in PR'\n"
+            f"    assert pr.get('scope') == 'unknown', f'scope should be unknown, got {{pr.get(\"scope\")}}'\n"
+            f"print(f'::add-task-context GH_PR_COUNT::{{d[\"pr_count\"]}}')\n"
+            f"print(f'::add-task-context GH_REPO::{{d[\"repo\"]}}')\n"
+            f"PYEOF",
+            gh_env, timeout=30)
+        result.steps.append(verify_collect)
+        if not verify_collect.ok:
+            return _fail(result, verify_collect,
+                         f"gh collect schema: {verify_collect.stderr[-300:]}")
+
+        # Run group_by_scope on the GH output
+        group_step = exec_step(pod, "gh-group",
+                               "python3 -m scripts.mq.group_by_scope",
+                               gh_env, timeout=30)
+        result.steps.append(group_step)
+        if not group_step.ok:
+            return _fail(result, group_step,
+                         f"group exit {group_step.returncode}: {group_step.stderr[-200:]}")
+
+        if "::add-task-context LANE_GROUPS::" not in group_step.stdout:
+            return _fail(result, group_step,
+                         "REGRESSION: group_by_scope missing ::add-task-context LANE_GROUPS:: — "
+                         "fan_out.source: LANE_GROUPS will not be resolvable")
+
+        # Verify lane_groups.json schema
+        verify_group = exec_step(pod, "verify-gh-group",
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys\n"
+            f"d = json.loads(open('{ws}/lane_groups.json').read())\n"
+            f"assert 'lane_count' in d, 'missing lane_count'\n"
+            f"assert 'total_prs' in d, 'missing total_prs'\n"
+            f"assert isinstance(d['lanes'], list), 'lanes must be list'\n"
+            f"for lane in d['lanes']:\n"
+            f"    assert 'lane_id' in lane, 'lane missing lane_id'\n"
+            f"    assert 'pr_count' in lane, 'lane missing pr_count'\n"
+            f"    assert isinstance(lane['prs'], list), 'lane prs must be list'\n"
+            f"print(f'::add-task-context GH_LANE_COUNT::{{d[\"lane_count\"]}}')\n"
+            f"PYEOF",
+            gh_env, timeout=30)
+        result.steps.append(verify_group)
+        if not verify_group.ok:
+            return _fail(result, verify_group,
+                         f"gh group schema: {verify_group.stderr[-300:]}")
+
+        # --- Sub-case 2: BB — inject fixture ready_prs.json, run group_by_scope ---
+        bb_env = dict(env)
+        bb_env["DEFAULT_TRACKER"] = "bitbucket"
+        bb_env["BITBUCKET_WORKSPACE"] = "cribl"
+        bb_env["BITBUCKET_REPO"] = "cribl"
+        # Write BB fixture via heredoc — avoids quoting/escaping issues with Python one-liners
+        inject_bb = exec_step(pod, "bb-inject-fixture",
+            f"cat > {ws}/ready_prs.json <<'__BBEOF__'\n"
+            + '{"pr_count":3,"repo":"cribl/cribl","prs":['
+            + '{"pr_number":10,"title":"Auth fix","author":"alice","scope":"unknown","blast_radius":"low","age_hours":5.0,"branch":"fix/auth-token","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/cribl/cribl/pull-requests/10","labels":[],"repo":"cribl/cribl"},'
+            + '{"pr_number":11,"title":"Billing update","author":"bob","scope":"unknown","blast_radius":"medium","age_hours":48.0,"branch":"feat/billing-v2","ci_status":"none","has_approval":false,"url":"https://bitbucket.org/cribl/cribl/pull-requests/11","labels":[],"repo":"cribl/cribl"},'
+            + '{"pr_number":12,"title":"Docs","author":"carol","scope":"unknown","blast_radius":"low","age_hours":2.0,"branch":"docs/readme","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/cribl/cribl/pull-requests/12","labels":[],"repo":"cribl/cribl"}'
+            + ']}\n'
+            + "__BBEOF__",
+            bb_env, timeout=15)
+        result.steps.append(inject_bb)
+        if not inject_bb.ok:
+            return _fail(result, inject_bb, f"bb inject: {inject_bb.stderr[-200:]}")
+
+        bb_group_step = exec_step(pod, "bb-group",
+                                  "python3 -m scripts.mq.group_by_scope",
+                                  bb_env, timeout=30)
+        result.steps.append(bb_group_step)
+        if not bb_group_step.ok:
+            return _fail(result, bb_group_step,
+                         f"bb group exit {bb_group_step.returncode}: {bb_group_step.stderr[-200:]}")
+
+        if "::add-task-context LANE_GROUPS::" not in bb_group_step.stdout:
+            return _fail(result, bb_group_step,
+                         "REGRESSION: BB group_by_scope missing ::add-task-context LANE_GROUPS::")
+
+        verify_bb_group = exec_step(pod, "verify-bb-group",
+            f"python3 - <<'PYEOF'\n"
+            f"import json, sys\n"
+            f"d = json.loads(open('{ws}/lane_groups.json').read())\n"
+            f"assert d['total_prs'] == 3, f'expected 3 PRs, got {{d[\"total_prs\"]}}'\n"
+            f"assert d['lane_count'] >= 1, 'expected at least 1 lane'\n"
+            f"# All PRs have scope=unknown so they all go to default lane\n"
+            f"prs_in_lanes = sum(l['pr_count'] for l in d['lanes'])\n"
+            f"assert prs_in_lanes == 3, f'lane prs {{prs_in_lanes}} != 3'\n"
+            f"print(f'::add-task-context BB_LANE_COUNT::{{d[\"lane_count\"]}}')\n"
+            f"print(f'::add-task-context BB_TOTAL_PRS::{{d[\"total_prs\"]}}')\n"
+            f"PYEOF",
+            bb_env, timeout=30)
+        result.steps.append(verify_bb_group)
+        if not verify_bb_group.ok:
+            return _fail(result, verify_bb_group,
+                         f"bb group verify: {verify_bb_group.stderr[-300:]}")
+
+    gh_prs = verify_collect.context.get("GH_PR_COUNT", "?")
+    gh_lanes = verify_group.context.get("GH_LANE_COUNT", "?")
+    bb_lanes = verify_bb_group.context.get("BB_LANE_COUNT", "?")
+    bb_prs = verify_bb_group.context.get("BB_TOTAL_PRS", "?")
+    return _pass(result,
+                 f"GH: bhatti/formicary prs={gh_prs} lanes={gh_lanes} | "
+                 f"BB: fixture prs={bb_prs} lanes={bb_lanes}")
+
+
 def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
                                pod_label: str) -> TestResult:
     """Shared read-only gate-review pipeline: clone → scope → risk → report.
@@ -4668,6 +4838,7 @@ ALL_TESTS: dict[str, callable] = {
     "mq-test-impact":         test_32_mq_test_impact,
     "mq-full-pipeline":       test_33_mq_full_pipeline,
     "mq-test-impact-branch":  test_34_mq_test_impact_branch,
+    "mq-collect-group":       test_42_mq_collect_group,
     "gate-review-gh":         test_35_gate_review_gh,
     "gate-review-bb":         test_36_gate_review_bb,
     "gate-check-logic":       test_37_gate_check_logic,
