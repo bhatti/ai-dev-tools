@@ -85,6 +85,11 @@ def main() -> None:
     # Also probe common REST paths directly — ensures recordings even without a test suite.
     probe_through_proxy(service_url, proxy_url)
 
+    # Log how many scenario files AMS wrote so the artifact contains a diagnostic.
+    import glob as _glob
+    n_scenarios = len(_glob.glob(str(ws / "recordings" / "**" / "*.yaml"), recursive=True))
+    print(f"[record] recordings: {n_scenarios} scenario files in {ws / 'recordings'}", flush=True)
+
     _write_result(ws, test_exit=test_exit, proxy_used=True, service_url=service_url, mock_port=mock_port)
 
 
