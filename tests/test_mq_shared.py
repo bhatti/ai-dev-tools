@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 
 from scripts.mq._shared import (
     _bb_find_pr_by_jira_key,
+    _cfg_for_repo,
     apply_repo_override,
     fetch_changed_files_from_diff,
+    fetch_open_prs,
     is_branch_or_tag,
     label_pr,
     parse_pr_ref,
@@ -378,3 +380,94 @@ class TestApplyRepoOverride:
         apply_repo_override(config, repo_url or "")
         assert config["GH_ORG"] == "bhatti"
         assert config["GH_REPO"] == "todo-sample"
+
+
+class TestCfgForRepo:
+    """_cfg_for_repo: config copy with STANDUP_TEAM_MEMBERS cleared and repo fields set."""
+
+    def test_clears_team_members(self):
+        config = {"STANDUP_TEAM_MEMBERS": "alice,bob", "GH_ORG": "org", "GH_REPO": "repo"}
+        cfg = _cfg_for_repo(config, "")
+        assert cfg["STANDUP_TEAM_MEMBERS"] == ""
+        # original untouched
+        assert config["STANDUP_TEAM_MEMBERS"] == "alice,bob"
+
+    def test_bare_gh_slug_sets_org_and_repo(self):
+        cfg = _cfg_for_repo({}, "bhatti/todo-sample")
+        assert cfg["GH_ORG"] == "bhatti"
+        assert cfg["GH_REPO"] == "todo-sample"
+
+    def test_bare_bb_slug_sets_workspace_and_repo(self):
+        cfg = _cfg_for_repo({"DEFAULT_TRACKER": "jira"}, "ws/myrepo")
+        assert cfg["BITBUCKET_WORKSPACE"] == "ws"
+        assert cfg["BITBUCKET_REPO"] == "myrepo"
+
+    def test_full_gh_url_delegates_to_apply_repo_override(self):
+        cfg = _cfg_for_repo({}, "https://github.com/myorg/myrepo.git")
+        assert cfg["GH_ORG"] == "myorg"
+        assert cfg["GH_REPO"] == "myrepo"
+
+    def test_full_bb_url_delegates_to_apply_repo_override(self):
+        cfg = _cfg_for_repo({}, "https://bitbucket.org/myws/myrepo.git")
+        assert cfg["BITBUCKET_WORKSPACE"] == "myws"
+        assert cfg["BITBUCKET_REPO"] == "myrepo"
+
+    def test_empty_slug_returns_copy_with_cleared_team(self):
+        config = {"GH_ORG": "keep", "STANDUP_TEAM_MEMBERS": "x"}
+        cfg = _cfg_for_repo(config, "")
+        assert cfg["GH_ORG"] == "keep"
+        assert cfg["STANDUP_TEAM_MEMBERS"] == ""
+
+    def test_returns_copy_not_original(self):
+        config = {"GH_ORG": "orig"}
+        cfg = _cfg_for_repo(config, "neworg/newrepo")
+        assert config.get("GH_ORG") == "orig"
+        assert cfg["GH_ORG"] == "neworg"
+
+
+class TestFetchOpenPrs:
+    """fetch_open_prs: delegates to standup fetcher with cleared team filter."""
+
+    @patch("scripts.standup.gather_gh.get_open_prs")
+    def test_github_calls_standup_fetcher(self, mock_gh):
+        mock_gh.return_value = [{"number": 1, "title": "PR 1"}]
+        prs = fetch_open_prs({"GH_ORG": "org", "GH_REPO": "repo"})
+        assert mock_gh.called
+        assert len(prs) == 1
+        # team filter must be cleared in the config passed to the fetcher
+        call_cfg = mock_gh.call_args[0][0]
+        assert call_cfg["STANDUP_TEAM_MEMBERS"] == ""
+
+    @patch("scripts.standup.bb_helpers.get_open_prs")
+    def test_bitbucket_calls_standup_fetcher(self, mock_bb):
+        mock_bb.return_value = [{"id": 7, "title": "BB PR"}]
+        prs = fetch_open_prs({"DEFAULT_TRACKER": "jira", "BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "r"})
+        assert mock_bb.called
+        assert len(prs) == 1
+
+    @patch("scripts.standup.gather_gh.get_open_prs")
+    def test_label_filter_applied_for_gh(self, mock_gh):
+        mock_gh.return_value = [
+            {"number": 1, "labels": ["ready-to-merge"]},
+            {"number": 2, "labels": ["wip"]},
+        ]
+        prs = fetch_open_prs({"GH_ORG": "o", "GH_REPO": "r"}, label="ready-to-merge")
+        assert len(prs) == 1
+        assert prs[0]["number"] == 1
+
+    @patch("scripts.standup.bb_helpers.get_open_prs")
+    def test_label_filter_skipped_for_bb(self, mock_bb, capsys):
+        mock_bb.return_value = [{"id": 1}, {"id": 2}]
+        prs = fetch_open_prs({"DEFAULT_TRACKER": "jira"}, label="any-label")
+        # All PRs returned (label filter not applied for BB)
+        assert len(prs) == 2
+        out = capsys.readouterr().out
+        assert "Bitbucket" in out
+
+    @patch("scripts.standup.gather_gh.get_open_prs")
+    def test_repo_override_bare_slug_sets_org_repo(self, mock_gh):
+        mock_gh.return_value = []
+        fetch_open_prs({}, repo_override="myorg/myrepo")
+        call_cfg = mock_gh.call_args[0][0]
+        assert call_cfg["GH_ORG"] == "myorg"
+        assert call_cfg["GH_REPO"] == "myrepo"

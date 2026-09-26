@@ -664,7 +664,43 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["CONTRACT_FINDINGS"] = str(c_findings)
         ctx["CONTRACT_CRITICAL"] = str(c_critical)
 
-    sections = lane_sections  # lanes block
+    sections = lane_sections  # merge queue analysis summary (read-only, no merges)
+    queue_summary = _read_json(workspace / "queue_summary.json")
+    if queue_summary:
+        q_status = queue_summary.get("status", "UNKNOWN")
+        q_repo = queue_summary.get("repo", "")
+        q_lanes = queue_summary.get("lanes", 0)
+        q_total = queue_summary.get("total_prs", 0)
+        q_high = queue_summary.get("high_risk_prs", 0)
+        q_needs_review = queue_summary.get("needs_human_review", 0)
+        q_conflicts = queue_summary.get("conflict_lanes", 0)
+        q_emoji = "✅" if q_high == 0 else ("🔴" if q_high > 2 else "⚠️")
+        sections.append("## Merge Queue Analysis")
+        sections.append("")
+        sections.append(f"{q_emoji} **{q_total} open PRs** across **{q_lanes} scope lanes**"
+                        + (f" — repo: `{q_repo}`" if q_repo else ""))
+        sections.append("")
+        sections.append("| Metric | Value |")
+        sections.append("|--------|-------|")
+        sections.append(f"| Total open PRs | {q_total} |")
+        sections.append(f"| Scope lanes | {q_lanes} |")
+        sections.append(f"| High-risk PRs | {q_high} |")
+        sections.append(f"| Needs human review | {q_needs_review} |")
+        sections.append(f"| Conflict risk lanes | {q_conflicts} |")
+        sections.append("")
+        if q_needs_review:
+            sections.append(f"> ⚠️ {q_needs_review} PR(s) flagged for human review before merge "
+                            "(high blast-radius, failed CI, or sensitive paths detected).")
+            sections.append("")
+        if q_conflicts:
+            sections.append(f"> ⚠️ {q_conflicts} lane(s) have conflict risk — "
+                            "multiple PRs touching overlapping paths. Merge one at a time.")
+            sections.append("")
+        ctx["MQ_TOTAL"] = str(q_total)
+        ctx["MQ_HIGH_RISK"] = str(q_high)
+        ctx["MQ_NEEDS_REVIEW"] = str(q_needs_review)
+
+    sections = lane_sections  # lanes block (grouping detail from group task)
     lanes = _read_json(workspace / "lane_groups.json")
     if lanes:
         lane_list = lanes.get("lanes", [])

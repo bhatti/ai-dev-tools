@@ -65,7 +65,7 @@ def main() -> None:
     print(f"[group_by_scope] {len(lanes)} lanes: {', '.join(l['lane_id'] + '(' + str(l['pr_count']) + ')' for l in lanes)}", flush=True)
 
     fan_out_value = json.dumps([
-        {"lane_id": l["lane_id"], "prs": json.dumps([p["pr_number"] for p in l["prs"]])}
+        {"lane_id": l["lane_id"], "prs": [p["pr_number"] for p in l["prs"]]}
         for l in lanes
     ])
     print(f"::add-task-context LANE_GROUPS::{fan_out_value}", flush=True)

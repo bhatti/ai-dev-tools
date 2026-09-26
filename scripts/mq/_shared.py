@@ -308,7 +308,10 @@ def fetch_pr_stats(config: dict, pr_number: str) -> dict:
 
 
 def fetch_ready_prs(config: dict, label: str) -> list[dict]:
-    """Fetch open PRs with a label. Bitbucket has no label API — returns empty."""
+    """Fetch open PRs with a label. Bitbucket has no label API — returns empty.
+
+    Deprecated: use fetch_open_prs() with optional label filter instead.
+    """
     if resolve_tracker(config) == "bitbucket":
         print(f"[mq] warn: PR labels not supported on Bitbucket for label={label}", flush=True)
         return []
@@ -321,6 +324,71 @@ def fetch_ready_prs(config: dict, label: str) -> list[dict]:
         "--limit", "100",
     ])
     return json.loads(result.stdout) if result.stdout.strip() else []
+
+
+def _cfg_for_repo(config: dict, repo_slug_or_url: str) -> dict:
+    """Return a config copy scoped to repo_slug_or_url.
+
+    Accepts full GitHub/Bitbucket URLs (delegates to apply_repo_override)
+    or bare 'org/repo' slugs (sets tracker-appropriate fields using the
+    current DEFAULT_TRACKER to decide GH vs BB).
+    Always clears STANDUP_TEAM_MEMBERS so standup fetchers return ALL PRs,
+    not just team-filtered ones.
+
+    Also updates os.environ for any gh/bb CLI subprocesses.
+    """
+    import os
+    cfg = dict(config)
+    cfg["STANDUP_TEAM_MEMBERS"] = ""  # fetch all PRs, not just team-filtered
+    os.environ["STANDUP_TEAM_MEMBERS"] = ""
+    if not repo_slug_or_url:
+        return cfg
+    # Full URL: apply_repo_override handles both GH and BB, sets os.environ too
+    if "github.com" in repo_slug_or_url or "bitbucket.org" in repo_slug_or_url:
+        apply_repo_override(cfg, repo_slug_or_url)
+        return cfg
+    # Bare org/repo slug: set tracker-appropriate fields + os.environ
+    if "/" in repo_slug_or_url:
+        org, repo = repo_slug_or_url.split("/", 1)
+        if resolve_tracker(cfg) == "bitbucket":
+            cfg["BITBUCKET_WORKSPACE"] = org
+            cfg["BITBUCKET_REPO"] = repo
+            os.environ["BITBUCKET_WORKSPACE"] = org
+            os.environ["BITBUCKET_REPO"] = repo
+        else:
+            cfg["GH_ORG"] = org
+            cfg["GH_REPO"] = repo
+            os.environ["GH_ORG"] = org
+            os.environ["GH_REPO"] = repo
+    return cfg
+
+
+def fetch_open_prs(config: dict, label: str = "", repo_override: str = "") -> list[dict]:
+    """Fetch all open PRs without requiring a label. Reuses standup fetchers.
+
+    Works for GitHub (gather_gh.get_open_prs) and Bitbucket (bb_helpers.get_open_prs).
+    Optional label post-filters on the labels field.
+    Bitbucket does not support labels — label filter is silently skipped for BB.
+    """
+    cfg = _cfg_for_repo(config, repo_override)
+
+    if resolve_tracker(cfg) == "bitbucket":
+        from scripts.standup.bb_helpers import get_open_prs as _bb_open
+        prs = _bb_open(cfg)
+        if label:
+            print(f"[mq] info: Bitbucket does not support label filtering — ignoring label={label!r}", flush=True)
+    else:
+        from scripts.standup.gather_gh import get_open_prs as _gh_open
+        prs = _gh_open(cfg)
+        if label:
+            prs = [
+                p for p in prs
+                if label in (p.get("labels") or [])
+            ]
+
+    return prs
+
+
 
 
 def label_pr(config: dict, pr_number: str, label: str) -> None:

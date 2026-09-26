@@ -157,9 +157,6 @@ def main(pr_number: str) -> None:
     print(f"::add-task-context CHANGED_FILES::{len(files)}", flush=True)
     print(f"::add-task-context LINES_CHANGED::{total_lines}", flush=True)
 
-    label_pr(config, pr_number, f"scope:{scope}")
-    print(f"[scope_router] labeled PR with scope:{scope}", flush=True)
-
     modules = {top_level_module(f.get("path", "")) for f in files}
     if scope == "cross-scope" and len(modules) >= 3:
         print(f"[scope_router] ambiguous scope: {len(modules)} unrelated modules", flush=True)
