@@ -396,6 +396,22 @@ ALL_TESTS: list[TestCase] = [
         timeout=1800,
         required_context_keys=["TEST_STATUS"],
     ),
+    # contract-test: full formicary record→fuzz→report pipeline.
+    # Critical assertion: endpoints_scanned > 0 in contract_test_summary.json.
+    # If the cross-task artifact handoff nests recordings/ one level too deep,
+    # fuzz.py finds 0 endpoints — this test catches that exact regression.
+    TestCase(
+        name="contract-test",
+        job_type="ai-contract-test",
+        params={
+            "Service": "jeroenwillemsen/wrongsecrets:latest-no-vault",
+            "ServiceMemoryLimit": "4G",
+            "ServicePort": "8080",
+        },
+        task_type="fuzz",
+        expected_files=["contract_test_summary.json", "fuzz_result.json"],
+        timeout=2400,
+    ),
 ]
 
 
@@ -591,6 +607,41 @@ class TestResult:
     elapsed: float = 0.0
 
 
+def _verify_contract_test_summary(r: "TestResult", zf: "zipfile.ZipFile") -> None:
+    """Read contract_test_summary.json from fuzz ZIP and assert endpoints_scanned > 0.
+
+    Prints step-by-step values so the artifact handoff path is visible in the log.
+    endpoints_scanned == 0 means the recordings/ dir was not found by fuzz.py —
+    the classic symptom of the cp nesting bug (AMS pre-creates /workspace/recordings/
+    before artifact download, causing cp -R to nest to recordings/recordings/).
+    """
+    try:
+        summary_bytes = zf.read("contract_test_summary.json")
+        summary = json.loads(summary_bytes)
+    except KeyError:
+        r.errors.append("contract_test_summary.json missing from fuzz ZIP")
+        return
+    except json.JSONDecodeError as e:
+        r.errors.append(f"contract_test_summary.json is not valid JSON: {e}")
+        return
+
+    ep = summary.get("endpoints_scanned", -1)
+    iterations = summary.get("fuzz_iterations", -1)
+    status = summary.get("status", "?")
+    contract_breaking = summary.get("contract_breaking_changes", -1)
+    print(
+        f"  [contract-test] summary: endpoints_scanned={ep} fuzz_iterations={iterations} "
+        f"status={status} contract_breaking_changes={contract_breaking}",
+        flush=True,
+    )
+    if ep <= 0:
+        r.errors.append(
+            f"endpoints_scanned={ep} — fuzz.py found no endpoints. "
+            f"The recordings/ artifact was likely not copied to the right path. "
+            f"Check [fuzz] diagnostic lines above for recordings_dir/contracts_dir_exists."
+        )
+
+
 def run_test(tc: TestCase) -> TestResult:
     r = TestResult(name=tc.name)
     t0 = time.time()
@@ -639,11 +690,29 @@ def run_test(tc: TestCase) -> TestResult:
                 if not any(f == expected or f.endswith("/" + expected) for f in r.zip_files):
                     r.errors.append(f"MISSING: {expected}")
 
+            # contract-test: verify endpoints_scanned > 0 in contract_test_summary.json.
+            # Also print [fuzz] diagnostic lines so the step-by-step path is visible.
+            if tc.job_type == "ai-contract-test":
+                _verify_contract_test_summary(r, zf)
+                console = get_console_log(r.job_id, "fuzz")
+                fuzz_lines = [ln for ln in console.splitlines() if ln.startswith("[fuzz]")]
+                if fuzz_lines:
+                    print(f"  [{tc.name}] fuzz diagnostics:", flush=True)
+                    for ln in fuzz_lines:
+                        print(f"    {ln}", flush=True)
+                else:
+                    print(f"  [{tc.name}] WARNING: no [fuzz] diagnostic lines in console log", flush=True)
+                    # Print the last 30 lines so we can see what happened
+                    tail_lines = console.splitlines()[-30:]
+                    for ln in tail_lines:
+                        print(f"    {ln}", flush=True)
+
             # Extract a snippet from result/report files for display
             snippet_candidates = [
                 "reports/result.json", "reports/report.md",
                 "adhoc_result.json", "review_result.json",
                 "synthesize_result.json", "standup_brief.md",
+                "contract_test_summary.json",
             ]
             for candidate in snippet_candidates:
                 try:

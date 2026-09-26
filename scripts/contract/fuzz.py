@@ -109,7 +109,16 @@ def main() -> None:
 
     # Discover endpoints from record-task artifact recordings; probes run against the
     # live service regardless of AMS so findings are always collected.
-    endpoints = discover_endpoints(ws / "recordings")
+    recordings_dir = ws / "recordings"
+    contracts_dir = recordings_dir / "api_contracts"
+    yaml_files = list(contracts_dir.rglob("*.yaml")) if contracts_dir.exists() else []
+    print(
+        f"[fuzz] recordings_dir={recordings_dir} exists={recordings_dir.exists()} "
+        f"contracts_dir_exists={contracts_dir.exists()} yaml_count={len(yaml_files)} "
+        f"first_3={[str(f) for f in yaml_files[:3]]}",
+        flush=True,
+    )
+    endpoints = discover_endpoints(recordings_dir)
     print(f"[fuzz] discovered {len(endpoints)} endpoints: {endpoints}", flush=True)
 
     findings = run_security_probes(service_url, endpoints) if endpoints else []
