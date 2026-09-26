@@ -237,6 +237,72 @@ spec:
 """
 
 
+# Pod manifest with service sidecars — AMS does NOT mount workspace.
+# Mirrors the broken state where the YAML omits volumes: on the AMS service.
+# Used by test_40 to prove that without volume sharing, recordings are invisible
+# to the main container (0 scenario files).
+_POD_MANIFEST_WITH_SERVICES_NO_AMS_VOLUME = """\
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {name}
+  namespace: {namespace}
+  labels:
+    app: ai-dev-pod-test
+spec:
+  restartPolicy: Never
+  hostNetwork: true
+  containers:
+  - name: main
+    image: {image}
+    imagePullPolicy: Always
+    command: ["sleep", "3600"]
+    envFrom:
+    - secretRef:
+        name: ai-dev-credentials
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 200m
+      limits:
+        memory: 4Gi
+        cpu: "2"
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+  - name: wrongsecrets
+    image: jeroenwillemsen/wrongsecrets:latest-no-vault
+    imagePullPolicy: Always
+    ports:
+    - containerPort: 8080
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 200m
+      limits:
+        memory: 4Gi
+        cpu: "500m"
+  - name: api-mock-service
+    image: plexobject/api-mock-service:latest
+    imagePullPolicy: Always
+    ports:
+    - containerPort: 8081
+    - containerPort: 8082
+    command: ["/api-mock-service", "--httpPort", "8081", "--proxyPort", "8082", "--dataDir", "/tmp/ams-recordings"]
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: 100m
+      limits:
+        memory: 512Mi
+        cpu: "500m"
+    # NO volumeMounts — AMS writes recordings to /tmp (its own overlay FS),
+    # so main container's /workspace/recordings stays empty.
+  volumes:
+  - name: workspace
+    emptyDir: {{}}
+"""
+
 # Pod manifest with service sidecars — used for contract-test
 # All containers share localhost so the main container can reach services on their ports.
 _POD_MANIFEST_WITH_SERVICES = """\
@@ -278,24 +344,15 @@ spec:
         memory: 256Mi
         cpu: 200m
       limits:
-        memory: 1Gi
+        memory: 4Gi
         cpu: "500m"
-    volumeMounts:
-    - name: workspace
-      mountPath: /workspace
   - name: api-mock-service
     image: plexobject/api-mock-service:latest
     imagePullPolicy: Always
     ports:
     - containerPort: 8081
     - containerPort: 8082
-    args:
-    - "--httpPort"
-    - "8081"
-    - "--proxyPort"
-    - "8082"
-    - "--dataDir"
-    - "/workspace/recordings"
+    command: ["/api-mock-service", "--httpPort", "8081", "--proxyPort", "8082", "--dataDir", "/workspace/recordings"]
     resources:
       requests:
         memory: 128Mi
@@ -4373,6 +4430,207 @@ curl -sf http://localhost:9999/ || echo server-check-failed""",
         )
 
 
+def test_40_contract_volume_isolation(base_env: dict[str, str]) -> TestResult:
+    """Regression test: WITHOUT workspace volume on the AMS container, recordings are
+    invisible to the main container → 0 scenario files.
+
+    This mirrors the broken state before the YAML volume fix.  The test uses
+    _POD_MANIFEST_WITH_SERVICES_NO_AMS_VOLUME where AMS does NOT mount /workspace,
+    so AMS writes to its own overlay filesystem.
+
+    The test PASSES when it correctly detects 0 scenario files (the expected broken
+    behaviour).  If it were to find >0 files that would mean AMS shared the workspace
+    somehow, which would be a false negative for the regression check.
+
+    This test validates that our pod test infrastructure can actually catch the bug.
+    """
+    result = TestResult("contract-volume-isolation")
+
+    name = f"ai-dev-contract-vol-{__import__('uuid').uuid4().hex[:6]}"
+    print(f"\n  [pod] creating {name} with AMS NOT mounting workspace ...", flush=True)
+    _create_pod(name, image=IMAGE, manifest_template=_POD_MANIFEST_WITH_SERVICES_NO_AMS_VOLUME)
+    try:
+        _copy_scripts(name)
+        env = dict(base_env)
+        env["WORKSPACE_DIR"] = "/workspace"
+        env["SERVICE_PORT"] = "8080"
+        env["MOCK_SERVICE_PORT"] = "8081"
+        env["PROXY_PORT"] = "8082"
+        env.pop("SLACK_BOT_TOKEN", None)
+        env["SLACK_BOT_TOKEN"] = ""
+
+        # Wait for services (WrongSecrets JVM takes 30-90s)
+        wait_step = exec_step(
+            name, "wait-services",
+            "python3 -c '"
+            "from scripts.contract._shared import wait_for_service; "
+            "ok1 = wait_for_service(\"http://localhost:8081/_health\", \"ams\", retries=30); "
+            "ok2 = wait_for_service(\"http://localhost:8080\", \"wrongsecrets\", retries=45, delay=2.0); "
+            "print(\"ams_ready=\" + str(ok1) + \" svc_ready=\" + str(ok2))"
+            "'",
+            env, timeout=120,
+        )
+        result.steps.append(wait_step)
+        if not wait_step.ok:
+            return _fail(result, wait_step, "services did not start")
+
+        record_step = exec_step(name, "record", "python -m scripts.contract.record", env, timeout=90)
+        result.steps.append(record_step)
+        if not record_step.ok:
+            return _fail(result, record_step, f"record failed: {record_step.stderr[-400:]}")
+
+        check_step = exec_step(
+            name, "check-isolation",
+            "python3 -c '"
+            "import glob, json; "
+            "r = json.load(open(\"/workspace/record_result.json\")); "
+            "n = len(glob.glob(\"/workspace/recordings/**/*.yaml\", recursive=True)); "
+            "print(\"proxy_used=\" + str(r[\"proxy_used\"]) + \" scenario_files=\" + str(n)); "
+            # proxy_used=True (AMS health was reachable, probing happened) but
+            # 0 scenario files in main container because workspace is NOT shared with AMS.
+            "assert r[\"proxy_used\"], \"proxy_used must be True (AMS health check passed)\"; "
+            "assert n == 0, f\"Expected 0 scenario files when workspace not shared with AMS, got {n}\""
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(check_step)
+        if not check_step.ok:
+            return _fail(result, check_step,
+                         f"volume isolation check failed: {check_step.stderr[-300:]}")
+
+        return _pass(result, "volume-isolation=confirmed proxy_used=True scenario_files=0")
+    finally:
+        print(f"  [pod] deleting {name} ...", flush=True)
+        _delete_pod(name)
+
+
+def test_41_contract_artifact_handoff(base_env: dict[str, str]) -> TestResult:
+    """Two-pod pipeline test that mirrors the formicary record→fuzz task handoff.
+
+    Validates the full artifact-transfer path:
+      Pod 1 (record pod, workspace shared with AMS):
+        - runs record.py → AMS writes recordings to /workspace/recordings
+        - copies recordings out of pod to a local temp dir
+
+      Pod 2 (fuzz pod, no AMS, just main container):
+        - injects the recordings from the temp dir
+        - runs fuzz.py
+        - asserts endpoints > 0 and fuzz runs correctly
+
+    This is the definitive test that the cross-task artifact handoff works.
+    If this fails, the e2e job will produce 0 endpoints regardless of volume fixes.
+    """
+    import subprocess
+    import tempfile
+    import os as _os
+
+    result = TestResult("contract-artifact-handoff")
+
+    # ── Pod 1: record ──────────────────────────────────────────────────────────
+    with pod_fixture_with_services("contract-rec") as rec_pod:
+        env = dict(base_env)
+        env["WORKSPACE_DIR"] = "/workspace"
+        env["SERVICE_PORT"] = "8080"
+        env["MOCK_SERVICE_PORT"] = "8081"
+        env["PROXY_PORT"] = "8082"
+        env.pop("SLACK_BOT_TOKEN", None)
+        env["SLACK_BOT_TOKEN"] = ""
+
+        record_step = exec_step(rec_pod, "record", "python -m scripts.contract.record",
+                                env, timeout=90)
+        result.steps.append(record_step)
+        if not record_step.ok:
+            return _fail(result, record_step, f"record pod failed: {record_step.stderr[-400:]}")
+
+        # Verify recordings were written to shared workspace
+        count_step = exec_step(
+            rec_pod, "count-recordings",
+            "python3 -c '"
+            "import glob; "
+            "n = len(glob.glob(\"/workspace/recordings/**/*.yaml\", recursive=True)); "
+            "print(\"::add-task-context SCENARIO_FILES::\" + str(n)); "
+            "assert n > 0, f\"record pod: expected >0 scenario files, got {n}\""
+            "'",
+            env, timeout=10,
+        )
+        result.steps.append(count_step)
+        if not count_step.ok:
+            return _fail(result, count_step, "record pod: 0 scenario files after recording")
+        rec_ctx = _parse_context(count_step.stdout)
+        scenario_files = rec_ctx.get("SCENARIO_FILES", "0")
+
+        # Copy recordings from record pod to local temp dir (simulates artifact upload)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cp_out = subprocess.run(
+                ["kubectl", "-n", NAMESPACE, "cp",
+                 f"{rec_pod}:/workspace/recordings", f"{tmpdir}/recordings",
+                 "-c", "main"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if cp_out.returncode != 0:
+                step = StepResult("kubectl-cp-out", False, cp_out.stdout, cp_out.stderr, 0)
+                result.steps.append(step)
+                return _fail(result, step, f"kubectl cp out failed: {cp_out.stderr}")
+
+            yaml_files = len([f for f in _os.walk(f"{tmpdir}/recordings")
+                              for fn in f[2] if fn.endswith(".yaml")])
+            print(f"    [handoff] copied {yaml_files} YAML files from record pod", flush=True)
+
+            # ── Pod 2: fuzz (no AMS — uses downloaded recordings only) ──────────
+            with pod_fixture("contract-fuzz") as fuzz_pod:
+                env2 = dict(base_env)
+                env2["WORKSPACE_DIR"] = "/workspace"
+                env2["SERVICE_PORT"] = "8080"
+                env2["MOCK_SERVICE_PORT"] = "8081"  # AMS not running → fuzz skips replay
+                env2.pop("SLACK_BOT_TOKEN", None)
+                env2["SLACK_BOT_TOKEN"] = ""
+
+                # Inject recordings into fuzz pod (simulates artifact download)
+                cp_in = subprocess.run(
+                    ["kubectl", "-n", NAMESPACE, "cp",
+                     f"{tmpdir}/recordings", f"{fuzz_pod}:/workspace/recordings",
+                     "-c", "main"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if cp_in.returncode != 0:
+                    step = StepResult("kubectl-cp-in", False, cp_in.stdout, cp_in.stderr, 0)
+                    result.steps.append(step)
+                    return _fail(result, step, f"kubectl cp in failed: {cp_in.stderr}")
+
+                fuzz_step = exec_step(fuzz_pod, "fuzz", "python -m scripts.contract.fuzz",
+                                     env2, timeout=120)
+                result.steps.append(fuzz_step)
+                if not fuzz_step.ok:
+                    return _fail(result, fuzz_step, f"fuzz pod failed: {fuzz_step.stderr[-400:]}")
+
+                verify_step = exec_step(
+                    fuzz_pod, "verify-fuzz",
+                    "python3 -c '"
+                    "import json; "
+                    "s = json.load(open(\"/workspace/contract_test_summary.json\")); "
+                    "ep = s[\"endpoints_scanned\"]; "
+                    "print(\"::add-task-context ENDPOINTS::\" + str(ep)); "
+                    "print(\"::add-task-context ITERATIONS::\" + str(s[\"fuzz_iterations\"])); "
+                    "print(\"::add-task-context STATUS::\" + s[\"status\"]); "
+                    "assert ep > 0, \"fuzz pod: expected >0 endpoints after artifact handoff, got \" + str(ep)"
+                    "'",
+                    env2, timeout=10,
+                )
+                result.steps.append(verify_step)
+                if not verify_step.ok:
+                    return _fail(result, verify_step,
+                                 f"artifact handoff produced 0 endpoints: {verify_step.stderr[-300:]}")
+                fuzz_ctx = _parse_context(verify_step.stdout)
+
+                return _pass(
+                    result,
+                    f"scenario_files={scenario_files} "
+                    f"endpoints={fuzz_ctx.get('ENDPOINTS','?')} "
+                    f"iterations={fuzz_ctx.get('ITERATIONS','?')} "
+                    f"status={fuzz_ctx.get('STATUS','?')}"
+                )
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -4415,6 +4673,8 @@ ALL_TESTS: dict[str, callable] = {
     "gate-check-logic":       test_37_gate_check_logic,
     "contract-test":          test_38_contract_test,
     "fuzz-sqli-detection":    test_39_fuzz_sqli_detection,
+    "contract-volume-isolation": test_40_contract_volume_isolation,
+    "contract-artifact-handoff": test_41_contract_artifact_handoff,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
