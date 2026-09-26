@@ -177,6 +177,7 @@ class TestCase:
     requires: list[str] = field(default_factory=list)  # env vars that must be set; skip if missing
     required_context_keys: list[str] = field(default_factory=list)  # task context keys that must be present after completion
     cron: bool = False              # if True, trigger existing PENDING cron job instead of submitting
+    verify_fn: Any = None           # optional (TestResult, zipfile.ZipFile) -> None for extra assertions
 
     def id(self) -> str:
         return self.name.lower().replace(" ", "-").replace("/", "-")
@@ -411,6 +412,8 @@ ALL_TESTS: list[TestCase] = [
         task_type="fuzz",
         expected_files=["contract_test_summary.json", "fuzz_result.json"],
         timeout=2400,
+        # Lambda defers resolution: _verify_contract_test_summary is defined below run_test.
+        verify_fn=lambda r, zf: _verify_contract_test_summary(r, zf),
     ),
 ]
 
@@ -608,16 +611,13 @@ class TestResult:
 
 
 def _verify_contract_test_summary(r: "TestResult", zf: "zipfile.ZipFile") -> None:
-    """Read contract_test_summary.json from fuzz ZIP and assert endpoints_scanned > 0.
+    """Assert endpoints_scanned > 0 and print fuzz diagnostics.
 
-    Prints step-by-step values so the artifact handoff path is visible in the log.
-    endpoints_scanned == 0 means the recordings/ dir was not found by fuzz.py —
-    the classic symptom of the cp nesting bug (AMS pre-creates /workspace/recordings/
-    before artifact download, causing cp -R to nest to recordings/recordings/).
+    endpoints_scanned == 0 means fuzz.py found no recordings — the classic symptom of the
+    artifact cp nesting bug or missing `cd` into WorkingDirectory.
     """
     try:
-        summary_bytes = zf.read("contract_test_summary.json")
-        summary = json.loads(summary_bytes)
+        summary = json.loads(zf.read("contract_test_summary.json"))
     except KeyError:
         r.errors.append("contract_test_summary.json missing from fuzz ZIP")
         return
@@ -626,19 +626,30 @@ def _verify_contract_test_summary(r: "TestResult", zf: "zipfile.ZipFile") -> Non
         return
 
     ep = summary.get("endpoints_scanned", -1)
-    iterations = summary.get("fuzz_iterations", -1)
-    status = summary.get("status", "?")
-    contract_breaking = summary.get("contract_breaking_changes", -1)
     print(
-        f"  [contract-test] summary: endpoints_scanned={ep} fuzz_iterations={iterations} "
-        f"status={status} contract_breaking_changes={contract_breaking}",
+        f"  [contract-test] summary: endpoints_scanned={ep} "
+        f"fuzz_iterations={summary.get('fuzz_iterations', -1)} "
+        f"status={summary.get('status', '?')} "
+        f"contract_breaking_changes={summary.get('contract_breaking_changes', -1)}",
         flush=True,
     )
+
+    # Print [fuzz] diagnostic lines from the console log so the artifact path is visible.
+    console = get_console_log(r.job_id, "fuzz")
+    fuzz_lines = [ln for ln in console.splitlines() if ln.startswith("[fuzz]")]
+    if fuzz_lines:
+        print(f"  [contract-test] fuzz diagnostics:", flush=True)
+        for ln in fuzz_lines:
+            print(f"    {ln}", flush=True)
+    else:
+        print(f"  [contract-test] WARNING: no [fuzz] lines in console log", flush=True)
+        for ln in console.splitlines()[-20:]:
+            print(f"    {ln}", flush=True)
+
     if ep <= 0:
         r.errors.append(
             f"endpoints_scanned={ep} — fuzz.py found no endpoints. "
-            f"The recordings/ artifact was likely not copied to the right path. "
-            f"Check [fuzz] diagnostic lines above for recordings_dir/contracts_dir_exists."
+            "Check [fuzz] diagnostics above for recordings_dir/contracts_dir_exists."
         )
 
 
@@ -690,22 +701,9 @@ def run_test(tc: TestCase) -> TestResult:
                 if not any(f == expected or f.endswith("/" + expected) for f in r.zip_files):
                     r.errors.append(f"MISSING: {expected}")
 
-            # contract-test: verify endpoints_scanned > 0 in contract_test_summary.json.
-            # Also print [fuzz] diagnostic lines so the step-by-step path is visible.
-            if tc.job_type == "ai-contract-test":
-                _verify_contract_test_summary(r, zf)
-                console = get_console_log(r.job_id, "fuzz")
-                fuzz_lines = [ln for ln in console.splitlines() if ln.startswith("[fuzz]")]
-                if fuzz_lines:
-                    print(f"  [{tc.name}] fuzz diagnostics:", flush=True)
-                    for ln in fuzz_lines:
-                        print(f"    {ln}", flush=True)
-                else:
-                    print(f"  [{tc.name}] WARNING: no [fuzz] diagnostic lines in console log", flush=True)
-                    # Print the last 30 lines so we can see what happened
-                    tail_lines = console.splitlines()[-30:]
-                    for ln in tail_lines:
-                        print(f"    {ln}", flush=True)
+            # Run any test-specific extra assertions.
+            if tc.verify_fn is not None:
+                tc.verify_fn(r, zf)
 
             # Extract a snippet from result/report files for display
             snippet_candidates = [
