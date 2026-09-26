@@ -233,14 +233,33 @@ def main() -> None:
         probe_type_names += ["XSS", "oversized-payload"]
     if any(f.get("cred_leak") for f in findings):
         probe_type_names.append("credential-exposure")
+
+    # Per-probe-type result counts for the report.
+    probe_results: dict[str, dict] = {}
+    for f in findings:
+        probe = f.get("probe", "")
+        ptype = probe.split(":")[0] if ":" in probe else probe
+        if ptype not in probe_results:
+            probe_results[ptype] = {"count": 0, "critical": 0}
+        probe_results[ptype]["count"] += 1
+        if f.get("severity") == "critical":
+            probe_results[ptype]["critical"] += 1
+
     summary = {
         "pr_number": os.environ.get("PR_NUMBER", ""),
         "contract_breaking_changes": contract_resp.get("failed", 0),
+        "contract_replay": {
+            "succeeded": contract_resp.get("succeeded", 0),
+            "failed": contract_resp.get("failed", 0),
+            "ams_used": ams_ready,
+        },
         "fuzz_iterations": iterations,
         "fuzz_findings": len(findings),
         "critical_findings": critical,
         "endpoints_scanned": len(capped),
+        "endpoints": [{"method": m, "path": p} for m, p in capped],
         "probe_types": probe_type_names,
+        "probe_results": probe_results,
         "status": status,
     }
     (ws / "contract_test_summary.json").write_text(json.dumps(summary, indent=2))

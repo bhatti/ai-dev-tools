@@ -557,27 +557,109 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
     sections = test_sections  # contract-test block
     contract = _read_json(workspace / "contract_test_summary.json")
+    fuzz_detail = _read_json(workspace / "fuzz_result.json")
     if contract:
         c_status = contract.get("status", "?")
         c_iters = contract.get("fuzz_iterations", 0)
         c_findings = contract.get("fuzz_findings", 0)
         c_critical = contract.get("critical_findings", 0)
         c_breaking = contract.get("contract_breaking_changes", 0)
-        status_emoji = "✅" if c_status == "PASS" else "❌"
-        c_endpoints = contract.get("endpoints_scanned", 0)
+        c_endpoints_list = contract.get("endpoints", [])
+        c_endpoints = contract.get("endpoints_scanned", len(c_endpoints_list))
         c_probes = contract.get("probe_types", [])
-        sections.append("## Contract + Fuzz Results")
+        c_probe_results = contract.get("probe_results", {})
+        replay = contract.get("contract_replay", {})
+
+        sections.append("## Contract + Fuzz Security Testing")
         sections.append("")
-        sections.append("| Field | Value |")
-        sections.append("|-------|-------|")
-        sections.append(f"| Status | {status_emoji} **{c_status}** |")
-        sections.append(f"| Endpoints scanned | {c_endpoints} |")
-        sections.append(f"| Fuzz iterations | {c_iters} |")
-        sections.append(f"| Security findings | {c_findings} ({c_critical} critical) |")
-        sections.append(f"| Contract breaking changes | {c_breaking} |")
-        if c_probes:
-            sections.append(f"| Probe types | {', '.join(c_probes)} |")
+
+        # Overall status banner
+        if c_status == "PASS":
+            sections.append(f"✅ **PASS** — {c_endpoints} endpoints probed, "
+                            f"{c_iters} security probes fired, 0 vulnerabilities found")
+        else:
+            sections.append(f"❌ **FAIL** — {c_critical} critical vulnerabilities detected "
+                            f"across {c_endpoints} endpoints ({c_iters} probes, "
+                            f"{c_findings} findings)")
         sections.append("")
+
+        # AMS contract replay results
+        ams_used = replay.get("ams_used", False)
+        replay_passed = replay.get("succeeded", 0)
+        # fall back to top-level contract_breaking_changes for pre-replay-block files
+        replay_failed = replay.get("failed", c_breaking)
+        sections.append("### Contract Replay (api-mock-service)")
+        sections.append("")
+        sections.append("Replays recorded HTTP interactions against the live service to detect "
+                        "breaking changes — response shape, status code, or field regressions "
+                        "that would break downstream consumers.")
+        sections.append("")
+        sections.append("| Metric | Value |")
+        sections.append("|--------|-------|")
+        sections.append(f"| AMS active | {'✅ yes' if ams_used else '❌ no'} |")
+        sections.append(f"| Scenarios replayed | {replay_passed + replay_failed} |")
+        sections.append(f"| Passed | {replay_passed} |")
+        sections.append(f"| Breaking changes | {replay_failed} |")
+        sections.append("")
+
+        # Security probes breakdown
+        sections.append("### Security Probe Results")
+        sections.append("")
+        sections.append("Each endpoint is probed with injection payloads that real attackers use. "
+                        "A finding means the service returned a 5xx error, leaked SQL error text, "
+                        "exposed a stack trace, or revealed credentials in the response body.")
+        sections.append("")
+        _PROBE_DESCS = {
+            "SQLi": "SQL injection (`' OR '1'='1`) — detects unsanitised query parameters",
+            "path-traversal": "Path traversal (`../../etc/passwd`) — detects unsanitised file paths",
+            "XSS": "Cross-site scripting (`<script>alert(1)</script>`) — detects reflected input",
+            "oversized-payload": "5 000-char payload — detects missing input length validation",
+            "credential-exposure": "Response body scan for secrets / env-var leaks via diagnostic endpoints",
+        }
+        sections.append("| Probe type | What it tests | Findings |")
+        sections.append("|------------|---------------|----------|")
+        for ptype in (c_probes or list(_PROBE_DESCS.keys())):
+            desc = _PROBE_DESCS.get(ptype, ptype)
+            pr = c_probe_results.get(ptype, {})
+            n = pr.get("count", 0)
+            crit = pr.get("critical", 0)
+            result = f"✅ 0" if n == 0 else f"⚠️ {n} ({crit} critical)"
+            sections.append(f"| **{ptype}** | {desc} | {result} |")
+        sections.append("")
+
+        # Endpoint inventory
+        if c_endpoints_list:
+            sections.append("### Endpoints Tested")
+            sections.append("")
+            sections.append(f"Discovered {len(c_endpoints_list)} endpoints from recorded "
+                            "API traffic (api-mock-service recording proxy):")
+            sections.append("")
+            sections.append("| Method | Path |")
+            sections.append("|--------|------|")
+            for ep in c_endpoints_list[:30]:
+                sections.append(f"| `{ep.get('method','?')}` | `{ep.get('path','?')}` |")
+            if len(c_endpoints_list) > 30:
+                sections.append(f"| … | {len(c_endpoints_list) - 30} more endpoints |")
+            sections.append("")
+
+        # Detailed findings (if any)
+        detail_findings = (fuzz_detail or {}).get("findings", [])
+        if detail_findings:
+            sections.append("### Findings Detail")
+            sections.append("")
+            sections.append("| Severity | Probe | HTTP Status | SQLi leak | Stack trace | Cred leak |")
+            sections.append("|----------|-------|-------------|-----------|-------------|-----------|")
+            for f in detail_findings[:20]:
+                sev = f.get("severity", "medium")
+                sev_emoji = "🔴" if sev == "critical" else "🟡"
+                sections.append(
+                    f"| {sev_emoji} {sev} | `{f.get('probe','')}` | {f.get('status','')} "
+                    f"| {'✅' if f.get('sqli_leak') else '—'} "
+                    f"| {'✅' if f.get('stack_leak') else '—'} "
+                    f"| {'✅' if f.get('cred_leak') else '—'} |"
+                )
+            sections.append("")
+
         ctx["CONTRACT_STATUS"] = c_status
         ctx["CONTRACT_FINDINGS"] = str(c_findings)
         ctx["CONTRACT_CRITICAL"] = str(c_critical)
