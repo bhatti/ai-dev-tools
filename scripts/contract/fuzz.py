@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -88,9 +90,91 @@ def _write_junit(ws: Path, findings: list[dict], iterations: int) -> None:
     (ws / "fuzz_results.xml").write_bytes(xml)
 
 
+def _debug_filesystem(ws: Path) -> None:
+    """Dump filesystem diagnostics to stdout to help trace artifact copy issues."""
+    print("[fuzz-debug] ===== FILESYSTEM DIAGNOSTICS =====", flush=True)
+
+    # 1. Show working dir and /workspace top-level
+    try:
+        cwd = os.getcwd()
+        print(f"[fuzz-debug] CWD={cwd}", flush=True)
+    except Exception as e:
+        print(f"[fuzz-debug] CWD error: {e}", flush=True)
+
+    for top in [ws, Path("/workspace"), Path("/")]:
+        if top.exists():
+            try:
+                children = sorted(top.iterdir())
+                st = top.stat()
+                mode = stat.filemode(st.st_mode)
+                print(
+                    f"[fuzz-debug] ls {top}/ (uid={st.st_uid} mode={mode}): "
+                    f"{[c.name for c in children[:20]]}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[fuzz-debug] ls {top} error: {e}", flush=True)
+        else:
+            print(f"[fuzz-debug] {top} does NOT exist", flush=True)
+
+    # 2. Find ALL yaml files anywhere under /workspace and /recordings (wrong-path canary)
+    for search_root in ["/workspace", "/recordings", "/tmp"]:
+        try:
+            r = subprocess.run(
+                ["find", search_root, "-name", "*.yaml", "-type", "f"],
+                capture_output=True, text=True, timeout=10,
+            )
+            lines = [l for l in r.stdout.splitlines() if l.strip()]
+            print(
+                f"[fuzz-debug] yaml files under {search_root}: {len(lines)} files "
+                f"first_3={lines[:3]}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[fuzz-debug] find {search_root} error: {e}", flush=True)
+
+    # 3. Permission / ownership of critical directories
+    for check in [
+        ws / "recordings",
+        ws / "recordings" / "api_contracts",
+        Path("/workspace/recordings"),
+        Path("/workspace/recordings/api_contracts"),
+        Path("/recordings"),
+        Path("/recordings/api_contracts"),
+    ]:
+        if check.exists():
+            try:
+                st = check.stat()
+                mode = stat.filemode(st.st_mode)
+                children = list(check.iterdir())
+                print(
+                    f"[fuzz-debug] {check}: uid={st.st_uid} gid={st.st_gid} mode={mode} "
+                    f"children={[c.name for c in children[:10]]}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[fuzz-debug] stat {check} error: {e}", flush=True)
+        else:
+            print(f"[fuzz-debug] {check}: does NOT exist", flush=True)
+
+    # 4. Check the formicary extracted-artifacts dir (under /tmp)
+    try:
+        r = subprocess.run(
+            ["find", "/tmp", "-path", "*/extracted-artifacts*", "-maxdepth", "8"],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        print(f"[fuzz-debug] extracted-artifacts paths: {lines[:10]}", flush=True)
+    except Exception as e:
+        print(f"[fuzz-debug] find extracted-artifacts error: {e}", flush=True)
+
+    print("[fuzz-debug] ===== END DIAGNOSTICS =====", flush=True)
+
+
 def main() -> None:
     config = load_config(required=[])
     ws = get_workspace_dir(config)
+    _debug_filesystem(ws)
     service_port = os.environ.get("SERVICE_PORT", "8080")
     mock_port = os.environ.get("MOCK_SERVICE_PORT", "8081")
     service_url = os.environ.get("SERVICE_URL", "").strip() or f"http://localhost:{service_port}"
