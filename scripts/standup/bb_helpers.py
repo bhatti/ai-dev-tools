@@ -38,12 +38,17 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
     team_filter = [m.strip().lower() for m in raw_team.split(",") if m.strip()]
 
     url = f"{_BASE}/repositories/{ws}/{repo}/pullrequests"
+    # Server-side filter by destination branch when set — avoids fetching all pages
+    # just to post-filter. BB REST supports: q=destination.branch.name="branch"
+    base_params: dict = {"state": "OPEN", "pagelen": 50}
+    if target_branch:
+        base_params["q"] = f'destination.branch.name="{target_branch}"'
     prs: list[dict] = []
     for _ in range(5):          # max 5 pages = 250 PRs
         resp = requests.get(
             url,
             auth=_auth(config),
-            params={"state": "OPEN", "pagelen": 50},
+            params=base_params,
             timeout=30,
         )
         if not resp.ok:

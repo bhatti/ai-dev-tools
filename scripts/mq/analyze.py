@@ -47,7 +47,7 @@ _ANALYZE_PROMPT = """\
 Analyze the merge queue using the instructions below.
 
 ## Skill Instructions
-{skill_instructions}
+__SKILL_INSTRUCTIONS__
 
 ## Pre-computed PR Data Schema
 The following files are in /workspace — read them directly:
@@ -60,15 +60,15 @@ The following files are in /workspace — read them directly:
   ci_status (success|failed|pending|none), has_approval, url, labels
 
 /workspace/lane_groups.json fields per lane:
-  lane_id ({canonical_branch}/{risk_tier} OR stacked/{feature_branch}),
-  pr_count, category_counts (dict), hotspots (list of categories with ≥3 bug PRs), prs
+  lane_id ("{canonical_branch}/{risk_tier}" OR "stacked/{feature_branch}"),
+  pr_count, category_counts (dict), hotspots (list of categories with >=3 bug PRs), prs
 
 IMPORTANT: Do NOT re-derive blast_radius or category — these are pre-computed from actual
 file paths via diffstat API calls. Use them directly as ground truth.
 Only flag category_confidence="unknown" PRs as having uncertain classification.
 
 Follow the skill steps exactly. Write your findings to /workspace/queue_summary.json:
-{{
+{
   "status": "DONE",
   "repo": "<from ready_prs.json>",
   "total_prs": N,
@@ -77,12 +77,12 @@ Follow the skill steps exactly. Write your findings to /workspace/queue_summary.
   "needs_human_review": N,
   "conflict_lanes": N,
   "hotspots": ["category1", ...],
-  "category_distribution": {{"security": N, "api": N, ...}},
-  "by_branch": {{
-    "<branch>": {{"prs": N, "lanes": N}},
+  "category_distribution": {"security": N, "api": N, ...},
+  "by_branch": {
+    "<branch>": {"prs": N, "lanes": N},
     ...
-  }}
-}}
+  }
+}
 """
 
 _ANALYZE_PROMPT_FALLBACK = """\
@@ -102,7 +102,7 @@ For each lane:
 5. Group canonical lanes by target branch, count PRs and lanes per branch
 
 Write /workspace/queue_summary.json:
-{{
+{
   "status": "DONE",
   "repo": "<from ready_prs.json>",
   "total_prs": N,
@@ -111,9 +111,9 @@ Write /workspace/queue_summary.json:
   "needs_human_review": N,
   "conflict_lanes": 0,
   "hotspots": ["category1", ...],
-  "category_distribution": {{"security": N, "api": N, ...}},
-  "by_branch": {{"<branch>": {{"prs": N, "lanes": N}}, ...}}
-}}
+  "category_distribution": {"security": N, "api": N, ...},
+  "by_branch": {"<branch>": {"prs": N, "lanes": N}, ...}
+}
 """
 
 
@@ -149,7 +149,7 @@ def main(skill: str) -> None:
     print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
 
     if skill_md:
-        prompt = _ANALYZE_PROMPT.format(skill_instructions=skill_md)
+        prompt = _ANALYZE_PROMPT.replace("__SKILL_INSTRUCTIONS__", skill_md)
     else:
         print(f"[mq-analyze] warn: skill {skill!r} not found — using fallback prompt", flush=True)
         prompt = _ANALYZE_PROMPT_FALLBACK

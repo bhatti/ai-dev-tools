@@ -161,7 +161,8 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
     Neither returns files/additions/deletions — blast_radius defaults to 'low'.
     scope_router.py does authoritative per-PR file analysis downstream.
     """
-    pr_number = pr.get("number") or pr.get("id") or 0
+    n = pr.get("number")
+    pr_number = n if n is not None else pr.get("id", 0)
 
     # age_hours already computed by both standup fetchers; fall back to timestamp parse
     age_hours = pr.get("age_hours") or _compute_age_hours(
