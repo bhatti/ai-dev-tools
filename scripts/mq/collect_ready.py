@@ -76,6 +76,7 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         "author": author_login,
         "age_hours": round(float(age_hours), 1),
         "branch": pr.get("headRefName", "") or pr.get("branch", ""),
+        "target_branch": pr.get("target_branch", "") or pr.get("baseRefName", ""),
         "ci_status": ci_status,
         "has_approval": bool(has_approval),
         "url": pr.get("url", ""),

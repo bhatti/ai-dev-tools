@@ -82,7 +82,6 @@ def main(skill: str) -> None:
     validate_claude_config(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "reports").mkdir(parents=True, exist_ok=True)
 
     lane_path = workspace / "lane_groups.json"
     ready_path = workspace / "ready_prs.json"

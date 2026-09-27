@@ -75,6 +75,7 @@ def get_open_prs(config: dict) -> list[dict]:
                 "title": pr.get("title", ""),
                 "author": author,
                 "branch": pr.get("source", {}).get("branch", {}).get("name", ""),
+                "target_branch": pr.get("destination", {}).get("branch", {}).get("name", ""),
                 "created": created,
                 "age_hours": round(age_hours, 1),
                 "reviewers": reviewers,

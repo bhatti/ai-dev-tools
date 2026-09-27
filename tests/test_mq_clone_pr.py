@@ -160,7 +160,7 @@ class TestTrackerOverrideFromRepoUrl:
     """Regression: DEFAULT_TRACKER=jira must not override an explicit --repo GitHub URL.
 
     Bug: with DEFAULT_TRACKER=jira, resolve_tracker() returned "bitbucket", so
-    clone_by_tracker cloned cribl/cribl (~3872 Node.js tests) instead of the
+    clone_by_tracker cloned the Bitbucket repo (~3872 Node.js tests) instead of the
     GitHub repo passed via --repo, causing project_type=node for a Go project.
     """
 

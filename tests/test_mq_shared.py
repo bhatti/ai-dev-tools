@@ -32,8 +32,8 @@ class TestResolveTracker:
 
     # URL-override tests: repo_url takes priority over DEFAULT_TRACKER config.
     # Root cause of the Go-project-runs-npx bug: DEFAULT_TRACKER=jira caused
-    # clone_by_tracker to clone the Bitbucket repo (cribl/cribl, ~3872 Node.js
-    # tests) instead of the GitHub repo specified via --repo.
+    # clone_by_tracker to clone the Bitbucket repo (~3872 Node.js tests)
+    # instead of the GitHub repo specified via --repo.
     def test_github_url_overrides_jira_config(self):
         cfg = {"DEFAULT_TRACKER": "jira"}
         assert resolve_tracker(cfg, repo_url="https://github.com/bhatti/formicary") == "github"

@@ -30,8 +30,8 @@ class TestGroupByScope:
         assert out["lane_count"] == 2
         assert out["total_prs"] == 4
         lane_ids = {l["lane_id"] for l in out["lanes"]}
-        assert "billing" in lane_ids
-        assert "auth" in lane_ids
+        assert any("billing" in lid for lid in lane_ids)
+        assert any("auth" in lid for lid in lane_ids)
 
     def test_cross_scope_goes_to_default(self, tmp_workspace):
         ready_data = {
@@ -49,8 +49,8 @@ class TestGroupByScope:
 
         out = json.loads((tmp_workspace / "lane_groups.json").read_text())
         lane_ids = {l["lane_id"] for l in out["lanes"]}
-        assert "default" in lane_ids
-        assert "billing" in lane_ids
+        assert any("default" in lid for lid in lane_ids)
+        assert any("billing" in lid for lid in lane_ids)
 
     def test_missing_ready_prs_exits(self, tmp_workspace):
         runner = CliRunner()
@@ -73,6 +73,6 @@ class TestGroupByScope:
         assert result.exit_code == 0
 
         out = json.loads((tmp_workspace / "lane_groups.json").read_text())
-        billing_lane = next(l for l in out["lanes"] if l["lane_id"] == "billing")
+        billing_lane = next(l for l in out["lanes"] if "billing" in l["lane_id"])
         ages = [p["age_hours"] for p in billing_lane["prs"]]
         assert ages == sorted(ages, reverse=True)

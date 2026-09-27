@@ -129,7 +129,7 @@ def get_open_prs(config: dict) -> list[dict]:
             "-R", f"{org}/{repo}",
             "--state", "open",
             "--limit", "100",
-            "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName,labels,statusCheckRollup",
+            "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName,baseRefName,labels,statusCheckRollup",
         ])
     except subprocess.CalledProcessError as e:
         print(f"[gather_gh] gh pr list failed (exit {e.returncode}): {e.stderr}", file=sys.stderr, flush=True)
@@ -189,6 +189,7 @@ def get_open_prs(config: dict) -> list[dict]:
             "ci_status": _compute_gh_ci_status(pr.get("statusCheckRollup") or []),
             "url": pr.get("url", ""),
             "branch": pr.get("headRefName", ""),
+            "target_branch": pr.get("baseRefName", ""),
             "labels": [lbl["name"] for lbl in pr.get("labels", []) if isinstance(lbl, dict)],
         })
     return prs

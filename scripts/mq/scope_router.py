@@ -19,7 +19,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, label_pr, parse_pr_ref, repo_slug, top_level_module
+from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, parse_pr_ref, repo_slug, top_level_module
 
 _CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
 

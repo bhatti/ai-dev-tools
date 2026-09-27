@@ -3814,15 +3814,17 @@ def test_42_mq_collect_group(base_env: dict[str, str]) -> TestResult:
         # --- Sub-case 2: BB — inject fixture ready_prs.json, run group_by_scope ---
         bb_env = dict(env)
         bb_env["DEFAULT_TRACKER"] = "bitbucket"
-        bb_env["BITBUCKET_WORKSPACE"] = "cribl"
-        bb_env["BITBUCKET_REPO"] = "cribl"
+        bb_env["BITBUCKET_WORKSPACE"] = "example-org"
+        bb_env["BITBUCKET_REPO"] = "example-repo"
         # Write BB fixture via heredoc — avoids quoting/escaping issues with Python one-liners
+        # Fixture includes target_branch — 2 PRs target "dev", 1 targets "main"
+        # so group_by_scope must produce lanes in "dev/..." and "main/..." format
         inject_bb = exec_step(pod, "bb-inject-fixture",
             f"cat > {ws}/ready_prs.json <<'__BBEOF__'\n"
-            + '{"pr_count":3,"repo":"cribl/cribl","prs":['
-            + '{"pr_number":10,"title":"Auth fix","author":"alice","scope":"unknown","blast_radius":"low","age_hours":5.0,"branch":"fix/auth-token","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/cribl/cribl/pull-requests/10","labels":[],"repo":"cribl/cribl"},'
-            + '{"pr_number":11,"title":"Billing update","author":"bob","scope":"unknown","blast_radius":"medium","age_hours":48.0,"branch":"feat/billing-v2","ci_status":"none","has_approval":false,"url":"https://bitbucket.org/cribl/cribl/pull-requests/11","labels":[],"repo":"cribl/cribl"},'
-            + '{"pr_number":12,"title":"Docs","author":"carol","scope":"unknown","blast_radius":"low","age_hours":2.0,"branch":"docs/readme","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/cribl/cribl/pull-requests/12","labels":[],"repo":"cribl/cribl"}'
+            + '{"pr_count":3,"repo":"example-org/example-repo","prs":['
+            + '{"pr_number":10,"title":"Auth fix","author":"alice","scope":"unknown","blast_radius":"low","age_hours":5.0,"branch":"fix/auth-token","target_branch":"dev","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/example-org/example-repo/pull-requests/10","labels":[],"repo":"example-org/example-repo"},'
+            + '{"pr_number":11,"title":"Billing update","author":"bob","scope":"unknown","blast_radius":"medium","age_hours":48.0,"branch":"feat/billing-v2","target_branch":"dev","ci_status":"none","has_approval":false,"url":"https://bitbucket.org/example-org/example-repo/pull-requests/11","labels":[],"repo":"example-org/example-repo"},'
+            + '{"pr_number":12,"title":"Docs hotfix","author":"carol","scope":"unknown","blast_radius":"low","age_hours":2.0,"branch":"docs/hotfix","target_branch":"main","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/example-org/example-repo/pull-requests/12","labels":[],"repo":"example-org/example-repo"}'
             + ']}\n'
             + "__BBEOF__",
             bb_env, timeout=15)
@@ -3847,8 +3849,21 @@ def test_42_mq_collect_group(base_env: dict[str, str]) -> TestResult:
             f"import json, sys\n"
             f"d = json.loads(open('{ws}/lane_groups.json').read())\n"
             f"assert d['total_prs'] == 3, f'expected 3 PRs, got {{d[\"total_prs\"]}}'\n"
-            f"assert d['lane_count'] >= 1, 'expected at least 1 lane'\n"
-            f"# All PRs have scope=unknown so they all go to default lane\n"
+            f"assert d['lane_count'] >= 2, f'expected >=2 lanes (dev+main), got {{d[\"lane_count\"]}}'\n"
+            f"# Verify lane_ids have target_branch/scope format\n"
+            f"for lane in d['lanes']:\n"
+            f"    lid = lane['lane_id']\n"
+            f"    assert '/' in lid, f'lane_id {{lid!r}} missing target_branch prefix'\n"
+            f"    branch = lid.split('/')[0]\n"
+            f"    assert branch in ('dev', 'main'), f'unexpected branch {{branch!r}} in lane_id {{lid!r}}'\n"
+            f"# Verify dev and main PRs are segregated\n"
+            f"lane_map = {{l['lane_id']: l for l in d['lanes']}}\n"
+            f"dev_lanes = [l for lid, l in lane_map.items() if lid.startswith('dev/')]\n"
+            f"main_lanes = [l for lid, l in lane_map.items() if lid.startswith('main/')]\n"
+            f"dev_prs = sum(l['pr_count'] for l in dev_lanes)\n"
+            f"main_prs = sum(l['pr_count'] for l in main_lanes)\n"
+            f"assert dev_prs == 2, f'expected 2 dev PRs, got {{dev_prs}}'\n"
+            f"assert main_prs == 1, f'expected 1 main PR, got {{main_prs}}'\n"
             f"prs_in_lanes = sum(l['pr_count'] for l in d['lanes'])\n"
             f"assert prs_in_lanes == 3, f'lane prs {{prs_in_lanes}} != 3'\n"
             f"print(f'::add-task-context BB_LANE_COUNT::{{d[\"lane_count\"]}}')\n"
@@ -3865,7 +3880,7 @@ def test_42_mq_collect_group(base_env: dict[str, str]) -> TestResult:
     bb_lanes = verify_bb_group.context.get("BB_LANE_COUNT", "?")
     bb_prs = verify_bb_group.context.get("BB_TOTAL_PRS", "?")
     return _pass(result,
-                 f"GH: bhatti/formicary prs={gh_prs} lanes={gh_lanes} | "
+                 f"GH: formicary prs={gh_prs} lanes={gh_lanes} | "
                  f"BB: fixture prs={bb_prs} lanes={bb_lanes}")
 
 
@@ -3894,9 +3909,9 @@ def test_43_mq_report_permissions(base_env: dict[str, str]) -> TestResult:
         # Inject BB fixture ready_prs.json so report.py has data to work with
         inject = exec_step(pod, "inject-fixture",
             f"cat > {ws}/ready_prs.json <<'__EOF__'\n"
-            + '{"pr_count":2,"repo":"cribl/cribl","prs":['
-            + '{"pr_number":10,"title":"Fix auth","author":"alice","scope":"unknown","blast_radius":"low","age_hours":5.0,"branch":"fix/auth","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/cribl/cribl/pull-requests/10","labels":[],"repo":"cribl/cribl"},'
-            + '{"pr_number":11,"title":"Billing","author":"bob","scope":"unknown","blast_radius":"high","age_hours":48.0,"branch":"feat/billing","ci_status":"none","has_approval":false,"url":"https://bitbucket.org/cribl/cribl/pull-requests/11","labels":[],"repo":"cribl/cribl"}'
+            + '{"pr_count":2,"repo":"example-org/example-repo","prs":['
+            + '{"pr_number":10,"title":"Fix auth","author":"alice","scope":"unknown","blast_radius":"low","age_hours":5.0,"branch":"fix/auth","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/example-org/example-repo/pull-requests/10","labels":[],"repo":"example-org/example-repo"},'
+            + '{"pr_number":11,"title":"Billing","author":"bob","scope":"unknown","blast_radius":"high","age_hours":48.0,"branch":"feat/billing","ci_status":"none","has_approval":false,"url":"https://bitbucket.org/example-org/example-repo/pull-requests/11","labels":[],"repo":"example-org/example-repo"}'
             + ']}\n__EOF__',
             env, timeout=15)
         result.steps.append(inject)
@@ -3906,7 +3921,7 @@ def test_43_mq_report_permissions(base_env: dict[str, str]) -> TestResult:
         # Also inject a minimal queue_summary.json (analyze output)
         inject_summary = exec_step(pod, "inject-summary",
             f"cat > {ws}/queue_summary.json <<'__EOF__'\n"
-            + '{"status":"DONE","repo":"cribl/cribl","total_prs":2,"lanes":1,"high_risk_prs":1,"needs_human_review":1,"conflict_lanes":0}\n'
+            + '{"status":"DONE","repo":"example-org/example-repo","total_prs":2,"lanes":1,"high_risk_prs":1,"needs_human_review":1,"conflict_lanes":0}\n'
             + "__EOF__",
             env, timeout=15)
         result.steps.append(inject_summary)
@@ -3934,8 +3949,8 @@ def test_43_mq_report_permissions(base_env: dict[str, str]) -> TestResult:
         # Run report.py — it must succeed regardless of pre-existing dir permissions
         report_env = dict(env)
         report_env["DEFAULT_TRACKER"] = "bitbucket"
-        report_env["BITBUCKET_WORKSPACE"] = "cribl"
-        report_env["BITBUCKET_REPO"] = "cribl"
+        report_env["BITBUCKET_WORKSPACE"] = "example-org"
+        report_env["BITBUCKET_REPO"] = "example-repo"
         report_env["REPORT_TITLE"] = "Merge Queue Analysis"
         report_env["TASK_TYPE"] = "report"
         report_env.pop("SLACK_BOT_TOKEN", None)   # no Slack post in pod test
@@ -4204,7 +4219,7 @@ def test_36_gate_review_bb(base_env: dict[str, str]) -> TestResult:
         return result
 
     pr_url = os.environ.get("BB_PR_URL",
-                             "https://bitbucket.org/cribl/cribl/pull-requests/45974")
+                             "https://bitbucket.org/example-org/example-repo/pull-requests/1")
     env = dict(base_env)
     # Unset GitHub vars and pre-set tracker vars to ensure apply_repo_override drives config
     for k in ("GH_ORG", "GH_REPO", "DEFAULT_TRACKER", "BITBUCKET_WORKSPACE", "BITBUCKET_REPO"):
@@ -4295,7 +4310,7 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
             "import subprocess, sys\n"
             "cases = [\n"
             "    ('https://github.com/bhatti/todo-sample/pull/9',  'github', 'bhatti', 'todo-sample', '9'),\n"
-            "    ('https://bitbucket.org/cribl/cribl/pull-requests/48776', 'bitbucket', 'cribl', 'cribl', '48776'),\n"
+            "    ('https://bitbucket.org/example-org/example-repo/pull-requests/48776', 'bitbucket', 'example-org', 'example-repo', '48776'),\n"
             "    ('42', 'bare', '', '', '42'),\n"
             "]\n"
             "errors = []\n"
@@ -4336,7 +4351,7 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
             return _fail(result, url_step, f"URL parse test: {url_step.stderr[-400:]}")
 
         # --- Test 6: bb_merge exits 0 when PR is already MERGED (not OPEN) ---
-        # Simulates the cribl/cribl PR that was already closed — should not fail the job.
+        # Simulates a PR that was already closed — should not fail the job.
         already_merged_cmd = (
             "bash - <<'BEOF'\n"
             "bb_merge() {\n"

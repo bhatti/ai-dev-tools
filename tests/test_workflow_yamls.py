@@ -166,7 +166,10 @@ class TestWorkflowYamlUnit:
 # ── Level 2: integ tests (requires Formicary API) ─────────────────────────────
 
 def _formicary_url() -> str:
-    return os.environ.get("FORMICARY_URL", "https://10.8.97.24.nip.io")
+    url = os.environ.get("FORMICARY_URL", "")
+    if not url:
+        pytest.skip("FORMICARY_URL not set — skipping Formicary API integ tests")
+    return url
 
 
 def _formicary_token() -> str:

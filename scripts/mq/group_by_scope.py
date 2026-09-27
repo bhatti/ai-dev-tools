@@ -39,9 +39,10 @@ def main() -> None:
     for pr in prs:
         scope = pr.get("scope", "default")
         if scope in ("cross-scope", "multi-module"):
-            scope_buckets["default"].append(pr)
-        else:
-            scope_buckets[scope].append(pr)
+            scope = "default"
+        target = pr.get("target_branch", "") or "unknown"
+        lane_id = f"{target}/{scope}"
+        scope_buckets[lane_id].append(pr)
 
     lanes = []
     for lane_id, lane_prs in sorted(scope_buckets.items()):
@@ -62,7 +63,8 @@ def main() -> None:
 
     out_path = workspace / "lane_groups.json"
     out_path.write_text(json.dumps(result, indent=2))
-    print(f"[group_by_scope] {len(lanes)} lanes: {', '.join(l['lane_id'] + '(' + str(l['pr_count']) + ')' for l in lanes)}", flush=True)
+    target_branches = sorted({l["lane_id"].split("/")[0] for l in lanes})
+    print(f"[group_by_scope] {len(lanes)} lanes across target branches {target_branches}: {', '.join(l['lane_id'] + '(' + str(l['pr_count']) + ')' for l in lanes)}", flush=True)
 
     fan_out_value = json.dumps([
         {"lane_id": l["lane_id"], "prs": [p["pr_number"] for p in l["prs"]]}
