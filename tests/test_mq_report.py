@@ -386,7 +386,8 @@ class TestContractTestReport:
         assert "CONTRACT_STATUS" not in ctx
 
 
-def _make_prs(n, pr_type="feature", ci_status="none", blast_radius="low", age_hours=2.0):
+def _make_prs(n, pr_type="feature", ci_status="none", blast_radius="low",
+              age_hours=2.0, risk_tier="low", is_hotspot=False):
     return [
         {
             "pr_number": i + 1,
@@ -398,6 +399,10 @@ def _make_prs(n, pr_type="feature", ci_status="none", blast_radius="low", age_ho
             "ci_status": ci_status,
             "approval_count": 1,
             "reviewer_count": 1,
+            "risk_tier": risk_tier,
+            "risk_score": 10.0,
+            "is_hotspot": is_hotspot,
+            "author": "dev",
             "url": "",
         }
         for i in range(n)
@@ -486,6 +491,31 @@ class TestDeploymentRiskSection:
         with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "cd"}):
             md, ctx = _build_report(tmp_path, "1", "Deploy Test")
         assert "Deployment Risk Position" in md
+
+    def test_heatmap_appears_in_output(self):
+        prs = _make_prs(8, pr_type="feature") + _make_prs(2, pr_type="bug")
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "weekly-train"}):
+            result = _valley_of_calm_section(prs)
+        assert "Deployment Success Heatmap" in result
+        assert "📍" in result
+
+    def test_header_is_queue_health(self):
+        prs = _make_prs(5)
+        result = _valley_of_calm_section(prs)
+        assert "## Queue Health" in result
+        assert "Valley of Calm" not in result
+
+    def test_health_labels_use_new_terminology(self):
+        prs = _make_prs(10, age_hours=72.0)
+        result = _valley_of_calm_section(prs)
+        assert "Plateau of Misery" not in result
+        assert "Degraded" not in result
+
+    def test_stale_pr_table_has_cat_column(self):
+        prs = _make_prs(5, age_hours=400, is_hotspot=True)
+        result = _valley_of_calm_section(prs)
+        assert "| PR | Title | Age | Cat | Risk | Author |" in result
+        assert "🔥" in result
 
 
 class TestRiskHeatmapHtml:

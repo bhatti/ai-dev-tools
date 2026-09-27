@@ -454,7 +454,7 @@ All scripts follow the standard pattern: Click CLI, `load_config(required=[...])
 
 ### Shared Classification (`scripts/common/pr_classify.py`)
 
-PR classification and risk scoring shared across MQ, PR-queue, and PR-audit pipelines. Provides a single taxonomy for PR type (feature/bug/security/...), category, blast radius, risk score/tier, complexity, and hotspot detection. All three pipelines call `enrich_pr_with_metrics(pr, files)` for consistent classification. Summary table builders (`build_category_breakdown`, `build_work_type_distribution`) produce identical Markdown tables across reports.
+PR classification and risk scoring shared across MQ, PR-queue, and PR-audit pipelines. Provides a single taxonomy for PR type (feature/bug/security/...), category, blast radius, risk score/tier, complexity, and hotspot detection. All three pipelines call `enrich_pr_with_metrics(pr, files)` for consistent classification. Summary table builders (`build_category_breakdown`, `build_work_type_distribution`, `build_pr_metrics_table`) produce identical Markdown tables across reports.
 
 ---
 

@@ -11,6 +11,7 @@ import pytest
 from scripts.mq.simulate import (
     MATURITY_DIMENSIONS,
     _MATURITY_MAX_SCORE,
+    build_risk_heatmap,
     calamity_threshold,
     deployment_maturity_score,
     deployment_risk_summary,
@@ -288,3 +289,33 @@ class TestLoadDeploymentProfile:
         p2 = load_deployment_profile("cd")
         assert p2["prs_per_release"] == 1
         assert p2["maturity"]["automated_testing"] == 1.0
+
+
+class TestBuildRiskHeatmap:
+    def test_returns_markdown_lines(self):
+        lines = build_risk_heatmap(0.1, 10)
+        text = "\n".join(lines)
+        assert "### Deployment Success Heatmap" in text
+        assert "📍" in text
+
+    def test_contains_current_position_marker(self):
+        lines = build_risk_heatmap(0.05, 5)
+        text = "\n".join(lines)
+        assert "📍" in text
+        assert "batch success" in text.lower()
+
+    def test_healthy_position(self):
+        lines = build_risk_heatmap(0.02, 1)
+        text = "\n".join(lines)
+        assert "Healthy" in text
+
+    def test_unstable_position(self):
+        lines = build_risk_heatmap(0.4, 50)
+        text = "\n".join(lines)
+        assert "Unstable" in text
+
+    def test_what_if_scenarios(self):
+        lines = build_risk_heatmap(0.2, 20)
+        text = "\n".join(lines)
+        assert "defect rate halved" in text
+        assert "batch size halved" in text

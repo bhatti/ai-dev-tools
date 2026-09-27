@@ -387,6 +387,91 @@ def load_deployment_profile(
     }
 
 
+def build_risk_heatmap(
+    current_defect_rate: float,
+    current_batch_size: float,
+) -> list[str]:
+    """Build an ASCII heatmap showing batch success across defect rate × batch size.
+
+    Marks the team's current position with 📍. Based on Joe Magerramov's model.
+    Returns markdown lines.
+    """
+    defect_rates = [0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
+    batch_sizes = [1, 5, 10, 20, 50, 100]
+
+    def _closest(val: float, options: list) -> int:
+        return min(range(len(options)), key=lambda i: abs(options[i] - val))
+
+    cur_dr_idx = _closest(current_defect_rate, defect_rates)
+    cur_bs_idx = _closest(current_batch_size, batch_sizes)
+
+    def _cell(success: float, is_current: bool) -> str:
+        pct = round(success * 100)
+        marker = "📍" if is_current else ""
+        if pct >= 90:
+            return f"🟢{pct:>3}%{marker}"
+        if pct >= 70:
+            return f"🟡{pct:>3}%{marker}"
+        return f"🔴{pct:>3}%{marker}"
+
+    lines: list[str] = [
+        "### Deployment Success Heatmap",
+        "",
+        "Defect rate (rows) × batch size (columns) → batch success probability.",
+        f"📍 = current position (defect rate ≈{current_defect_rate:.1%}, batch ≈{current_batch_size:.0f})",
+        "",
+    ]
+
+    header = "| Defect Rate |"
+    sep = "|-------------|"
+    for bs in batch_sizes:
+        header += f" {bs} PRs |"
+        sep += "--------|"
+    lines.append(header)
+    lines.append(sep)
+
+    for dr_idx, dr in enumerate(defect_rates):
+        label = f"1-in-{round(1/dr)}" if dr > 0 else "0%"
+        row = f"| {label:>11} |"
+        for bs_idx, bs in enumerate(batch_sizes):
+            success = merge_batch_success(dr, bs)
+            is_current = (dr_idx == cur_dr_idx and bs_idx == cur_bs_idx)
+            row += f" {_cell(success, is_current)} |"
+        lines.append(row)
+
+    lines.append("")
+    cur_success = merge_batch_success(current_defect_rate, current_batch_size)
+    cur_pct = round(cur_success * 100, 1)
+
+    if cur_pct >= 90:
+        zone = "Healthy"
+        zone_desc = "most batches deploy cleanly"
+    elif cur_pct >= 70:
+        zone = "At Risk"
+        zone_desc = "approaching the cliff — small increases in defect rate or batch size will degrade rapidly"
+    else:
+        zone = "Unstable"
+        zone_desc = "below the cliff — most batches contain at least one defect"
+
+    lines.append(f"> **Current position: {cur_pct}% batch success → {zone}** — {zone_desc}.")
+
+    half_dr = current_defect_rate / 2
+    if half_dr > 0:
+        improved = merge_batch_success(half_dr, current_batch_size)
+        lines.append(
+            f"> If defect rate halved to {half_dr:.1%}: batch success → {improved*100:.0f}%."
+        )
+    half_bs = current_batch_size / 2
+    if half_bs >= 1:
+        improved = merge_batch_success(current_defect_rate, half_bs)
+        lines.append(
+            f"> If batch size halved to {half_bs:.0f}: batch success → {improved*100:.0f}%."
+        )
+    lines.append("")
+
+    return lines
+
+
 def _deep_copy_profile(profile: dict) -> dict:
     """Shallow-copy a preset profile so mutations don't affect the preset."""
     return {

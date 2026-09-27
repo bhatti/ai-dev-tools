@@ -12,6 +12,7 @@ from scripts.common.pr_classify import (
     RISK_EMOJI,
     apply_blast_cap,
     build_category_breakdown,
+    build_pr_metrics_table,
     build_work_type_distribution,
     classify_pr_category,
     classify_pr_flags,
@@ -451,3 +452,207 @@ class TestConstants:
     def test_high_blast_categories(self):
         assert "security" in HIGH_BLAST_CATEGORIES
         assert "authn_authz" in HIGH_BLAST_CATEGORIES
+
+
+# ---------------------------------------------------------------------------
+# Category classification — test-file over-matching fix
+# ---------------------------------------------------------------------------
+
+class TestCategoryTestFileFiltering:
+    """Verify that PRs with mixed source+test files aren't blindly classified as 'test'."""
+
+    def test_mixed_files_classifies_from_source(self):
+        files = _files(
+            ("src/api/routes.ts", 50, 10),
+            ("src/__tests__/routes.test.ts", 30, 5),
+        )
+        pr = _bb_pr(title="reclassify action-verb routes")
+        cat, conf = classify_pr_category(pr, files=files)
+        assert cat != "test", "Should not classify as test when source files present"
+        assert conf == "file_path"
+
+    def test_all_test_files_classifies_as_test(self):
+        files = _files(
+            ("tests/test_auth.py", 50, 10),
+            ("tests/test_billing.py", 30, 5),
+        )
+        pr = _bb_pr()
+        cat, conf = classify_pr_category(pr, files=files)
+        assert cat == "test"
+
+    def test_majority_test_files_classifies_as_test(self):
+        files = _files(
+            ("tests/test_a.py", 10, 0),
+            ("tests/test_b.py", 10, 0),
+            ("tests/test_c.py", 10, 0),
+            ("tests/test_d.py", 10, 0),
+            ("src/utils.py", 5, 0),
+        )
+        pr = _bb_pr()
+        cat, conf = classify_pr_category(pr, files=files)
+        assert cat == "test"
+
+    def test_backend_files_with_test_files(self):
+        files = _files(
+            ("src/worker/handler.go", 80, 20),
+            ("src/worker/handler_test.go", 40, 10),
+        )
+        pr = _bb_pr(title="rolling upgrade workers")
+        cat, conf = classify_pr_category(pr, files=files)
+        assert cat != "test"
+
+
+# ---------------------------------------------------------------------------
+# New bug keyword patterns
+# ---------------------------------------------------------------------------
+
+class TestNewBugKeywords:
+    def test_flaky(self):
+        assert classify_pr_type(_bb_pr(title="[Flaky Test] fix test input")) == "bug"
+
+    def test_should_not(self):
+        assert classify_pr_type(_bb_pr(title="TLS settings should not be displayed")) == "bug"
+
+    def test_can_drop(self):
+        assert classify_pr_type(_bb_pr(title="LogSearch grid can drop results")) == "bug"
+
+    def test_silently_skips(self):
+        assert classify_pr_type(_bb_pr(title="Rolling upgrade silently skips workers")) == "bug"
+
+    def test_not_upgrading(self):
+        assert classify_pr_type(_bb_pr(title="Worker not upgrading through outpost")) == "bug"
+
+    def test_investigate(self):
+        assert classify_pr_type(_bb_pr(title="Investigate Socket disconnect issue")) == "bug"
+
+    def test_reclassify_is_refactor(self):
+        assert classify_pr_type(_bb_pr(title="v2: reclassify action-verb routes")) == "refactor"
+
+    def test_description_fallback_bug(self):
+        pr = {"title": "misc changes", "description": "This fixes a regression in auth",
+              "branch": "", "labels": []}
+        assert classify_pr_type(pr) == "bug"
+
+    def test_description_fallback_feature(self):
+        pr = {"title": "misc changes", "description": "Implements new dashboard widget",
+              "branch": "", "labels": []}
+        assert classify_pr_type(pr) == "feature"
+
+
+# ---------------------------------------------------------------------------
+# New category title patterns
+# ---------------------------------------------------------------------------
+
+class TestNewCategoryTitlePatterns:
+    def test_backend_worker(self):
+        cat, conf = classify_pr_category(_bb_pr(title="Rolling upgrade silently skips workers"))
+        assert cat == "backend"
+        assert conf == "title"
+
+    def test_backend_socket(self):
+        cat, conf = classify_pr_category(_bb_pr(title="Investigate Socket disconnect issue"))
+        assert cat == "backend"
+        assert conf == "title"
+
+    def test_api_routes(self):
+        cat, conf = classify_pr_category(_bb_pr(title="reclassify action-verb routes"))
+        assert cat == "api"
+        assert conf == "title"
+
+    def test_security_tls(self):
+        cat, conf = classify_pr_category(_bb_pr(title="TLS settings should not be displayed"))
+        assert cat == "security"
+        assert conf == "title"
+
+    def test_ui_grid(self):
+        cat, conf = classify_pr_category(_bb_pr(title="LogSearch grid can drop results"))
+        assert cat == "ui"
+        assert conf == "title"
+
+    def test_ui_font(self):
+        cat, conf = classify_pr_category(_bb_pr(title="Change the font color in the tags"))
+        assert cat == "ui"
+        assert conf == "title"
+
+
+# ---------------------------------------------------------------------------
+# build_pr_metrics_table
+# ---------------------------------------------------------------------------
+
+class TestBuildPrMetricsTable:
+    def test_empty(self):
+        assert build_pr_metrics_table([]) == []
+
+    def test_basic_table(self):
+        prs = [
+            {"pr_number": 123, "author": "alice", "category": "api",
+             "pr_type": "bug", "blast_radius": "low", "risk_score": 25.0,
+             "risk_tier": "medium", "total_loc": 150, "file_count": 5,
+             "complexity": "medium", "is_hotspot": True},
+            {"pr_number": 456, "author": "bob", "category": "ui",
+             "pr_type": "feature", "blast_radius": "low", "risk_score": 10.0,
+             "risk_tier": "low", "total_loc": 30, "file_count": 2,
+             "complexity": "low", "is_hotspot": False},
+        ]
+        lines = build_pr_metrics_table(prs)
+        text = "\n".join(lines)
+        assert "### Per-PR Metrics" in text
+        assert "#123" in text
+        assert "#456" in text
+        assert "🔥" in text
+
+    def test_sorted_by_risk_descending(self):
+        prs = [
+            {"pr_number": 1, "risk_score": 5.0, "risk_tier": "low",
+             "author": "a", "category": "ui", "pr_type": "bug",
+             "blast_radius": "low", "total_loc": 10, "file_count": 1,
+             "complexity": "low", "is_hotspot": False},
+            {"pr_number": 2, "risk_score": 50.0, "risk_tier": "high",
+             "author": "b", "category": "api", "pr_type": "bug",
+             "blast_radius": "high", "total_loc": 500, "file_count": 20,
+             "complexity": "high", "is_hotspot": True},
+        ]
+        lines = build_pr_metrics_table(prs)
+        text = "\n".join(lines)
+        idx_pr2 = text.index("#2")
+        idx_pr1 = text.index("#1")
+        assert idx_pr2 < idx_pr1, "Higher risk PR should appear first"
+
+    def test_all_column_headers_present(self):
+        prs = [{"pr_number": 1, "author": "a", "category": "api",
+                "pr_type": "bug", "blast_radius": "low", "risk_score": 10.0,
+                "risk_tier": "low", "total_loc": 10, "file_count": 1,
+                "complexity": "low", "is_hotspot": False}]
+        lines = build_pr_metrics_table(prs)
+        header = lines[2]
+        for col in ["PR", "Author", "Cat", "Type", "Blast", "Risk", "LOC", "Files", "Cx", "Hotspot"]:
+            assert col in header, f"Missing column: {col}"
+
+    def test_missing_fields_graceful(self):
+        prs = [{"pr_number": 99}]
+        lines = build_pr_metrics_table(prs)
+        text = "\n".join(lines)
+        assert "#99" in text
+
+
+# ---------------------------------------------------------------------------
+# HTML emoji annotation
+# ---------------------------------------------------------------------------
+
+class TestAnnotateEmoji:
+    def test_wraps_known_emoji_in_span(self):
+        from scripts.common.report_renderer import _annotate_emoji
+        result = _annotate_emoji("🔴 high risk")
+        assert '<span title="High">🔴</span>' in result
+
+    def test_preserves_unknown_emoji(self):
+        from scripts.common.report_renderer import _annotate_emoji
+        result = _annotate_emoji("👍 approved")
+        assert "👍" in result
+        assert "<span" not in result
+
+    def test_render_simple_html_includes_hover_labels(self):
+        from scripts.common.report_renderer import render_simple_html
+        html = render_simple_html("Test", "| Risk |\n|------|\n| 🔴 high |")
+        assert 'title="High"' in html
+        assert "🔴" in html

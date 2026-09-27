@@ -272,7 +272,7 @@ def _pr_link(pr: dict) -> str:
 
 
 def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) -> str:
-    """Build a Valley of Calm queue health section using simulation-inspired metrics.
+    """Build queue health section using simulation-inspired metrics.
 
     Derives proxy parameters from actual PR data:
     - defect_prob proxy: fraction of PRs with failed CI
@@ -285,6 +285,7 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
         return ""
     from collections import Counter
     from scripts.mq.simulate import (
+        build_risk_heatmap,
         deployment_risk_summary,
         load_deployment_profile,
         merge_batch_success,
@@ -306,19 +307,27 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     # Health assessment: when CI unavailable, use aged PRs as primary pressure signal
     if ci_available:
         batch_success = round(merge_batch_success(defect_prob, avg_batch) * 100, 1) if avg_batch > 0 else 100.0
-        health = "🟢 Healthy" if batch_success >= 90 else ("🟡 Degraded" if batch_success >= 70 else "🔴 Plateau of Misery")
+        health = "🟢 Healthy" if batch_success >= 90 else ("🟡 At Risk" if batch_success >= 70 else "🔴 Unstable")
         health_basis = f"CI failure rate {ci_pct}% at batch size ~{avg_batch}"
     else:
         # Fall back to aged PRs as pressure indicator
         batch_success = max(0.0, round(100.0 - aged_pct * 0.5, 1))  # heuristic: each 2% aged = 1% health loss
-        health = "🟢 Healthy" if aged_pct < 20 else ("🟡 Degraded" if aged_pct < 50 else "🔴 Plateau of Misery")
+        health = "🟢 Healthy" if aged_pct < 20 else ("🟡 At Risk" if aged_pct < 50 else "🔴 Unstable")
         health_basis = f"{aged_pct}% PRs aged >48h (CI status unavailable from API)"
 
-    advice = (
-        "Queue pressure is low — safe to batch."
-        if aged_pct < 20
-        else "High proportion of aged PRs — reduce batch size or investigate blockers."
-    )
+    if aged_pct < 20:
+        advice = "Queue pressure is low — safe to batch."
+    elif aged_pct < 50:
+        advice = (
+            f"At Risk: {aged_pct}% of PRs are aged >48h. "
+            "Review blockers, unblock stale PRs, or reduce batch size to lower queue pressure."
+        )
+    else:
+        advice = (
+            f"Unstable: {aged_pct}% of PRs are aged >48h. "
+            "Queue is backing up — prioritize unblocking stale PRs, "
+            "increase review throughput, or split large PRs to reduce cycle time."
+        )
 
     ci_row = (
         f"| CI failure rate | {failed_ci}/{total} ({ci_pct}%) |"
@@ -327,7 +336,7 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     )
 
     lines = [
-        "## Valley of Calm — Queue Health",
+        "## Queue Health",
         "",
         f"Overall status: **{health}** (basis: {health_basis})",
         "",
@@ -427,8 +436,8 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
         else:
             lines.append("> ℹ️ PRs open >14 days — verify they haven't gone stale.")
         lines.append("")
-        lines.append("| PR | Title | Age | Risk | Author |")
-        lines.append("|-----|-------|-----|------|--------|")
+        lines.append("| PR | Title | Age | Cat | Risk | Author |")
+        lines.append("|-----|-------|-----|-----|------|--------|")
         for p in sorted(stale_14d, key=lambda x: -x.get("age_hours", 0))[:15]:
             pr_link = _pr_link(p)
             title = p.get("title", "")[:50]
@@ -436,7 +445,9 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
             risk_tier = p.get("risk_tier", "low")
             risk_emoji = _RISK_EMOJI.get(risk_tier, "⚪")
             author = p.get("author", "unknown")
-            lines.append(f"| {pr_link} | {title} | {days}d | {risk_emoji} {risk_tier} | {author} |")
+            cat = p.get("category", "—")
+            hotspot_prefix = "🔥 " if p.get("is_hotspot") else ""
+            lines.append(f"| {pr_link} | {title} | {days}d | {hotspot_prefix}{cat} | {risk_emoji} {risk_tier} | {author} |")
         if len(stale_14d) > 15:
             lines.append(f"| | _+{len(stale_14d) - 15} more stale PRs_ | | | |")
         lines.append("")
@@ -449,6 +460,10 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
             load_deployment_profile, deployment_risk_summary,
         )
         lines.extend(deploy_lines)
+
+        n_defect = type_counts.get("bug", 0) + type_counts.get("security", 0)
+        defect_rate = n_defect / total if total > 0 else 0.0
+        lines.extend(build_risk_heatmap(defect_rate, avg_batch))
 
     return "\n".join(lines)
 
@@ -1010,7 +1025,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         all_prs_flat = [p for l in lane_list for p in l.get("prs", [])]
         total_prs = len(all_prs_flat)
 
-        # Valley of Calm health section (uses all PRs + lane hotspot metadata)
+        # Queue health section (uses all PRs + lane hotspot metadata)
         voc = _valley_of_calm_section(all_prs_flat, lanes=lane_list)
         if voc:
             sections.append(voc)
@@ -1422,7 +1437,7 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
 </ul>
 
 <p style="font-size:12px;color:#484f58;margin-top:32px">
-  Generated from merge queue analysis. Model: Joe Magerramov's Valley of Calm.
+  Generated from merge queue analysis. Model: Joe Magerramov's deployment risk model.
 </p>
 </body>
 </html>"""

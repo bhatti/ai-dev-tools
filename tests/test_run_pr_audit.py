@@ -352,6 +352,22 @@ class TestPromptTemplate:
         """Verify the metrics_summary placeholder is wired into the template."""
         assert "{metrics_summary}" in _PR_AUDIT_PROMPT_TEMPLATE
 
+    def test_metrics_summary_includes_per_pr_table(self):
+        """Verify _build_metrics_summary produces complete metrics section."""
+        from scripts.analyze.run_pr_audit import _build_metrics_summary
+        prs = [
+            {"pr_number": 1, "author": "alice", "category": "api",
+             "pr_type": "bug", "blast_radius": "low", "risk_score": 25.0,
+             "risk_tier": "medium", "total_loc": 150, "file_count": 5,
+             "complexity": "medium", "is_hotspot": True},
+        ]
+        summary = _build_metrics_summary(prs)
+        assert "Per-PR Metrics" in summary
+        assert "#1" in summary
+        assert "🔥" in summary
+        assert "Cat" in summary
+        assert "Pre-Computed PR Metrics Summary" in summary
+
 
 class TestPRSizeBucket:
     def test_xs_boundary(self):

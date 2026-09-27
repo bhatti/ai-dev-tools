@@ -83,9 +83,39 @@ def render_implement_report_html(issue_id: str, result: dict, md_text: str) -> s
 </style>
 </head>
 <body>
-{html}
+{_annotate_emoji(html)}
 </body>
 </html>"""
+
+
+_EMOJI_LABELS: dict[str, str] = {
+    "🔴": "High",
+    "🟡": "Medium",
+    "🟢": "Low / Healthy",
+    "🐛": "Bug fix",
+    "✨": "Feature",
+    "♻️": "Refactor",
+    "🔧": "Chore",
+    "🔒": "Security",
+    "🧪": "Test",
+    "📝": "Documentation",
+    "❓": "Unknown type",
+    "🔥": "Hotspot",
+    "⚠️": "Warning",
+    "🔵": "Current position",
+    "░": "Gauge empty",
+}
+
+_EMOJI_RE = re.compile("|".join(re.escape(e) for e in _EMOJI_LABELS))
+
+
+def _annotate_emoji(html: str) -> str:
+    """Wrap known emoji in <span title="..."> for hover labels in HTML reports."""
+    def _repl(m: re.Match) -> str:
+        emoji = m.group(0)
+        label = _EMOJI_LABELS.get(emoji, "")
+        return f'<span title="{label}">{emoji}</span>' if label else emoji
+    return _EMOJI_RE.sub(_repl, html)
 
 
 def _escape_html(text: str) -> str:
@@ -244,7 +274,7 @@ def render_simple_html(title: str, md_text: str) -> str:
     if in_code_block:
         output.append("</code></pre>")
 
-    body = "\n".join(output)
+    body = _annotate_emoji("\n".join(output))
     escaped_title = _escape_html(title)
     return f"""<!DOCTYPE html>
 <html lang="en">

@@ -67,8 +67,15 @@ def is_test_file(path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _BUG_KEYWORDS = re.compile(
-    r'\b(fix(?:e[ds])?|bug|hotfix|hot.?fix|patch(?:e[ds])?|defect|regression|crash(?:e[ds])?'
-    r'|revert(?:ed|ing)?|rollback|roll.?back|roll.?forward|workaround|broken)\b',
+    r'(?:'
+    r'\b(?:fix(?:e[ds])?|bug|hotfix|hot.?fix|patch(?:e[ds])?|defect|regression|crash(?:e[ds])?'
+    r'|revert(?:ed|ing)?|rollback|roll.?back|roll.?forward|workaround|broken'
+    r'|flak(?:y|iness|e)|investigat(?:e|ing))\b'
+    r'|should\s+not\b|shouldn.t\b'
+    r'|not\s+(?:work|upgrad|display|show|render|load|connect|respond|start|runn)\w*\b'
+    r'|(?:can|may)\s+drop\b'
+    r'|silently\s+(?:skip|fail|drop|ignore)\w*'
+    r')',
     re.IGNORECASE,
 )
 _FEAT_KEYWORDS = re.compile(
@@ -82,7 +89,8 @@ _REFACTOR_KEYWORDS = re.compile(
     r'|reorganize|restructure|simplify|split|rename[ds]?|move[ds]?'
     r'|remov(?:e[ds]?|ing)|delet(?:e[ds]?|ing)|replac(?:e[ds]?|ing)'
     r'|optimiz(?:e[ds]?|ing)|improv(?:e[ds]?|ing)|rework(?:ed|ing)?'
-    r'|consolidat(?:e[ds]?|ing)|deprecat(?:e[ds]?|ing)|decouple[ds]?)\b',
+    r'|consolidat(?:e[ds]?|ing)|deprecat(?:e[ds]?|ing)|decouple[ds]?'
+    r'|reclassif(?:y|ied|ying))\b',
     re.IGNORECASE,
 )
 _CHORE_KEYWORDS = re.compile(
@@ -199,7 +207,8 @@ _CATEGORY_RULES: list[tuple[str, list[str], list[str], list[str]]] = [
                     [r"\bauth[nz]?\b", r"\bpermission\b", r"\baccess.control\b"]),
     ("security",    [r"crypto", r"secret", r"credential", r"cert", r"tls", r"ssl"],
                     ["security", "crypto", "cve"],
-                    [r"\bsecurity\b", r"\bcve\b", r"\bvuln"]),
+                    [r"\bsecurity\b", r"\bcve\b", r"\bvuln", r"\btls\b", r"\bssl\b",
+                     r"\bcertificates?\b"]),
     ("sre",         [r"terraform", r"infra", r"k8s", r"kubernetes", r"helm", r"deploy", r"ansible", r"packer"],
                     ["terraform", "infra", "sre", "ops"],
                     [r"\bterraform\b", r"\binfra\b", r"\bk8s\b", r"\bdeploy\b"]),
@@ -208,16 +217,19 @@ _CATEGORY_RULES: list[tuple[str, list[str], list[str], list[str]]] = [
                     [r"\bmigration\b", r"\bschema\b", r"\bdatabase\b"]),
     ("api",         [r"api/", r"route", r"handler", r"controller", r"endpoint", r"grpc", r"proto"],
                     ["api", "grpc"],
-                    [r"\bapi\b", r"\bendpoint\b", r"\broute\b"]),
+                    [r"\bapi\b", r"\bendpoint\b", r"\broutes?\b", r"\bhandler\b"]),
     ("ui",          [r"frontend", r"web/", r"ui/", r"component", r"\.tsx?", r"\.vue", r"\.svelte", r"\.css", r"\.scss"],
                     ["frontend", "ui", "ux"],
-                    [r"\bui\b", r"\bfrontend\b", r"\bcomponent\b"]),
+                    [r"\bui\b", r"\bfrontend\b", r"\bcomponent\b", r"\bgrid\b",
+                     r"\bfont\b", r"\bwebkit\b"]),
     ("config",      [r"config", r"\.ya?ml", r"\.toml", r"\.env", r"settings"],
                     ["config", "configuration"],
                     [r"\bconfig\b", r"\bsettings\b"]),
     ("backend",     [r"src/", r"pkg/", r"lib/", r"service", r"core/"],
                     [],
-                    []),
+                    [r"\bworkers?\b", r"\bsockets?\b", r"\bserver\b",
+                     r"\bprovisioning?\b", r"\brollout\b", r"\bbatch\b",
+                     r"\bpipelines?\b", r"\bqueues?\b"]),
 ]
 
 # ---------------------------------------------------------------------------
@@ -295,8 +307,17 @@ def classify_pr_category(pr: dict, files: list[dict] | None = None) -> tuple[str
       'unknown'   — no signal found
     """
     if files:
-        paths_str = " ".join(f.get("path", "") for f in files).lower()
+        source_files = [f for f in files if not _TEST_FILE_RE.search(f.get("path", ""))]
+        test_ratio = 1.0 - (len(source_files) / len(files))
+
+        if test_ratio >= _TEST_FILE_THRESHOLD:
+            return "test", "file_path"
+
+        classify_files = source_files if source_files else files
+        paths_str = " ".join(f.get("path", "") for f in classify_files).lower()
         for category, path_patterns, _, _ in _CATEGORY_RULES:
+            if category == "test":
+                continue
             if any(re.search(p, paths_str) for p in path_patterns):
                 return category, "file_path"
 
@@ -372,6 +393,16 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
         if _REFACTOR_KEYWORDS.search(branch):
             return "refactor"
         if _CHORE_KEYWORDS.search(branch):
+            return "chore"
+
+    if description:
+        if _BUG_KEYWORDS.search(description):
+            return "bug"
+        if _FEAT_KEYWORDS.search(description):
+            return "feature"
+        if _REFACTOR_KEYWORDS.search(description):
+            return "refactor"
+        if _CHORE_KEYWORDS.search(description):
             return "chore"
 
     return "unknown"
@@ -640,6 +671,46 @@ def build_work_type_distribution(prs: list[dict]) -> list[str]:
         lines.append(f"| {emoji} {t} | {n} | {pct}% | {signal} |")
     lines.append("")
 
+    return lines
+
+
+def build_pr_metrics_table(prs: list[dict]) -> list[str]:
+    """Build per-PR metrics table with Cat/Type/Blast/Risk/LOC/Cx/Hotspot columns.
+
+    Sorted by risk_score descending so highest-risk PRs appear first.
+    """
+    if not prs:
+        return []
+
+    sorted_prs = sorted(prs, key=lambda p: -p.get("risk_score", 0))
+
+    lines: list[str] = [
+        "### Per-PR Metrics",
+        "",
+        "| # | PR | Author | Cat | Type | Blast | Risk | LOC | Files | Cx | Hotspot |",
+        "|---|-----|--------|-----|------|-------|------|-----|-------|----|---------|",
+    ]
+    for idx, p in enumerate(sorted_prs, 1):
+        pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
+        author = p.get("author", "—")
+        cat = p.get("category", "—")
+        pr_type = p.get("pr_type", "—")
+        type_emoji = PR_TYPE_EMOJI.get(pr_type, "")
+        blast = p.get("blast_radius", "—")
+        risk_score = p.get("risk_score", 0)
+        risk_tier = p.get("risk_tier", "—")
+        risk_emoji = RISK_EMOJI.get(risk_tier, "")
+        loc = p.get("total_loc", 0)
+        files = p.get("file_count", 0)
+        cx = p.get("complexity", "—")
+        cx_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(cx, "")
+        hotspot = "🔥" if p.get("is_hotspot") else "—"
+        lines.append(
+            f"| {idx} | #{pr_num} | {author} | {cat} | {type_emoji} {pr_type} "
+            f"| {blast} | {risk_emoji} {risk_score:.0f} | {loc:,} | {files} "
+            f"| {cx_emoji} {cx} | {hotspot} |"
+        )
+    lines.append("")
     return lines
 
 

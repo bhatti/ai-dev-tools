@@ -38,6 +38,7 @@ import click
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
+from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution, build_pr_metrics_table
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.skills import apply_project_skills, inline_shared_refs
 from scripts.analyze.pr_fetcher import (
@@ -46,6 +47,15 @@ from scripts.analyze.pr_fetcher import (
     fetch_issue_details, build_pr_context, write_issues_raw,
     compute_pr_state_summary, size_bucket,
 )
+
+
+def _build_metrics_summary(prs: list[dict]) -> str:
+    """Build pre-computed PR metrics summary markdown for prompt and report appendix."""
+    lines = ["## Pre-Computed PR Metrics Summary", ""]
+    lines += build_category_breakdown(prs)
+    lines += build_work_type_distribution(prs)
+    lines += build_pr_metrics_table(prs)
+    return "\n".join(lines) if len(lines) > 2 else ""
 
 
 # -- Skill discovery (same pattern as run_codebase_audit.py) -------------------
@@ -830,11 +840,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 f"m={bucket_counts.get('m',0)} l={bucket_counts.get('l',0)} xl={bucket_counts.get('xl',0)}"
             )
             state_summary_text += f"\nsize_buckets: {size_summary_text}"
-            from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution
-            _metrics_lines = ["## Pre-Computed PR Metrics Summary", ""]
-            _metrics_lines += build_category_breakdown(prs)
-            _metrics_lines += build_work_type_distribution(prs)
-            _metrics_summary = "\n".join(_metrics_lines) if len(_metrics_lines) > 2 else ""
+            _metrics_summary = _build_metrics_summary(prs)
 
             prompt = _PR_AUDIT_PROMPT_TEMPLATE.format(
                 repo_label=label,
@@ -950,8 +956,18 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             print(f"::add-task-context PR_AUDIT_SKILL_GAPS::{status_data.get('skill_gap_count', 0)}", flush=True)
             print(f"::add-task-context PR_AUDIT_PRACTICE_GAPS::{status_data.get('practice_gap_count', 0)}", flush=True)
 
-        # Generate HTML report from Markdown
+        # Append per-PR metrics table to report if not already present
         report_md_path = reports_dir / "pr_audit_report.md"
+        if report_md_path.exists() and prs:
+            md_content = report_md_path.read_text(encoding="utf-8")
+            if "Per-PR Metrics" not in md_content:
+                _append_text = _build_metrics_summary(prs)
+                if len(_append_text.strip()) > 10:
+                    md_content += f"\n\n{_append_text}\n"
+                    report_md_path.write_text(md_content, encoding="utf-8")
+                    print("[pr-audit] appended per-PR metrics table to report", flush=True)
+
+        # Generate HTML report from Markdown
         report_html_path = reports_dir / "pr_audit_report.html"
         if report_md_path.exists() and not report_html_path.exists():
             try:

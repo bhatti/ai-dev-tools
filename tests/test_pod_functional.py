@@ -183,6 +183,7 @@ _SCRIPTS_TO_COPY = [
     "scripts/mq/risk_score.py",
     "scripts/mq/run_scoped_ci.py",
     "scripts/mq/scope_router.py",
+    "scripts/mq/simulate.py",
     "scripts/mq/test_impact.py",
     "scripts/contract/__init__.py",
     "scripts/contract/_shared.py",
