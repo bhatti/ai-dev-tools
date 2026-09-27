@@ -252,13 +252,25 @@ class TestBuildReport:
     def test_lane_groups(self, tmp_path):
         (tmp_path / "lane_groups.json").write_text(json.dumps({
             "lanes": [
-                {"lane_id": "billing", "prs": [{"pr_number": 1}, {"pr_number": 2}]},
-                {"lane_id": "auth", "prs": [{"pr_number": 3}]},
+                {"lane_id": "main/low", "prs": [
+                    {"pr_number": 1, "blast_radius": "low", "title": "billing fix",
+                     "category": "backend", "pr_type": "bug", "age_hours": 5.0,
+                     "ci_status": "none", "approval_count": 1, "reviewer_count": 2, "url": ""},
+                    {"pr_number": 2, "blast_radius": "low", "title": "auth update",
+                     "category": "api", "pr_type": "feature", "age_hours": 3.0,
+                     "ci_status": "none", "approval_count": 0, "reviewer_count": 1, "url": ""},
+                ]},
+                {"lane_id": "dev/low", "prs": [
+                    {"pr_number": 3, "blast_radius": "low", "title": "refactor",
+                     "category": "backend", "pr_type": "unknown", "age_hours": 1.0,
+                     "ci_status": "none", "approval_count": 0, "reviewer_count": 0, "url": ""},
+                ]},
             ]
         }))
         md, ctx = _build_report(tmp_path, "", "Lanes")
-        assert "2 scope lanes" in md or "**2**" in md
-        assert "billing" in md
+        assert "**2 lanes**" in md
+        assert "main" in md
+        assert "#1" in md or "[#1]" in md
         assert ctx["LANE_COUNT"] == "2"
         assert ctx["QUEUED_PRS"] == "3"
 

@@ -78,6 +78,10 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
                 ).total_seconds() / 3600
             except (ValueError, AttributeError):
                 age_hours = 0
+            # BB bulk PR list does NOT include `participants` (approval status) —
+            # that field is only in the single-PR detail endpoint. Use `reviewers`
+            # (assigned reviewers list) for reviewer_count; approval_count is
+            # unavailable from the bulk API and left at 0 intentionally.
             prs.append({
                 "id": pr["id"],
                 "title": pr.get("title", ""),
@@ -88,6 +92,8 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
                 "created": created,
                 "age_hours": round(age_hours, 1),
                 "reviewers": reviewers,
+                "reviewer_count": len(reviewers),
+                "approval_count": 0,  # unavailable from bulk API; set by _normalize_pr if GH
                 "url": pr.get("links", {}).get("html", {}).get("href", ""),
             })
         url = data.get("next") or ""

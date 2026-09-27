@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.mq.collect_ready import _compute_age_hours, _classify_pr_type, _classify_pr_category, _normalize_pr, _enrich_prs_with_diffstat
+from scripts.mq.collect_ready import _compute_age_hours, _classify_pr_type, _classify_pr_category, _normalize_pr, _enrich_prs_with_diffstat, _extract_issue_ref
 
 
 class TestComputeAgeHours:
@@ -108,6 +108,110 @@ class TestNormalizePr:
         result = _normalize_pr(pr, "org/repo")
         assert "pr_type" in result
         assert result["pr_type"] == "feature"
+
+    def test_reviewer_count_from_reviewers_list(self):
+        pr = {"id": 10, "age_hours": 1.0, "reviewers": ["alice", "bob"]}
+        result = _normalize_pr(pr, "ws/repo")
+        assert result["reviewer_count"] == 2
+
+    def test_reviewer_count_from_explicit_field(self):
+        pr = {"id": 11, "age_hours": 1.0, "reviewer_count": 3, "reviewers": ["alice"]}
+        result = _normalize_pr(pr, "ws/repo")
+        assert result["reviewer_count"] == 3
+
+    def test_approval_count_emitted(self):
+        pr = {"id": 12, "age_hours": 1.0, "approval_count": 2}
+        result = _normalize_pr(pr, "ws/repo")
+        assert result["approval_count"] == 2
+        assert result["has_approval"] is True
+
+    def test_approval_count_zero_no_approval(self):
+        pr = {"id": 13, "age_hours": 1.0, "approval_count": 0}
+        result = _normalize_pr(pr, "ws/repo")
+        assert result["approval_count"] == 0
+        assert result["has_approval"] is False
+
+    def test_issue_ref_field_present(self):
+        pr = {"number": 14, "age_hours": 1.0, "title": "Fix FOO-123 login crash"}
+        result = _normalize_pr(pr, "org/repo")
+        assert "issue_ref" in result
+
+    def test_issue_ref_jira_key_extracted(self):
+        pr = {"number": 15, "age_hours": 1.0, "title": "PROJ-456: improve search"}
+        result = _normalize_pr(pr, "org/repo")
+        assert result["issue_ref"] is not None
+        assert result["issue_ref"]["key"] == "PROJ-456"
+
+    def test_issue_ref_none_when_no_signal(self):
+        pr = {"number": 16, "age_hours": 1.0, "title": "minor cleanup"}
+        result = _normalize_pr(pr, "org/repo")
+        assert result["issue_ref"] is None
+
+
+class TestExtractIssueRef:
+    def test_jira_in_title(self):
+        pr = {"title": "ACME-123: fix login bug", "description": ""}
+        ref = _extract_issue_ref(pr)
+        assert ref is not None
+        assert ref["key"] == "ACME-123"
+
+    def test_jira_in_description(self):
+        pr = {"title": "login bug", "description": "Fixes PROJ-99 regression"}
+        ref = _extract_issue_ref(pr)
+        assert ref is not None
+        assert ref["key"] == "PROJ-99"
+
+    def test_github_closes_issue(self):
+        pr = {"title": "fix auth", "description": "Closes #42",
+              "url": "https://github.com/org/repo/pull/101"}
+        ref = _extract_issue_ref(pr)
+        assert ref is not None
+        assert ref["key"] == "#42"
+        assert ref["url"] == "https://github.com/org/repo/issues/42"
+
+    def test_no_issue_signal(self):
+        pr = {"title": "refactor billing", "description": "cleanup"}
+        ref = _extract_issue_ref(pr)
+        assert ref is None
+
+    def test_jira_key_requires_minimum_two_uppercase_letters(self):
+        # "A-123" has only 1 uppercase prefix char — should not match
+        pr = {"title": "A-123 fix", "description": ""}
+        assert _extract_issue_ref(pr) is None
+
+    def test_jira_wins_over_github_closes_when_both_present(self):
+        """Jira key takes priority over GitHub closing keyword."""
+        pr = {"title": "PROJ-99 fix", "description": "Closes #42",
+              "url": "https://github.com/org/repo/pull/7"}
+        ref = _extract_issue_ref(pr)
+        assert ref is not None
+        assert ref["key"] == "PROJ-99"
+
+    def test_jira_url_uses_jira_base_url_env(self, monkeypatch):
+        monkeypatch.setenv("JIRA_BASE_URL", "https://jira.example.com")
+        pr = {"title": "PROJ-42: something", "description": ""}
+        ref = _extract_issue_ref(pr)
+        assert ref["url"] == "https://jira.example.com/browse/PROJ-42"
+
+    def test_jira_url_empty_when_no_base_url(self, monkeypatch):
+        monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+        pr = {"title": "PROJ-42: something", "description": ""}
+        ref = _extract_issue_ref(pr)
+        assert ref["key"] == "PROJ-42"
+        assert ref["url"] == ""
+
+    def test_no_false_positive_on_lowercase(self):
+        """Lowercase words like 'v2-api' or 'fix-123' should not match Jira pattern."""
+        pr = {"title": "update v2-api config fix-123 flow", "description": ""}
+        assert _extract_issue_ref(pr) is None
+
+    def test_body_field_used_for_github_prs(self):
+        """GitHub PRs use 'body' not 'description' — both should be searched."""
+        pr = {"title": "fix auth", "body": "Closes #55",
+              "url": "https://github.com/org/repo/pull/88"}
+        ref = _extract_issue_ref(pr)
+        assert ref is not None
+        assert ref["key"] == "#55"
 
 
 class TestClassifyPrType:

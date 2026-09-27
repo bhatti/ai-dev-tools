@@ -16,6 +16,7 @@ Exit codes: 0=done, 1=error
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -30,6 +31,11 @@ from scripts.mq._shared import (
 
 _BUG_KEYWORDS = re.compile(r'\b(fix|bug|hotfix|patch|defect|regression|crash)\b', re.IGNORECASE)
 _FEAT_KEYWORDS = re.compile(r'\b(feat|feature|story|enhancement|implement|add)\b', re.IGNORECASE)
+
+# Compiled at module level — called once per PR (250+ times per run)
+_JIRA_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,9}-\d+)\b')  # e.g. PROJ-123, AB-1
+_GH_CLOSES_RE = re.compile(r'(?:closes?|fixes?|resolves?)\s+#(\d+)', re.IGNORECASE)
+_GH_PR_URL_RE = re.compile(r'/pull/\d+.*')
 
 # Canonical category definitions — see shared/merge-queue-metrics.md#pr-categories
 # Order matters: first match wins. authn_authz before security so OAuth/IAM paths
@@ -62,6 +68,31 @@ _CATEGORY_RULES: list[tuple[str, list[str], list[str], list[str]]] = [
                     [],
                     []),
 ]
+
+
+def _extract_issue_ref(pr: dict) -> dict | None:
+    """Extract Jira or GitHub issue reference from PR title/description.
+
+    Uses pre-compiled regexes (module-level) for performance at 250+ PRs/run.
+    Env vars: JIRA_BASE_URL (consistent with existing scripts/analyze/pr_fetcher.py).
+    Returns {"key": "FOO-123", "url": "https://..."} or None.
+    Jira wins over GitHub closing refs when both appear in the same PR text.
+    """
+    text = f"{pr.get('title', '')} {pr.get('description', '') or pr.get('body', '')}"
+    m = _JIRA_KEY_RE.search(text)
+    if m:
+        key = m.group(1)
+        base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+        url = f"{base}/browse/{key}" if base else ""
+        return {"key": key, "url": url}
+    m = _GH_CLOSES_RE.search(text)
+    if m:
+        num = m.group(1)
+        pr_url = pr.get("url", "")
+        repo_base = _GH_PR_URL_RE.sub("", pr_url)
+        url = f"{repo_base}/issues/{num}" if repo_base else ""
+        return {"key": f"#{num}", "url": url}
+    return None
 
 
 def _classify_pr_category(pr: dict, files: list[dict] | None = None) -> tuple[str, str]:
@@ -179,8 +210,10 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
     # ci_status: gather_gh computes it; bb_helpers doesn't (no BB CI status API used)
     ci_status = pr.get("ci_status", "none")
 
-    # approval: gather_gh has has_approval + approval_count; bb_helpers has neither yet
-    has_approval = pr.get("has_approval") or (pr.get("approval_count", 0) > 0)
+    # approval: gather_gh has has_approval + approval_count; bb_helpers extracts from participants
+    approval_count = pr.get("approval_count", 0)
+    has_approval = pr.get("has_approval") or (approval_count > 0)
+    reviewer_count = pr.get("reviewer_count") or len(pr.get("reviewers", []))
 
     category, category_confidence = _classify_pr_category(pr)  # label/title fallback; enriched below
     return {
@@ -198,8 +231,11 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         "target_branch": pr.get("target_branch", "") or pr.get("baseRefName", ""),
         "ci_status": ci_status,
         "has_approval": bool(has_approval),
+        "approval_count": int(approval_count),
+        "reviewer_count": int(reviewer_count),
         "url": pr.get("url", ""),
         "labels": pr.get("labels", []),
+        "issue_ref": _extract_issue_ref(pr),
     }
 
 

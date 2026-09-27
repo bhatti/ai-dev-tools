@@ -57,7 +57,11 @@ The following files are in /workspace — read them directly:
   category (pre-computed: security/authn_authz/sre/data/api/ui/config/backend/unknown),
   category_confidence (file_path|label|title|unknown),
   pr_type (bug/feature/unknown), author, age_hours, branch, target_branch,
-  ci_status (success|failed|pending|none), has_approval, url, labels
+  ci_status (success|failed|pending|none — NOTE: BB API returns 'none' for all PRs;
+             do NOT compute CI failure rates from BB data),
+  has_approval, approval_count, reviewer_count,
+  issue_ref ({"key":"FOO-123","url":"..."} or null),
+  url, labels
 
 /workspace/lane_groups.json fields per lane:
   lane_id ("{canonical_branch}/{risk_tier}" OR "stacked/{feature_branch}"),

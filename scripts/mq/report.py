@@ -255,6 +255,11 @@ def _emit_test_health_insights(
 
 _HIGH_BLAST_CATEGORIES = frozenset({"security", "authn_authz", "sre", "data"})
 
+# Display constants reused across per-PR table helpers
+_PR_TYPE_EMOJI: dict[str, str] = {"bug": "🐛", "feature": "✨", "unknown": "❓"}
+_RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]
+_RISK_EMOJI: dict[str, str] = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+
 
 def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) -> str:
     """Build a Valley of Calm queue health section using simulation-inspired metrics.
@@ -274,37 +279,53 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     aged = sum(1 for p in prs if p.get("age_hours", 0) > 48)
     high_blast = sum(1 for p in prs if p.get("blast_radius") == "high")
     medium_blast = sum(1 for p in prs if p.get("blast_radius") == "medium")
-    defect_prob = failed_ci / total if total > 0 else 0.0
+    # CI data availability: BB bulk API never sets ci_status from actual pipeline runs.
+    # When ALL PRs show "none", treat CI as unavailable and use aged PRs as health proxy.
+    ci_available = any(p.get("ci_status") not in ("none", None, "") for p in prs)
+    defect_prob = (failed_ci / total if ci_available and total > 0 else 0.0)
     estimated_lanes = max(1, total // 10)
     avg_batch = round(total / estimated_lanes, 1)
-    batch_success = round((1 - defect_prob) ** avg_batch * 100, 1) if avg_batch > 0 else 100.0
     aged_pct = round(aged / total * 100, 1)
     ci_pct = round(defect_prob * 100, 1)
 
-    health = "🟢 Healthy" if batch_success >= 90 else ("🟡 Degraded" if batch_success >= 70 else "🔴 Plateau of Misery")
+    # Health assessment: when CI unavailable, use aged PRs as primary pressure signal
+    if ci_available:
+        batch_success = round((1 - defect_prob) ** avg_batch * 100, 1) if avg_batch > 0 else 100.0
+        health = "🟢 Healthy" if batch_success >= 90 else ("🟡 Degraded" if batch_success >= 70 else "🔴 Plateau of Misery")
+        health_basis = f"CI failure rate {ci_pct}% at batch size ~{avg_batch}"
+    else:
+        # Fall back to aged PRs as pressure indicator
+        batch_success = max(0.0, round(100.0 - aged_pct * 0.5, 1))  # heuristic: each 2% aged = 1% health loss
+        health = "🟢 Healthy" if aged_pct < 20 else ("🟡 Degraded" if aged_pct < 50 else "🔴 Plateau of Misery")
+        health_basis = f"{aged_pct}% PRs aged >48h (CI status unavailable from API)"
+
     advice = (
-        "Queue is in a healthy operating range."
-        if batch_success >= 80
-        else "Reduce batch size or fix CI failures to exit the Plateau of Misery."
+        "Queue pressure is low — safe to batch."
+        if aged_pct < 20
+        else "High proportion of aged PRs — reduce batch size or investigate blockers."
+    )
+
+    ci_row = (
+        f"| CI failure rate | {failed_ci}/{total} ({ci_pct}%) |"
+        if ci_available
+        else "| CI failure rate | N/A — not reported by API (verify in CI dashboard) |"
     )
 
     lines = [
         "## Valley of Calm — Queue Health",
         "",
-        f"Overall status: **{health}**",
+        f"Overall status: **{health}** (basis: {health_basis})",
         "",
         "| Metric | Value |",
         "|--------|-------|",
         f"| Total PRs in queue | {total} |",
-        f"| CI failure rate | {failed_ci}/{total} ({ci_pct}%) |",
+        ci_row,
         f"| PRs aged >48h | {aged} ({aged_pct}%) |",
         f"| High blast-radius PRs | {high_blast} |",
         f"| Medium blast-radius PRs | {medium_blast} |",
         f"| Approx batch size (PRs/lane) | {avg_batch} |",
-        f"| Est. batch success rate | {batch_success}% |",
         "",
-        f"> At {ci_pct}% CI failure rate and batch size ~{avg_batch}, "
-        f"expected batch success is **{batch_success}%**. {advice}",
+        f"> {advice}",
         "",
     ]
 
@@ -815,90 +836,204 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
         sections.append("## Merge Queue Lanes")
         sections.append("")
-        sections.append(f"**{len(lane_list)}** lanes, **{total_prs}** PRs queued")
-        sections.append("")
 
-        _PR_TYPE_EMOJI = {"bug": "🐛", "feature": "✨", "unknown": "❓"}
+        # Detect CI unavailability: BB API does not return CI status in bulk PR list
+        all_ci = [p.get("ci_status", "none") for p in all_prs_flat]
+        ci_unavailable = all_ci and all(s == "none" for s in all_ci)
 
-        def _lane_display_name(lane_id: str) -> str:
-            """Derive human-readable lane name from hierarchical lane_id."""
-            if lane_id.startswith("stacked/"):
-                feature = lane_id[len("stacked/"):]
-                return f"🔀 Stacked → {feature}"
-            if "/" in lane_id:
-                # lane_id is "{branch}/{risk_tier}" — risk_tier is the last segment
-                rest, risk_tier = lane_id.rsplit("/", 1)
-                if risk_tier == "high":
-                    return f"🔴 {rest} — High Risk"
-                if risk_tier == "medium":
-                    return f"🟡 {rest} — Medium Risk"
-                if risk_tier == "low":
-                    return f"🟢 {rest} — Low Risk"
-                # Legacy format: old unknown/scope lanes
-                if risk_tier in ("unknown", "default"):
-                    return rest
-                return f"{rest} / {risk_tier}"
-            return lane_id
+        if ci_unavailable:
+            sections.append(
+                "> ℹ️ **CI status: N/A** — Bitbucket REST API does not return pipeline status "
+                "in the bulk PR list endpoint. CI column shows `N/A` throughout."
+            )
+            sections.append("")
 
-        def _risk_emoji_for_lane(prs_in_lane: list[dict]) -> str:
-            blasts = [p.get("blast_radius", "low") for p in prs_in_lane]
-            if "high" in blasts:
-                return "🔴 high"
-            if "medium" in blasts:
-                return "🟡 medium"
-            return "🟢 low"
+        def _ci_cell(ci_status: str) -> str:
+            if ci_unavailable:
+                return "N/A"
+            if ci_status == "success":
+                return "✅"
+            if ci_status == "failed":
+                return "❌"
+            if ci_status == "pending":
+                return "⏳"
+            return "—"
 
-        # Separate canonical lanes from stacked lanes for display
+        def _age_label(age_hours: float) -> str:
+            if age_hours < 24:
+                return f"{age_hours:.0f}h"
+            days = age_hours / 24
+            return f"{days:.0f}d"
+
+        def _issue_cell(issue_ref: dict | None) -> str:
+            if not issue_ref:
+                return "—"
+            key = issue_ref.get("key", "")
+            url = issue_ref.get("url", "")
+            return f"[{key}]({url})" if url else key
+
+        def _pr_link(pr: dict) -> str:
+            num = pr.get("pr_number", "?")
+            url = pr.get("url", "")
+            return f"[#{num}]({url})" if url else f"#{num}"
+
+        def _rev_cell(approval_count: int, reviewer_count: int) -> str:
+            """Reviewer/approval cell.
+
+            BB bulk API does not return approval status (participants not in bulk endpoint).
+            Show approvals/reviewers only when approval_count > 0 (has actual data).
+            Otherwise show assigned reviewer count to avoid misleading '0/N ✅'.
+            """
+            if approval_count > 0:
+                return f"{approval_count}/{reviewer_count} ✅"
+            if reviewer_count > 0:
+                return f"{reviewer_count} assigned"
+            return "—"
+
+        def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
+            """Emit per-PR detail table + summary list for one risk tier."""
+            sec.append("| PR | Title | Category | Type | Blast | CI | Age | Reviewers | Issues |")
+            sec.append("|----|-------|----------|------|-------|----|-----|-----------|--------|")
+            for p in prs_in_tier:
+                pr_link = _pr_link(p)
+                title = (p.get("title") or "")[:50]
+                cat = p.get("category", "unknown")
+                conf = p.get("category_confidence", "")
+                cat_cell = f"{cat}*" if conf not in ("file_path", "label", "") else cat
+                if cat in ("security", "authn_authz"):
+                    cat_cell = f"⚠️ {cat_cell}"
+                pt = p.get("pr_type", "unknown")
+                type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
+                blast = p.get("blast_radius", "low")
+                blast_cell = f"{_RISK_EMOJI.get(blast, '⚪')} {blast}"
+                ci_cell = _ci_cell(p.get("ci_status", "none"))
+                age = _age_label(p.get("age_hours", 0))
+                approvals = p.get("approval_count", 0)
+                reviewers = p.get("reviewer_count", 0)
+                rev_cell = _rev_cell(approvals, reviewers)
+                issue_cell = _issue_cell(p.get("issue_ref"))
+                sec.append(
+                    f"| {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
+                    f"| {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                )
+            sec.append("")
+            # Per-PR summary with full title + issue ref.
+            # Capped at 20 per tier to avoid overwhelming Slack for large queues.
+            _DETAIL_CAP = 20
+            sec.append("**PR details:**")
+            sec.append("")
+            for p in prs_in_tier[:_DETAIL_CAP]:
+                pr_link = _pr_link(p)
+                title = p.get("title", "")
+                cat = p.get("category", "unknown")
+                pt = p.get("pr_type", "unknown")
+                type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
+                issue_ref = p.get("issue_ref")
+                issue_part = ""
+                if issue_ref:
+                    key = issue_ref.get("key", "")
+                    url = issue_ref.get("url", "")
+                    issue_part = f" [{key}]({url})" if url else f" {key}"
+                sec.append(f"- {pr_link}{issue_part}: {title} — {cat} {type_emoji}")
+            if len(prs_in_tier) > _DETAIL_CAP:
+                sec.append(f"- _(+{len(prs_in_tier) - _DETAIL_CAP} more — use `--target-branch` to narrow scope)_")
+            sec.append("")
+
+        # Group canonical lanes by branch for hierarchical display
+        # canonical lane_id = "{branch}/{risk_tier}"
         canonical_lanes = [l for l in lane_list if not l.get("lane_id", "").startswith("stacked/")]
         stacked_lanes = [l for l in lane_list if l.get("lane_id", "").startswith("stacked/")]
 
-        if canonical_lanes:
-            sections.append("### Canonical Branch Lanes")
-            sections.append("")
-            sections.append("| Lane | PRs | Risk |")
-            sections.append("|------|-----|------|")
-            for lane in canonical_lanes:
-                lid = lane.get("lane_id", "?")
-                display = _lane_display_name(lid)
-                prs_in_lane = lane.get("prs", [])
-                pr_type_counts: dict[str, int] = {}
-                for p in prs_in_lane:
-                    pt = p.get("pr_type", "unknown")
-                    pr_type_counts[pt] = pr_type_counts.get(pt, 0) + 1
-                pr_nums = ", ".join(
-                    f"{_PR_TYPE_EMOJI.get(p.get('pr_type','unknown'),'❓')}#{p.get('pr_number', '?')}"
-                    for p in prs_in_lane[:5]
-                )
-                if len(prs_in_lane) > 5:
-                    pr_nums += f" +{len(prs_in_lane)-5} more"
-                risk_emoji = _risk_emoji_for_lane(prs_in_lane)
-                sections.append(f"| {display} | {pr_nums} | {risk_emoji} |")
+        # Group canonical lanes by branch
+        branch_lanes: dict[str, dict[str, list[dict]]] = {}
+        for lane in canonical_lanes:
+            lid = lane.get("lane_id", "")
+            if "/" not in lid:
+                continue
+            rest, risk_tier = lid.rsplit("/", 1)
+            branch = rest
+            if branch not in branch_lanes:
+                branch_lanes[branch] = {}
+            branch_lanes[branch][risk_tier] = lane.get("prs", [])
+
+        # Sort branches by total PR count descending
+        branch_order = sorted(branch_lanes, key=lambda b: -sum(len(v) for v in branch_lanes[b].values()))
+
+        # Summary line: branch breakdown
+        branch_summary = " | ".join(
+            f"{b}: {sum(len(v) for v in branch_lanes[b].values())} PRs"
+            for b in branch_order
+        )
+        stacked_total = sum(l.get("pr_count", 0) for l in stacked_lanes)
+        if stacked_total:
+            branch_summary += f" | stacked: {stacked_total} PRs"
+        sections.append(f"**{len(lane_list)} lanes** — {branch_summary}")
+        sections.append("")
+
+        for branch in branch_order:
+            tier_prs = branch_lanes[branch]
+            branch_total = sum(len(v) for v in tier_prs.values())
+            n_high = len(tier_prs.get("high", []))
+            n_med = len(tier_prs.get("medium", []))
+            n_low = len(tier_prs.get("low", []))
+            risk_parts = []
+            if n_high:
+                risk_parts.append(f"🔴 {n_high} high")
+            if n_med:
+                risk_parts.append(f"🟡 {n_med} medium")
+            if n_low:
+                risk_parts.append(f"🟢 {n_low} low")
+            risk_str = ", ".join(risk_parts) or "🟢 all low"
+            sections.append(f"### Branch: {branch} ({branch_total} PRs — {risk_str})")
             sections.append("")
 
+            for tier in _RISK_TIER_ORDER:
+                prs_in_tier = tier_prs.get(tier, [])
+                if not prs_in_tier:
+                    continue
+                emoji = _RISK_EMOJI.get(tier, "⚪")
+                tier_label = tier.title()
+                sections.append(f"#### {emoji} {tier_label} Risk ({len(prs_in_tier)} PRs)")
+                sections.append("")
+                _per_pr_table(prs_in_tier, sections)
+
         if stacked_lanes:
-            stacked_total = sum(l.get("pr_count", 0) for l in stacked_lanes)
             sections.append(f"### Stacked PRs ({stacked_total} PRs targeting feature branches)")
             sections.append("")
-            sections.append("| Lane | PRs | Risk |")
-            sections.append("|------|-----|------|")
-            for lane in stacked_lanes:
-                lid = lane.get("lane_id", "?")
-                display = _lane_display_name(lid)
-                prs_in_lane = lane.get("prs", [])
-                pr_nums = ", ".join(
-                    f"{_PR_TYPE_EMOJI.get(p.get('pr_type','unknown'),'❓')}#{p.get('pr_number', '?')}"
-                    for p in prs_in_lane[:5]
-                )
-                if len(prs_in_lane) > 5:
-                    pr_nums += f" +{len(prs_in_lane)-5} more"
-                risk_emoji = _risk_emoji_for_lane(prs_in_lane)
-                sections.append(f"| {display} | {pr_nums} | {risk_emoji} |")
-            sections.append("")
             sections.append(
-                "> ⚠️ Stacked PRs target feature branches — they depend on those branches being merged first. "
-                "Do not batch with canonical branch lanes."
+                "> ⚠️ These PRs target feature branches — they depend on those branches being "
+                "merged first. Do not batch with canonical branch lanes."
             )
             sections.append("")
+            for lane in stacked_lanes:
+                feature = lane.get("lane_id", "").replace("stacked/", "", 1)
+                prs_in_lane = lane.get("prs", [])
+                n_high = sum(1 for p in prs_in_lane if p.get("blast_radius") == "high")
+                n_med = sum(1 for p in prs_in_lane if p.get("blast_radius") == "medium")
+                sections.append(f"**→ {feature}** ({len(prs_in_lane)} PRs)")
+                sections.append("")
+                sections.append("| PR | Title | Target | Category | Type | Blast | CI | Age | Reviewers | Issues |")
+                sections.append("|----|-------|--------|----------|------|-------|----|-----|-----------|--------|")
+                for p in prs_in_lane:
+                    pr_link = _pr_link(p)
+                    title = (p.get("title") or "")[:40]
+                    target = p.get("target_branch", feature)
+                    cat = p.get("category", "unknown")
+                    pt = p.get("pr_type", "unknown")
+                    type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
+                    blast = p.get("blast_radius", "low")
+                    blast_cell = f"{_RISK_EMOJI.get(blast,'⚪')} {blast}"
+                    ci_cell = _ci_cell(p.get("ci_status", "none"))
+                    age = _age_label(p.get("age_hours", 0))
+                    approvals = p.get("approval_count", 0)
+                    reviewers = p.get("reviewer_count", 0)
+                    rev_cell = f"{approvals}/{reviewers} ✅" if reviewers else "—"
+                    issue_cell = _issue_cell(p.get("issue_ref"))
+                    sections.append(
+                        f"| {pr_link} | {title} | {target} | {cat} | {type_emoji} | {blast_cell} "
+                        f"| {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                    )
+                sections.append("")
 
         ctx["LANE_COUNT"] = str(len(lane_list))
         ctx["QUEUED_PRS"] = str(total_prs)
