@@ -435,50 +435,86 @@ def _classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
     return "unknown"
 
 
+def _fetch_diffstat_for_pr(config: dict, pr_number: str) -> list[dict]:
+    """Fetch diffstat for a single PR. Thread-safe wrapper for concurrent use."""
+    from scripts.mq._shared import fetch_pr_files
+    return fetch_pr_files(config, pr_number)
+
+
 def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
     """Enrich each PR's blast_radius, scope, and category in-place using per-PR diffstat.
 
-    One HTTP call per PR (BB: /diffstat endpoint; GH: gh pr view --json files).
+    Fetches diffstats concurrently (up to DIFFSTAT_WORKERS threads, default 8) to avoid
+    serial HTTP bottleneck on large repos. Enrichment logic runs sequentially after fetch.
     Best-effort: failures leave fields at their label/title-derived defaults.
     File paths are the authoritative signal for both category and blast_radius.
     """
-    from scripts.mq._shared import fetch_pr_files
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from scripts.mq.scope_router import _compute_scope
+    import time
+
     total = len(prs)
-    if total:
-        print(f"[collect_ready] enriching {total} PRs with diffstat (one API call per PR)...", flush=True)
-    for i, pr in enumerate(prs):
-        if i > 0 and i % 25 == 0:
-            print(f"[collect_ready] enriched {i}/{total} PRs...", flush=True)
+    if not total:
+        return
+
+    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
+    max_workers = max(1, min(max_workers, 20))
+    print(
+        f"[collect_ready] enriching {total} PRs with diffstat "
+        f"(concurrent, workers={max_workers})...",
+        flush=True,
+    )
+
+    t0 = time.monotonic()
+    diffstats: dict[int, list[dict]] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_pr = {
+            pool.submit(_fetch_diffstat_for_pr, config, str(pr["pr_number"])): pr["pr_number"]
+            for pr in prs
+        }
+        done_count = 0
+        for future in as_completed(future_to_pr):
+            pr_num = future_to_pr[future]
+            done_count += 1
+            try:
+                diffstats[pr_num] = future.result()
+            except Exception as exc:
+                print(f"[collect_ready] warn: diffstat failed PR#{pr_num}: {exc}", flush=True)
+                diffstats[pr_num] = []
+            if done_count % 25 == 0:
+                print(f"[collect_ready] fetched {done_count}/{total} diffstats...", flush=True)
+
+    elapsed = time.monotonic() - t0
+    print(f"[collect_ready] diffstat fetch complete: {total} PRs in {elapsed:.1f}s", flush=True)
+
+    for pr in prs:
+        files = diffstats.get(pr["pr_number"], [])
+        if not files:
+            continue
         try:
-            files = fetch_pr_files(config, str(pr["pr_number"]))
-            if files:
-                scope_name, blast_radius, _, _ = _compute_scope(files, {})
-                if scope_name and scope_name not in ("unknown", "cross-scope"):
-                    pr["scope"] = scope_name
-                # Re-evaluate flags with file-path evidence (authoritative)
-                flags = _classify_pr_flags(pr, files=files)
-                pr["is_test_pr"] = flags["is_test_pr"]
-                pr["is_wip_pr"] = flags["is_wip_pr"]
-                pr["is_docs_pr"] = flags["is_docs_pr"]
-                pr["pr_type"] = _classify_pr_type(pr, flags)
-                # Category: test category wins — tests/auth/ must not become authn_authz
-                if flags["is_test_pr"]:
-                    pr["category"] = "test"
-                    pr["category_confidence"] = "file_path"
-                else:
-                    cat, confidence = _classify_pr_category(pr, files=files)
-                    pr["category"] = cat
-                    pr["category_confidence"] = confidence
-                # Apply blast cap AFTER category is set (data-driven cap table)
-                pr["blast_radius"] = _apply_blast_cap(blast_radius, flags)
-                # Compute multi-dimension risk score (uses blast_radius + category already set)
-                risk = _compute_risk_score(pr, files)
-                pr["risk_score"] = risk["risk_score"]
-                pr["risk_tier"] = risk["risk_tier"]
-                pr["risk_dimensions"] = risk["risk_dimensions"]
+            scope_name, blast_radius, _, _ = _compute_scope(files, {})
+            if scope_name and scope_name not in ("unknown", "cross-scope"):
+                pr["scope"] = scope_name
+            flags = _classify_pr_flags(pr, files=files)
+            pr["is_test_pr"] = flags["is_test_pr"]
+            pr["is_wip_pr"] = flags["is_wip_pr"]
+            pr["is_docs_pr"] = flags["is_docs_pr"]
+            pr["pr_type"] = _classify_pr_type(pr, flags)
+            if flags["is_test_pr"]:
+                pr["category"] = "test"
+                pr["category_confidence"] = "file_path"
+            else:
+                cat, confidence = _classify_pr_category(pr, files=files)
+                pr["category"] = cat
+                pr["category_confidence"] = confidence
+            pr["blast_radius"] = _apply_blast_cap(blast_radius, flags)
+            risk = _compute_risk_score(pr, files)
+            pr["risk_score"] = risk["risk_score"]
+            pr["risk_tier"] = risk["risk_tier"]
+            pr["risk_dimensions"] = risk["risk_dimensions"]
         except Exception as exc:
-            print(f"[collect_ready] warn: diffstat failed PR#{pr['pr_number']}: {exc}", flush=True)
+            print(f"[collect_ready] warn: enrich failed PR#{pr['pr_number']}: {exc}", flush=True)
 
 
 def _compute_age_hours(created_at: str) -> float:
