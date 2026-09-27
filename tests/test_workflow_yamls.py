@@ -48,18 +48,19 @@ def _yaml_path(name: str) -> Path:
 def _render_go_templates_empty(text: str) -> str:
     """Simulate Go template rendering with all variables empty.
 
-    Replaces {{- if ...}}...{{- end}} blocks with empty string (condition false).
-    Replaces {{.Var}} with empty string.
-    Replaces {{if ...}}...{{end}} blocks with empty string.
+    Formicary renders Go templates in script: items at definition registration
+    time (with job_variable defaults), and environment: values at job execution
+    time.  This function simulates registration-time rendering so we can parse
+    the result with PyYAML and check for structural issues.
 
-    This catches the exact class of bug where a dangling `\\` is left after
-    template expansion (e.g. `{{if .Var}}--flag "..."{{end}} \\` → ` \\`).
+    Strips {{- if ...}}...{{- end}} / {{if ...}}...{{end}} blocks (condition=false)
+    and replaces {{.Var}} references with empty string.
     """
-    # Remove {{- if ...}} ... {{- end}} blocks (with whitespace trim markers)
+    # Remove {{- if ...}} ... {{- end}} blocks (whitespace-trimming variants)
     text = re.sub(r'\{\{-?\s*if\s+[^}]+\}\}.*?\{\{-?\s*end\s*-?\}\}', '', text, flags=re.DOTALL)
-    # Remove remaining {{if ...}} ... {{end}} (non-greedy, same line or multiline)
+    # Remove remaining {{if ...}} ... {{end}}
     text = re.sub(r'\{\{if\s+[^}]+\}\}.*?\{\{end\}\}', '', text, flags=re.DOTALL)
-    # Replace {{.Var}} and {{.Var | filter}} references
+    # Replace all remaining {{ ... }} template expressions with empty string
     text = re.sub(r'\{\{[^}]+\}\}', '', text)
     return text
 
