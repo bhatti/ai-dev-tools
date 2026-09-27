@@ -37,11 +37,128 @@ _JIRA_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,9}-\d+)\b')  # e.g. PROJ-123, AB-
 _GH_CLOSES_RE = re.compile(r'(?:closes?|fixes?|resolves?)\s+#(\d+)', re.IGNORECASE)
 _GH_PR_URL_RE = re.compile(r'/pull/\d+.*')
 
+# ---------------------------------------------------------------------------
+# PR flag detection — env-var configurable title/branch patterns.
+# File-path patterns (test file extensions) are universal and always active.
+# Set env vars to "" to disable title/branch-pattern detection entirely.
+# ---------------------------------------------------------------------------
+
+def _compile_opt(env_key: str, default: str) -> re.Pattern | None:
+    """Compile regex from env var; return None when env var is empty string."""
+    pattern = os.environ.get(env_key, default)
+    return re.compile(pattern, re.IGNORECASE) if pattern else None
+
+
+# Test/SDET — title and branch patterns (env-configurable)
+_TEST_TITLE_RE: re.Pattern | None = _compile_opt(
+    "TEST_PR_TITLE_PATTERNS", r"\[SDET\]|\bSDET\b|\[QA\]|\bQA\b"
+)
+_TEST_BRANCH_PREFIXES: tuple[str, ...] = tuple(
+    p.strip()
+    for p in os.environ.get("TEST_BRANCH_PREFIXES", "sdet/,test/,tests/,qa/,e2e/").split(",")
+    if p.strip()
+)
+
+# WIP / Draft / PoC (env-configurable)
+_WIP_TITLE_RE: re.Pattern | None = _compile_opt(
+    "WIP_PR_TITLE_PATTERNS", r"\[WIP\]|\bWIP\b|^DRAFT[:/]|\[PoC\]|\[POC\]"
+)
+
+# Docs-only PRs (env-configurable title; file patterns are universal)
+_DOCS_TITLE_RE: re.Pattern | None = _compile_opt(
+    "DOCS_PR_TITLE_PATTERNS", r"^docs?\(|^docs?:|^\[docs?\]"
+)
+
+# File-path patterns — universal, not org-specific
+_TEST_FILE_RE = re.compile(
+    r"(/__tests__/|/[Tt]ests?/|\.test\.[jt]sx?$|\.spec\.[jt]sx?$"
+    r"|_test\.go$|[Tt]est\.java$|(?:^|/)test_[^/]+\.py$|[^/]+_test\.py$)",
+    re.IGNORECASE,
+)
+_DOCS_FILE_RE = re.compile(r"\.md$|\.rst$|\.txt$|/docs?/", re.IGNORECASE)
+_ASSET_FILE_RE = re.compile(r"\.svg$|/icons?/|/assets?/", re.IGNORECASE)
+
+# Fraction of files that must be test files to declare a PR "test-only" (configurable)
+_TEST_FILE_THRESHOLD = float(os.environ.get("TEST_FILE_THRESHOLD", "0.8"))
+
+# Blast order and data-driven cap table
+_BLAST_ORDER = ["low", "medium", "high"]
+_PR_FLAG_BLAST_CAPS: dict[str, str] = {
+    "is_test_pr": "low",
+    "is_docs_pr": "low",
+    "is_wip_pr":  "medium",
+}
+
+
+def _classify_pr_flags(pr: dict, files: list[dict] | None = None) -> dict[str, bool]:
+    """Return boolean flags describing special PR types.
+
+    Keys: is_test_pr, is_wip_pr, is_docs_pr.
+
+    File-path signals (always active when files available):
+    - is_test_pr: TEST_FILE_THRESHOLD fraction of changed files are test files
+    - is_docs_pr: all changed files are docs/markdown
+    - (no file signal for WIP — title only)
+
+    Title/branch signals (active when env vars non-empty):
+    - is_test_pr: TEST_PR_TITLE_PATTERNS match or branch starts with TEST_BRANCH_PREFIXES
+    - is_wip_pr:  WIP_PR_TITLE_PATTERNS match
+    - is_docs_pr: DOCS_PR_TITLE_PATTERNS match or branch starts with docs/
+    """
+    title = pr.get("title", "")
+    branch = pr.get("branch", "") or pr.get("headRefName", "")
+    flags: dict[str, bool] = {"is_test_pr": False, "is_wip_pr": False, "is_docs_pr": False}
+
+    # --- file-path signals (authoritative when available) ---
+    if files:
+        total = len(files)
+        test_count = sum(1 for f in files if _TEST_FILE_RE.search(f.get("path", "")))
+        if total and test_count / total >= _TEST_FILE_THRESHOLD:
+            flags["is_test_pr"] = True
+        if total and all(_DOCS_FILE_RE.search(f.get("path", "")) for f in files):
+            flags["is_docs_pr"] = True
+        if total and all(_ASSET_FILE_RE.search(f.get("path", "")) for f in files):
+            flags["is_docs_pr"] = True  # asset-only treated as docs-level blast
+
+    # --- title/branch signals (fallback; env-var disabled when pattern is "") ---
+    if not flags["is_test_pr"]:
+        if _TEST_TITLE_RE and _TEST_TITLE_RE.search(title):
+            flags["is_test_pr"] = True
+        elif _TEST_BRANCH_PREFIXES and branch and branch.startswith(_TEST_BRANCH_PREFIXES):
+            flags["is_test_pr"] = True
+
+    if not flags["is_wip_pr"] and _WIP_TITLE_RE and _WIP_TITLE_RE.search(title):
+        flags["is_wip_pr"] = True
+
+    if not flags["is_docs_pr"]:
+        if _DOCS_TITLE_RE and _DOCS_TITLE_RE.search(title):
+            flags["is_docs_pr"] = True
+        elif branch.startswith("docs/"):
+            flags["is_docs_pr"] = True
+
+    return flags
+
+
+def _apply_blast_cap(blast_radius: str, flags: dict[str, bool]) -> str:
+    """Apply the lowest blast_radius cap for any active flag."""
+    cap_idx = _BLAST_ORDER.index(blast_radius)
+    for flag, cap in _PR_FLAG_BLAST_CAPS.items():
+        if flags.get(flag):
+            cap_idx = min(cap_idx, _BLAST_ORDER.index(cap))
+    return _BLAST_ORDER[cap_idx]
+
+
 # Canonical category definitions — see shared/merge-queue-metrics.md#pr-categories
-# Order matters: first match wins. authn_authz before security so OAuth/IAM paths
-# (which contain "auth" as a substring) match the more specific rule first.
+# Order matters: first match wins.
+# "test" MUST be first so test paths (tests/auth/) don't match authn_authz/security.
+# authn_authz before security so OAuth/IAM paths match the more specific rule first.
 _CATEGORY_RULES: list[tuple[str, list[str], list[str], list[str]]] = [
     # (category, path_patterns, label_keywords, title_re_patterns)
+    ("test",       [r"/__tests__/", r"/test/", r"/tests/", r"\.test\.[jt]sx?$",
+                    r"\.spec\.[jt]sx?$", r"_test\.go$", r"Test\.java$",
+                    r"test_.*\.py$", r".*_test\.py$"],
+                   ["test", "sdet", "qa"],
+                   [r"\[SDET\]", r"\bSDET\b", r"\btest suite\b"]),
     ("authn_authz", [r"authn", r"authz", r"oauth", r"iam", r"rbac", r"saml", r"sso",
                      r"(^|/)auth(/|$)", r"token", r"session"],
                     ["auth", "authz", "rbac"],
@@ -162,13 +279,23 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
             files = fetch_pr_files(config, str(pr["pr_number"]))
             if files:
                 scope_name, blast_radius, _, _ = _compute_scope(files, {})
-                pr["blast_radius"] = blast_radius
                 if scope_name and scope_name not in ("unknown", "cross-scope"):
                     pr["scope"] = scope_name
-                # File-path category is authoritative — overrides label/title classification
-                cat, confidence = _classify_pr_category(pr, files=files)
-                pr["category"] = cat
-                pr["category_confidence"] = confidence
+                # Re-evaluate flags with file-path evidence (authoritative)
+                flags = _classify_pr_flags(pr, files=files)
+                pr["is_test_pr"] = flags["is_test_pr"]
+                pr["is_wip_pr"] = flags["is_wip_pr"]
+                pr["is_docs_pr"] = flags["is_docs_pr"]
+                # Category: test category wins — tests/auth/ must not become authn_authz
+                if flags["is_test_pr"]:
+                    pr["category"] = "test"
+                    pr["category_confidence"] = "file_path"
+                else:
+                    cat, confidence = _classify_pr_category(pr, files=files)
+                    pr["category"] = cat
+                    pr["category_confidence"] = confidence
+                # Apply blast cap AFTER category is set (data-driven cap table)
+                pr["blast_radius"] = _apply_blast_cap(blast_radius, flags)
         except Exception as exc:
             print(f"[collect_ready] warn: diffstat failed PR#{pr['pr_number']}: {exc}", flush=True)
 
@@ -215,7 +342,11 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
     has_approval = pr.get("has_approval") or (approval_count > 0)
     reviewer_count = pr.get("reviewer_count") or len(pr.get("reviewers", []))
 
-    category, category_confidence = _classify_pr_category(pr)  # label/title fallback; enriched below
+    # Title-only pass for flags (no files yet); _enrich_prs_with_diffstat refines with file paths
+    flags = _classify_pr_flags(pr)
+    category, category_confidence = _classify_pr_category(pr)
+    if flags["is_test_pr"]:
+        category, category_confidence = "test", "title"
     return {
         "pr_number": pr_number,
         "repo": pr.get("repo", default_repo),
@@ -224,6 +355,9 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         "blast_radius": "low",       # _enrich_prs_with_diffstat sets authoritative blast_radius per PR
         "category": category,        # _enrich_prs_with_diffstat upgrades to 'file_path' confidence
         "category_confidence": category_confidence,
+        "is_test_pr": flags["is_test_pr"],
+        "is_wip_pr": flags["is_wip_pr"],
+        "is_docs_pr": flags["is_docs_pr"],
         "pr_type": _classify_pr_type(pr),
         "author": author_login,
         "age_hours": round(float(age_hours), 1),
@@ -242,7 +376,7 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
 @click.command()
 @click.option("--label", default="", help="Optional label filter (empty = all open PRs; GH only)")
 @click.option("--repo", default="", help="Repo override: full URL or org/repo slug")
-@click.option("--target-branch", default="", envvar="TARGET_BRANCH",
+@click.option("--target-branch", "--target", default="", envvar="TARGET_BRANCH",
               help="Only collect PRs targeting this branch (e.g. stage, main, dev). "
                    "Dramatically reduces PR count for large repos.")
 def main(label: str, repo: str, target_branch: str) -> None:

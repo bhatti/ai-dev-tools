@@ -904,6 +904,10 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     cat_cell = f"⚠️ {cat_cell}"
                 pt = p.get("pr_type", "unknown")
                 type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
+                if p.get("is_wip_pr"):
+                    type_emoji += "🚧"
+                elif p.get("is_docs_pr"):
+                    type_emoji += "📝"
                 blast = p.get("blast_radius", "low")
                 blast_cell = f"{_RISK_EMOJI.get(blast, '⚪')} {blast}"
                 ci_cell = _ci_cell(p.get("ci_status", "none"))

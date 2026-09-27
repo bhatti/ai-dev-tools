@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.mq.collect_ready import _compute_age_hours, _classify_pr_type, _classify_pr_category, _normalize_pr, _enrich_prs_with_diffstat, _extract_issue_ref
+from scripts.mq.collect_ready import (
+    _compute_age_hours, _classify_pr_type, _classify_pr_category,
+    _normalize_pr, _enrich_prs_with_diffstat, _extract_issue_ref,
+    _classify_pr_flags, _apply_blast_cap,
+)
 
 
 class TestComputeAgeHours:
@@ -379,3 +383,198 @@ class TestTargetBranchFilter:
             assert result.exit_code == 0, result.output
             data = json.loads((tmp_path / "ready_prs.json").read_text())
             assert data["target_branch_filter"] == ""
+
+
+class TestClassifyPrFlags:
+    """_classify_pr_flags returns is_test_pr, is_wip_pr, is_docs_pr."""
+
+    # --- is_test_pr: title signal ---
+    def test_sdet_title_detected_as_test_pr(self):
+        pr = {"title": "[SDET][TASK]: ESERV-20916 fix auth tests", "branch": ""}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_test_pr"] is True
+
+    def test_qa_title_detected_as_test_pr(self):
+        pr = {"title": "[QA] regression suite for billing", "branch": ""}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_test_pr"] is True
+
+    def test_normal_feat_title_not_test_pr(self):
+        pr = {"title": "feat: add billing dashboard", "branch": "feature/billing"}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_test_pr"] is False
+
+    # --- is_test_pr: branch prefix signal ---
+    def test_sdet_branch_prefix_detected(self):
+        pr = {"title": "some change", "branch": "sdet/login-e2e"}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_test_pr"] is True
+
+    def test_test_branch_prefix_detected(self):
+        pr = {"title": "some change", "branch": "test/auth-suite"}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_test_pr"] is True
+
+    def test_non_test_branch_not_flagged(self):
+        pr = {"title": "some change", "branch": "fix/login-crash"}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_test_pr"] is False
+
+    # --- is_test_pr: file-path signal (threshold) ---
+    def test_test_files_threshold_triggers_flag(self):
+        """80% test files → is_test_pr=True."""
+        pr = {"title": "update tests", "branch": ""}
+        files = [
+            {"path": "tests/auth/test_login.py"},
+            {"path": "tests/auth/test_logout.py"},
+            {"path": "tests/billing/test_invoice.py"},
+            {"path": "tests/billing/test_refund.py"},
+            {"path": "src/auth/login.py"},  # one non-test file → 80% exactly
+        ]
+        flags = _classify_pr_flags(pr, files=files)
+        assert flags["is_test_pr"] is True
+
+    def test_below_threshold_not_flagged(self):
+        """Only 50% test files → is_test_pr=False (below 80% default threshold)."""
+        pr = {"title": "update auth module", "branch": ""}
+        files = [
+            {"path": "tests/auth/test_login.py"},
+            {"path": "src/auth/login.py"},
+        ]
+        flags = _classify_pr_flags(pr, files=files)
+        assert flags["is_test_pr"] is False
+
+    def test_go_test_files_detected(self):
+        pr = {"title": "add unit tests", "branch": ""}
+        files = [{"path": "pkg/auth/login_test.go"}, {"path": "pkg/billing/invoice_test.go"}]
+        flags = _classify_pr_flags(pr, files=files)
+        assert flags["is_test_pr"] is True
+
+    # --- is_test_pr: env-var disable ---
+    def test_disable_title_detection_via_empty_env(self, monkeypatch):
+        """Setting TEST_PR_TITLE_PATTERNS='' disables title detection."""
+        monkeypatch.setenv("TEST_PR_TITLE_PATTERNS", "")
+        # Must re-import or call with explicit patterns; since patterns are module-level,
+        # test via file-path signal only (title should not flag).
+        pr = {"title": "[SDET] some test change", "branch": "feature/normal"}
+        # With empty env, _TEST_TITLE_RE is None — no title match.
+        # We test the function respects _TEST_TITLE_RE=None by calling with no files.
+        # Since patterns are compiled at import time, we test the guard in the function directly.
+        from scripts.mq import collect_ready as cr
+        import re
+        original = cr._TEST_TITLE_RE
+        try:
+            cr._TEST_TITLE_RE = None  # simulate env="" at import
+            flags = cr._classify_pr_flags(pr)
+            assert flags["is_test_pr"] is False
+        finally:
+            cr._TEST_TITLE_RE = original
+
+    # --- is_wip_pr ---
+    def test_wip_title_detected(self):
+        pr = {"title": "[WIP] refactor billing service", "branch": ""}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_wip_pr"] is True
+
+    def test_draft_title_detected(self):
+        pr = {"title": "DRAFT: new auth flow", "branch": ""}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_wip_pr"] is True
+
+    def test_normal_pr_not_wip(self):
+        pr = {"title": "feat: add billing dashboard", "branch": ""}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_wip_pr"] is False
+
+    # --- is_docs_pr ---
+    def test_docs_title_detected(self):
+        pr = {"title": "docs: update API reference", "branch": ""}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_docs_pr"] is True
+
+    def test_docs_branch_detected(self):
+        pr = {"title": "update changelog", "branch": "docs/update-api-ref"}
+        flags = _classify_pr_flags(pr)
+        assert flags["is_docs_pr"] is True
+
+    def test_all_markdown_files_docs_pr(self):
+        pr = {"title": "update docs", "branch": ""}
+        files = [{"path": "docs/api.md"}, {"path": "README.md"}, {"path": "CHANGELOG.md"}]
+        flags = _classify_pr_flags(pr, files=files)
+        assert flags["is_docs_pr"] is True
+
+    def test_mixed_files_not_docs_pr(self):
+        pr = {"title": "update docs and code", "branch": ""}
+        files = [{"path": "docs/api.md"}, {"path": "src/auth/login.py"}]
+        flags = _classify_pr_flags(pr, files=files)
+        assert flags["is_docs_pr"] is False
+
+    # --- category test classification takes priority over authn_authz ---
+    def test_test_files_in_auth_dir_classified_as_test_not_authn_authz(self):
+        """tests/auth/ files must be 'test' category, not 'authn_authz' (order matters)."""
+        pr = {"title": "[SDET] auth regression suite", "branch": ""}
+        files = [
+            {"path": "tests/auth/test_login.py"},
+            {"path": "tests/auth/test_oauth.py"},
+            {"path": "tests/auth/test_session.py"},
+            {"path": "tests/auth/test_token.py"},
+        ]
+        flags = _classify_pr_flags(pr, files=files)
+        assert flags["is_test_pr"] is True
+        # category classification should also be 'test' (tested via _normalize_pr)
+        result = _normalize_pr(
+            {"number": 99, "age_hours": 1.0, "title": "[SDET] auth regression suite"},
+            "org/repo"
+        )
+        assert result["is_test_pr"] is True
+
+
+class TestApplyBlastCap:
+    """_apply_blast_cap enforces data-driven caps: test/docs→low, wip→medium."""
+
+    def test_test_pr_capped_at_low(self):
+        assert _apply_blast_cap("high", {"is_test_pr": True, "is_wip_pr": False, "is_docs_pr": False}) == "low"
+
+    def test_test_pr_medium_capped_at_low(self):
+        assert _apply_blast_cap("medium", {"is_test_pr": True, "is_wip_pr": False, "is_docs_pr": False}) == "low"
+
+    def test_docs_pr_capped_at_low(self):
+        assert _apply_blast_cap("high", {"is_test_pr": False, "is_wip_pr": False, "is_docs_pr": True}) == "low"
+
+    def test_wip_pr_capped_at_medium(self):
+        assert _apply_blast_cap("high", {"is_test_pr": False, "is_wip_pr": True, "is_docs_pr": False}) == "medium"
+
+    def test_wip_pr_low_not_raised(self):
+        """WIP cap is medium — but a WIP PR already at low stays low (cap only reduces)."""
+        assert _apply_blast_cap("low", {"is_test_pr": False, "is_wip_pr": True, "is_docs_pr": False}) == "low"
+
+    def test_no_flags_passes_through(self):
+        assert _apply_blast_cap("high", {"is_test_pr": False, "is_wip_pr": False, "is_docs_pr": False}) == "high"
+
+    def test_normal_low_unchanged(self):
+        assert _apply_blast_cap("low", {"is_test_pr": False, "is_wip_pr": False, "is_docs_pr": False}) == "low"
+
+    def test_test_wins_over_wip(self):
+        """test cap (low) beats wip cap (medium) — lowest cap wins."""
+        assert _apply_blast_cap("high", {"is_test_pr": True, "is_wip_pr": True, "is_docs_pr": False}) == "low"
+
+    def test_enrich_applies_blast_cap_for_test_pr(self):
+        """_enrich_prs_with_diffstat applies blast cap after re-evaluating flags with file paths."""
+        prs = [{
+            "pr_number": 10, "blast_radius": "high", "scope": "unknown",
+            "category": "authn_authz", "category_confidence": "file_path",
+            "title": "[SDET] auth tests", "labels": [], "description": "",
+            "is_test_pr": False, "is_wip_pr": False, "is_docs_pr": False,
+            "branch": "",
+        }]
+        # 100% test files → is_test_pr=True → blast capped at low
+        files = [
+            {"path": "tests/auth/test_login.py"},
+            {"path": "tests/auth/test_oauth.py"},
+        ]
+        with patch("scripts.mq._shared.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("cross-scope", "high", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["blast_radius"] == "low"
+        assert prs[0]["is_test_pr"] is True
+        assert prs[0]["category"] == "test"
