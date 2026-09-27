@@ -194,30 +194,29 @@ def test_bb_group_by_scope_segregates_by_target_branch() -> None:
         lanes = lane_data.get("lanes", [])
         assert lanes, "No lanes produced"
 
-        # All lane_ids must be in format "{target_branch}/{scope}"
+        # All lane_ids must be in format "{target_branch}/{scope}".
+        # target_branch itself may contain "/" (e.g. "branches/AI-5005-BYOA-RBAC"),
+        # so extract the branch prefix via rsplit("/", 1) — everything before the last "/".
         for lane in lanes:
             lane_id = lane["lane_id"]
             assert "/" in lane_id, (
                 f"lane_id {lane_id!r} missing target_branch prefix — expected format: '<branch>/<scope>'"
             )
-            branch_part = lane_id.split("/")[0]
+            branch_part, _ = lane_id.rsplit("/", 1)
             assert branch_part, f"Empty branch part in lane_id {lane_id!r}"
             print(f"  lane {lane_id!r}: {lane['pr_count']} PRs")
 
-        # If multiple target branches exist, verify no cross-branch mixing
-        target_branches_in_lanes: dict[str, set[str]] = {}
+        # Verify no cross-branch mixing: every PR in a lane must target the same branch
+        # as the lane_id's prefix (everything before the last "/" = scope).
         for lane in lanes:
             lane_id = lane["lane_id"]
-            branch_prefix = lane_id.split("/")[0]
+            expected_target, _ = lane_id.rsplit("/", 1)
             for pr in lane.get("prs", []):
                 tb = pr.get("target_branch", "") or "unknown"
-                target_branches_in_lanes.setdefault(lane_id, set()).add(tb)
-
-        for lane_id, branches in target_branches_in_lanes.items():
-            branch_prefix = lane_id.split("/")[0]
-            assert all(b == branch_prefix for b in branches), (
-                f"Lane {lane_id!r} contains PRs targeting multiple branches: {branches}"
-            )
+                assert tb == expected_target, (
+                    f"Lane {lane_id!r}: PR #{pr.get('pr_number')} targets {tb!r} "
+                    f"but lane prefix is {expected_target!r}"
+                )
 
         all_target_branches = sorted({l["lane_id"].split("/")[0] for l in lanes})
         print(f"\n[integ] {len(lanes)} lanes across target branches: {all_target_branches} ✓")
