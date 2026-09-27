@@ -464,13 +464,8 @@ def fetch_bb_pr_metadata(config: dict, pr_number: str) -> dict:
     return result
 
 
-SENSITIVE_PATHS = re.compile(
-    r"(^|/)("
-    r"auth|security|billing|payments|crypto|secrets|credentials"
-    r"|\.env|migrations|rbac|iam|oauth|tokens"
-    r")(/|$|\.)",
-    re.IGNORECASE,
-)
+# Re-exported from shared module for backward compatibility
+from scripts.common.pr_classify import SENSITIVE_PATHS  # noqa: F811
 
 _TRANSPARENT_PREFIXES = ("src", "lib", "pkg", "internal", "crates", "apps")
 
@@ -487,27 +482,5 @@ def top_level_module(filepath: str) -> str:
     return parts[0]
 
 
-def is_test_file(path: str) -> bool:
-    """Check if a file path looks like a test file."""
-    name = path.split("/")[-1] if "/" in path else path
-    return (
-        name.startswith("test_")
-        or name.endswith("_test.go")
-        or name.endswith("_test.py")
-        or name.endswith("_test.rs")
-        or name.endswith(".test.ts")
-        or name.endswith(".test.tsx")
-        or name.endswith(".test.js")
-        or name.endswith(".test.jsx")
-        or name.endswith("Test.java")
-        or name.endswith("Test.kt")
-        or name.endswith("_spec.rb")
-        or name.endswith("_test.rb")
-        or name.endswith("Tests.cs")
-        or name.endswith(".spec.ts")
-        or name.endswith(".spec.js")
-        or "/tests/" in path
-        or "/__tests__/" in path
-        or "/test/" in path
-        or "/spec/" in path
-    )
+# Re-exported from shared module for backward compatibility
+from scripts.common.pr_classify import is_test_file  # noqa: F811,F401

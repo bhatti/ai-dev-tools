@@ -173,6 +173,7 @@ _SCRIPTS_TO_COPY = [
     "scripts/common/pr_utils.py",
     "scripts/common/setup_tracker.py",
     "scripts/common/text_utils.py",
+    "scripts/common/pr_classify.py",
     "scripts/mq/__init__.py",
     "scripts/mq/_shared.py",
     "scripts/mq/clone_pr.py",

@@ -320,6 +320,7 @@ class TestPromptTemplate:
             skill_instructions="Analyze the PRs.",
             pr_ids="1,2,3",
             pr_state_summary="merged=48  open=1  declined=1  total=50",
+            metrics_summary="### Category Breakdown\n| Category | PRs |",
         )
         assert "org/repo" in result
         assert "2026-08-15" in result
@@ -327,6 +328,7 @@ class TestPromptTemplate:
         assert "50" in result
         assert "all" in result
         assert "Analyze the PRs." in result
+        assert "Category Breakdown" in result
         assert "pr_audit_report.md" in result
         assert "pr_audit_findings.json" in result
         assert "skill_improvements.json" in result
@@ -345,6 +347,10 @@ class TestPromptTemplate:
     def test_template_has_state_summary_placeholder(self):
         """Verify the pr_state_summary placeholder is wired into the template."""
         assert "{pr_state_summary}" in _PR_AUDIT_PROMPT_TEMPLATE
+
+    def test_template_has_metrics_summary_placeholder(self):
+        """Verify the metrics_summary placeholder is wired into the template."""
+        assert "{metrics_summary}" in _PR_AUDIT_PROMPT_TEMPLATE
 
 
 class TestPRSizeBucket:

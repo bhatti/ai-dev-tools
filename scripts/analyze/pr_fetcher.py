@@ -15,6 +15,7 @@ from pathlib import Path
 
 from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
 from scripts.common.issue_fetcher import get_jira_linked_prs
+from scripts.common.pr_classify import enrich_pr_with_metrics as _enrich_pr_with_metrics
 
 KNOWN_BOTS = {
     "github-actions[bot]", "dependabot[bot]", "renovate[bot]",
@@ -224,8 +225,29 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
     prs: list[dict] = []
     reviews_raw: dict[int, list] = {}
 
+    # Pre-fetch inline review comments in parallel
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _time
+
+    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
+    max_workers = max(1, min(max_workers, 20))
+    print(f"[pr-fetch] fetching inline comments for {len(raw_prs)} GH PRs (workers={max_workers})...", flush=True)
+    t0 = _time.monotonic()
+
+    inline_by_pr: dict[int, list] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_gh_review_comments, org, repo, rp.get("number", 0)): rp.get("number", 0) for rp in raw_prs}
+        for future in as_completed(futures):
+            pr_num = futures[future]
+            try:
+                inline_by_pr[pr_num] = future.result()
+            except Exception as exc:
+                print(f"[pr-fetch] warn: GH inline comments failed PR#{pr_num}: {exc}", flush=True)
+                inline_by_pr[pr_num] = []
+
+    print(f"[pr-fetch] parallel fetch complete: {len(raw_prs)} PRs in {_time.monotonic() - t0:.1f}s", flush=True)
+
     for rp in raw_prs:
-        # Collect all comments (PR-level + review bodies)
         all_comments: list[dict] = []
         for c in rp.get("comments", []):
             all_comments.append({
@@ -242,9 +264,8 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
                     "type": "review",
                 })
 
-        # Fetch inline review comments (code-level)
         pr_number = rp.get("number", 0)
-        inline = _fetch_gh_review_comments(org, repo, pr_number)
+        inline = inline_by_pr.get(pr_number, [])
         all_comments.extend(inline)
         if inline:
             reviews_raw[pr_number] = inline
@@ -303,6 +324,11 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "is_bot_authored": _is_ai_authored(author),
             **depth,
         }
+        classify_files = [
+            {"path": f.get("path", ""), "additions": f.get("additions", 0), "deletions": f.get("deletions", 0)}
+            for f in files_list if isinstance(f, dict)
+        ]
+        _enrich_pr_with_metrics(pr, files=classify_files or None)
         prs.append(pr)
 
     # A.1: save inline review comments to artifact
@@ -530,22 +556,45 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     prs: list[dict] = []
     reviews_raw: dict[int, list] = {}
 
-    for rp in raw_prs[:fetch_cap]:
+    # Parallel fetch: comments + diffstat per PR
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _time
+
+    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
+    max_workers = max(1, min(max_workers, 20))
+    to_fetch = raw_prs[:fetch_cap]
+    print(f"[pr-fetch] fetching comments+diffstat for {len(to_fetch)} BB PRs (workers={max_workers})...", flush=True)
+    t0 = _time.monotonic()
+
+    def _fetch_bb_pr_details(rp: dict) -> tuple[dict, list, list]:
         pr_id = rp.get("id", 0)
-        # Fetch comments
-        all_comments = _fetch_bb_comments(base, pr_id, auth)
+        comments = _fetch_bb_comments(base, pr_id, auth)
+        diffstat = _fetch_bb_diffstat(base, pr_id, auth)
+        return rp, comments, diffstat
+
+    fetched: list[tuple[dict, list, list]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_bb_pr_details, rp): rp.get("id", 0) for rp in to_fetch}
+        for future in as_completed(futures):
+            try:
+                fetched.append(future.result())
+            except Exception as exc:
+                pr_id = futures[future]
+                print(f"[pr-fetch] warn: BB PR#{pr_id} fetch failed: {exc}", flush=True)
+
+    print(f"[pr-fetch] parallel fetch complete: {len(fetched)} PRs in {_time.monotonic() - t0:.1f}s", flush=True)
+
+    for rp, all_comments, diffstat in fetched:
+        pr_id = rp.get("id", 0)
         if all_comments:
             reviews_raw[pr_id] = all_comments
         classified = classify_comments(all_comments)
 
-        # Fetch diffstat for file-level metrics
-        diffstat = _fetch_bb_diffstat(base, pr_id, auth)
         files_changed = len(diffstat)
         additions = sum(d.get("lines_added", 0) for d in diffstat)
         deletions = sum(d.get("lines_removed", 0) for d in diffstat)
         file_paths = [d.get("path", "") for d in diffstat]
 
-        # Extract approvals and assigned reviewers from participants (present in merged PR data)
         participants = rp.get("participants", [])
         approvers = [
             p.get("user", {}).get("display_name") or p.get("user", {}).get("nickname", "")
@@ -553,7 +602,6 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             if p.get("approved") and p.get("role") != "AUTHOR"
         ]
         approvers = [a for a in approvers if a]
-        # All assigned reviewers (role=REVIEWER, regardless of approval/comment status)
         assigned_reviewers = [
             p.get("user", {}).get("display_name") or p.get("user", {}).get("nickname", "")
             for p in participants
@@ -569,7 +617,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "number": pr_id,
             "title": rp.get("title", ""),
             "author": author,
-            "state": "merged",  # bulk fetch always uses state=MERGED
+            "state": "merged",
             "merged_at": rp.get("updated_on", ""),
             "url": rp.get("links", {}).get("html", {}).get("href", ""),
             "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
@@ -591,6 +639,11 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "is_bot_authored": _is_ai_authored(author),
             **depth,
         }
+        classify_files = [
+            {"path": d.get("path", ""), "additions": d.get("lines_added", 0), "deletions": d.get("lines_removed", 0)}
+            for d in diffstat
+        ]
+        _enrich_pr_with_metrics(pr, files=classify_files or None)
         prs.append(pr)
 
     # A.1: save per-PR comments to artifact
@@ -1323,6 +1376,19 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         rubber = pr.get("rubber_stamp_approvers", [])
         if rubber:
             section.append(f"- **Rubber-stamp approvers** (approved, 0 substantive comments): {', '.join(rubber)}")
+
+        if pr.get("pr_type"):
+            section.append(f"- **PR type**: {pr['pr_type']}")
+        if pr.get("category") and pr["category"] != "unknown":
+            section.append(f"- **Category**: {pr['category']} (confidence: {pr.get('category_confidence', '?')})")
+        if pr.get("blast_radius"):
+            section.append(f"- **Blast radius**: {pr['blast_radius']}")
+        if pr.get("risk_tier"):
+            section.append(f"- **Risk**: score={pr.get('risk_score', 0):.0f}, tier={pr['risk_tier']}")
+        if pr.get("complexity") and pr["complexity"] != "low":
+            section.append(f"- **Complexity**: {pr['complexity']}")
+        if pr.get("is_hotspot"):
+            section.append("- **Hotspot**: yes (touches sensitive paths)")
 
         file_paths = pr.get("file_paths", [])
         if file_paths:

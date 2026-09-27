@@ -337,6 +337,8 @@ _PR_AUDIT_PROMPT_TEMPLATE = """\
 
 {pr_state_summary}
 
+{metrics_summary}
+
 ## MANDATORY: PR State Gate — No exceptions
 
 Before writing ANY finding, check the PR's `state` field:
@@ -828,6 +830,12 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 f"m={bucket_counts.get('m',0)} l={bucket_counts.get('l',0)} xl={bucket_counts.get('xl',0)}"
             )
             state_summary_text += f"\nsize_buckets: {size_summary_text}"
+            from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution
+            _metrics_lines = ["## Pre-Computed PR Metrics Summary", ""]
+            _metrics_lines += build_category_breakdown(prs)
+            _metrics_lines += build_work_type_distribution(prs)
+            _metrics_summary = "\n".join(_metrics_lines) if len(_metrics_lines) > 2 else ""
+
             prompt = _PR_AUDIT_PROMPT_TEMPLATE.format(
                 repo_label=label,
                 branch=branch,
@@ -840,6 +848,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 skill_instructions=skill_md,
                 pr_ids=pr_ids_str,
                 pr_state_summary=state_summary_text,
+                metrics_summary=_metrics_summary,
             )
         else:
             print("[pr-audit] WARNING: no SKILL.md found -- using fallback prompt", flush=True)

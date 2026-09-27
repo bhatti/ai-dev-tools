@@ -253,15 +253,15 @@ def _emit_test_health_insights(
     sections.append("")
 
 
-_HIGH_BLAST_CATEGORIES = frozenset({"security", "authn_authz", "sre", "data"})
+from scripts.common.pr_classify import (
+    HIGH_BLAST_CATEGORIES as _HIGH_BLAST_CATEGORIES,
+    PR_TYPE_EMOJI as _PR_TYPE_EMOJI,
+    RISK_EMOJI as _RISK_EMOJI,
+    build_category_breakdown as _build_category_breakdown_shared,
+    build_work_type_distribution as _build_work_type_distribution_shared,
+)
 
-# Display constants reused across per-PR table helpers
-_PR_TYPE_EMOJI: dict[str, str] = {
-    "bug": "🐛", "feature": "✨", "refactor": "♻️", "chore": "🔧",
-    "security": "🔒", "test": "🧪", "docs": "📝", "unknown": "❓",
-}
 _RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]
-_RISK_EMOJI: dict[str, str] = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 
 def _pr_link(pr: dict) -> str:
@@ -344,70 +344,12 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
         "",
     ]
 
-    # Category distribution — only include if category data is present
-    cat_counts = Counter(p.get("category", "unknown") for p in prs)
-    bug_by_cat = Counter(
-        p.get("category", "unknown") for p in prs if p.get("pr_type") == "bug"
-    )
-    # Collect hotspots from lane metadata when available
-    hotspot_cats: set[str] = set()
-    if lanes:
-        for lane in lanes:
-            hotspot_cats.update(lane.get("hotspots", []))
-    # Also flag categories with >=3 bugs directly from PR data
-    hotspot_cats.update(cat for cat, cnt in bug_by_cat.items() if cnt >= 3)
+    lines += _build_category_breakdown_shared(prs, lanes=lanes)
+    lines += _build_work_type_distribution_shared(prs)
 
-    # Only show the table if we have non-trivial category data
-    known_cats = {c: n for c, n in cat_counts.items() if c != "unknown"}
-    if known_cats:
-        lines.append("### Category Breakdown")
-        lines.append("")
-        lines.append("| Category | PRs | Bug PRs | High-Blast | Hotspot |")
-        lines.append("|----------|-----|---------|------------|---------|")
-        high_blast_cats = {p.get("category", "unknown") for p in prs if p.get("risk_tier", p.get("blast_radius")) == "high"}
-        for cat in sorted(known_cats, key=lambda c: -cat_counts[c]):
-            n = cat_counts[cat]
-            bugs = bug_by_cat.get(cat, 0)
-            is_high = "⚠️" if cat in high_blast_cats or cat in _HIGH_BLAST_CATEGORIES else "—"
-            is_hotspot = "🔥 yes" if cat in hotspot_cats else "—"
-            lines.append(f"| {cat} | {n} | {bugs} | {is_high} | {is_hotspot} |")
-        unknown_n = cat_counts.get("unknown", 0)
-        if unknown_n:
-            lines.append(f"| unknown | {unknown_n} | {bug_by_cat.get('unknown', 0)} | — | — |")
-        lines.append("")
-        if hotspot_cats:
-            lines.append(f"> 🔥 Hotspots (≥3 bug PRs in category): **{', '.join(sorted(hotspot_cats))}**")
-            lines.append("")
-
-    # PR Type Distribution — connects to simulation's defect rate knob
-    type_counts = Counter(p.get("pr_type", "unknown") for p in prs)
-    if total > 0 and any(t != "unknown" for t in type_counts):
-        lines.append("### Work Type Distribution")
-        lines.append("")
-        lines.append("| Type | Count | % | Signal |")
-        lines.append("|------|-------|---|--------|")
-        type_order = ["feature", "bug", "security", "refactor", "chore", "test", "docs", "unknown"]
-        type_signals = {
-            "bug": "defect indicator",
-            "security": "defect indicator (security)",
-            "feature": "new functionality",
-            "refactor": "tech debt reduction",
-            "chore": "maintenance / KTLO",
-            "test": "quality investment",
-            "docs": "documentation",
-            "unknown": "unclassified",
-        }
-        for t in type_order:
-            n = type_counts.get(t, 0)
-            if n == 0:
-                continue
-            pct = round(n / total * 100, 1)
-            signal = type_signals.get(t, "")
-            emoji = _PR_TYPE_EMOJI.get(t, "")
-            lines.append(f"| {emoji} {t} | {n} | {pct}% | {signal} |")
-        lines.append("")
-
+    if total > 0:
         # Defect rate proxy — maps to Joe's model
+        type_counts = Counter(p.get("pr_type", "unknown") for p in prs)
         n_bugs = type_counts.get("bug", 0) + type_counts.get("security", 0)
         defect_pct = round(n_bugs / total * 100, 1)
         if n_bugs > 0:
@@ -1139,8 +1081,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
         def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
             """Emit per-PR detail table + summary list for one risk tier."""
-            sec.append("| PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |")
-            sec.append("|----|-------|----------|------|-------|------|-----|-------|----|-----|-----------|--------|")
+            sec.append("| PR | Title | Category | Type | Blast | Risk | LOC | Files | Cx | CI | Age | Reviewers | Issues |")
+            sec.append("|----|-------|----------|------|-------|------|-----|-------|----|-----|-----|-----------|--------|")
             for p in prs_in_tier:
                 pr_link = _pr_link(p)
                 title = (p.get("title") or "")[:50]
@@ -1149,6 +1091,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 cat_cell = f"{cat}*" if conf not in ("file_path", "label", "") else cat
                 if cat in ("security", "authn_authz"):
                     cat_cell = f"⚠️ {cat_cell}"
+                if p.get("is_hotspot"):
+                    cat_cell = f"🔥 {cat_cell}"
                 pt = p.get("pr_type", "unknown")
                 type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
                 if p.get("is_wip_pr"):
@@ -1164,6 +1108,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 loc_cell = f"{loc:,}" if loc else "—"
                 file_count = p.get("file_count", 0)
                 files_cell = str(file_count) if file_count else "—"
+                cx = p.get("complexity", "low")
+                cx_cell = _RISK_EMOJI.get(cx, "—")
                 ci_cell = _ci_cell(p.get("ci_status", "none"))
                 age = _age_label(p.get("age_hours", 0))
                 approvals = p.get("approval_count", 0)
@@ -1172,7 +1118,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 issue_cell = _issue_cell(p.get("issue_ref"))
                 sec.append(
                     f"| {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
-                    f"| {risk_cell} | {loc_cell} | {files_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                    f"| {risk_cell} | {loc_cell} | {files_cell} | {cx_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                 )
             sec.append("")
             # Per-PR summary with full title + issue ref.
@@ -1270,13 +1216,15 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 n_med = sum(1 for p in prs_in_lane if p.get("risk_tier", p.get("blast_radius")) == "medium")
                 sections.append(f"**→ {feature}** ({len(prs_in_lane)} PRs)")
                 sections.append("")
-                sections.append("| PR | Title | Target | Category | Type | Blast | Risk | LOC | CI | Age | Reviewers | Issues |")
-                sections.append("|----|-------|--------|----------|------|-------|------|-----|----|-----|-----------|--------|")
+                sections.append("| PR | Title | Target | Category | Type | Blast | Risk | LOC | Cx | CI | Age | Reviewers | Issues |")
+                sections.append("|----|-------|--------|----------|------|-------|------|-----|-----|-----|-----|-----------|--------|")
                 for p in prs_in_lane:
                     pr_link = _pr_link(p)
                     title = (p.get("title") or "")[:40]
                     target = p.get("target_branch", feature)
                     cat = p.get("category", "unknown")
+                    if p.get("is_hotspot"):
+                        cat = f"🔥 {cat}"
                     pt = p.get("pr_type", "unknown")
                     type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
                     blast = p.get("blast_radius", "low")
@@ -1286,6 +1234,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
                     loc = p.get("total_loc", 0)
                     loc_cell = f"{loc:,}" if loc else "—"
+                    cx = p.get("complexity", "low")
+                    cx_cell = _RISK_EMOJI.get(cx, "—")
                     ci_cell = _ci_cell(p.get("ci_status", "none"))
                     age = _age_label(p.get("age_hours", 0))
                     approvals = p.get("approval_count", 0)
@@ -1294,7 +1244,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     issue_cell = _issue_cell(p.get("issue_ref"))
                     sections.append(
                         f"| {pr_link} | {title} | {target} | {cat} | {type_emoji} | {blast_cell} "
-                        f"| {risk_cell} | {loc_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                        f"| {risk_cell} | {loc_cell} | {cx_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                     )
                 sections.append("")
 

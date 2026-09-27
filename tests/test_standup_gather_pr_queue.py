@@ -410,3 +410,68 @@ class TestComputeGhCiStatus:
     def test_neutral_counts_as_success(self):
         rollup = [{"__typename": "CheckRun", "conclusion": "NEUTRAL", "status": "COMPLETED"}]
         assert _compute_gh_ci_status(rollup) == "success"
+
+
+# ---------------------------------------------------------------------------
+# _enrich_prs_with_metrics — verify enrichment adds classification fields
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch as _patch
+
+
+class TestEnrichPrsWithMetrics:
+    def test_bb_enrichment_adds_fields(self):
+        from scripts.standup.gather_pr_queue import _enrich_prs_with_metrics
+
+        prs = [{
+            "id": "42", "title": "feat: add billing", "author": "alice",
+            "labels": [], "branch": "feature/billing",
+        }]
+        fake_files = [{"path": "src/billing/charge.go", "additions": 50, "deletions": 10}]
+        with _patch("scripts.mq._shared.fetch_pr_files", return_value=fake_files):
+            _enrich_prs_with_metrics(prs, {"BITBUCKET_WORKSPACE": "acme"}, "jira")
+
+        pr = prs[0]
+        assert "pr_type" in pr
+        assert "category" in pr
+        assert "risk_tier" in pr
+        assert "blast_radius" in pr
+        assert "complexity" in pr
+        assert "is_hotspot" in pr
+        assert pr["total_loc"] == 60
+
+    def test_gh_enrichment_adds_fields(self):
+        from scripts.standup.gather_pr_queue import _enrich_prs_with_metrics
+
+        prs = [{
+            "id": "99", "title": "fix: auth crash", "author": "bob",
+            "labels": [{"name": "bug"}], "headRefName": "fix/auth-npe",
+        }]
+        fake_files = [{"path": "src/auth/handler.go", "additions": 20, "deletions": 5}]
+        with _patch("scripts.common.gh_api.fetch_pr_files", return_value=fake_files):
+            _enrich_prs_with_metrics(prs, {"GH_ORG": "acme", "GH_REPO": "app"}, "github")
+
+        pr = prs[0]
+        assert pr["pr_type"] == "bug"
+        assert pr["is_hotspot"] is True
+        assert pr["total_loc"] == 25
+
+    def test_empty_prs_no_error(self):
+        from scripts.standup.gather_pr_queue import _enrich_prs_with_metrics
+        _enrich_prs_with_metrics([], {}, "jira")
+
+    def test_file_fetch_error_still_enriches_from_title(self):
+        """When diffstat fetch raises, PR still gets title-based classification."""
+        from scripts.standup.gather_pr_queue import _enrich_prs_with_metrics
+
+        prs = [{
+            "id": "77", "title": "fix: critical auth bug", "author": "alice",
+            "labels": [{"name": "bug"}], "branch": "fix/auth",
+        }]
+        with _patch("scripts.mq._shared.fetch_pr_files", side_effect=RuntimeError("network")):
+            _enrich_prs_with_metrics(prs, {"BITBUCKET_WORKSPACE": "acme"}, "jira")
+
+        pr = prs[0]
+        assert pr["pr_type"] == "bug"
+        assert pr["total_loc"] == 0
+        assert "risk_tier" in pr

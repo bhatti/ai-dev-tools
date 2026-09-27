@@ -595,3 +595,101 @@ class TestFetchPrsByNumbers:
         with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr", return_value=None):
             result = fetch_single_pr(config, 99)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Enrichment — verify enrich_pr_with_metrics adds classification fields
+# ---------------------------------------------------------------------------
+
+_ENRICHMENT_FIELDS = ("pr_type", "category", "blast_radius", "risk_score", "risk_tier",
+                      "complexity", "is_hotspot", "total_loc", "file_count")
+
+
+class TestGHEnrichmentViaFetch:
+    """fetch_github_prs enriches each PR with classification fields."""
+
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    def test_enrichment_fields_present(self, mock_review, mock_run):
+        gh_output = json.dumps([{
+            "number": 77,
+            "title": "fix: auth crash on empty token",
+            "body": "",
+            "author": {"login": "alice"},
+            "mergedAt": "2026-09-01T10:00:00Z",
+            "url": "https://github.com/org/repo/pull/77",
+            "headRefName": "fix/auth-crash",
+            "comments": [],
+            "reviews": [],
+            "reviewDecision": "",
+            "labels": [{"name": "bug"}],
+            "files": [
+                {"path": "src/auth/handler.go", "additions": 30, "deletions": 5},
+                {"path": "tests/auth_test.go", "additions": 20, "deletions": 0},
+            ],
+        }])
+        mock_run.return_value = MagicMock(returncode=0, stdout=gh_output, stderr="")
+
+        prs = fetch_github_prs({"GH_ORG": "org", "GH_REPO": "repo"}, n_prs=5)
+        assert len(prs) == 1
+        pr = prs[0]
+        for field in _ENRICHMENT_FIELDS:
+            assert field in pr, f"Missing enrichment field: {field}"
+        assert pr["pr_type"] == "bug"
+        assert pr["is_hotspot"] is True
+        assert pr["total_loc"] == 55
+
+
+class TestBuildPrContextMetrics:
+    """build_pr_context includes pre-computed metrics when present."""
+
+    def _enriched_pr(self):
+        return {
+            "number": 10, "title": "feat: billing", "author": "bob",
+            "merged_at": "2026-09-01", "branch": "feat/billing",
+            "files_changed": 5, "review_decision": "APPROVED",
+            "linked_issue": None, "human_comments": [], "bot_comments": [],
+            "body": "Add billing module",
+            "pr_type": "feature",
+            "category": "billing",
+            "category_confidence": "file_path",
+            "blast_radius": "high",
+            "risk_score": 42.0,
+            "risk_tier": "high",
+            "complexity": "medium",
+            "is_hotspot": True,
+        }
+
+    def test_metrics_rendered_in_context(self):
+        pr = self._enriched_pr()
+        result = build_pr_context([pr])
+        assert "**PR type**: feature" in result
+        assert "**Category**: billing" in result
+        assert "**Blast radius**: high" in result
+        assert "**Risk**:" in result
+        assert "tier=high" in result
+        assert "**Complexity**: medium" in result
+        assert "**Hotspot**: yes" in result
+
+    def test_low_complexity_omitted(self):
+        pr = self._enriched_pr()
+        pr["complexity"] = "low"
+        result = build_pr_context([pr])
+        assert "**Complexity**" not in result
+
+    def test_unknown_category_omitted(self):
+        pr = self._enriched_pr()
+        pr["category"] = "unknown"
+        result = build_pr_context([pr])
+        assert "**Category**" not in result
+
+    def test_no_enrichment_fields_no_crash(self):
+        pr = {
+            "number": 11, "title": "misc", "author": "eve",
+            "merged_at": "", "branch": "", "files_changed": 0,
+            "review_decision": "", "linked_issue": None,
+            "human_comments": [], "bot_comments": [], "body": "",
+        }
+        result = build_pr_context([pr])
+        assert "PR #11" in result
+        assert "**PR type**" not in result

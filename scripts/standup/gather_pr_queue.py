@@ -409,6 +409,68 @@ def _gather_github(config: dict) -> dict:
     }
 
 
+def _enrich_prs_with_metrics(prs: list[dict], config: dict, tracker: str) -> None:
+    """Concurrently fetch diffstat and classify each PR in-place.
+
+    BB/Jira: uses fetch_pr_files (BB diffstat REST API).
+    GitHub: uses gh CLI to fetch per-PR file data.
+    """
+    import os
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from scripts.common.pr_classify import enrich_pr_with_metrics
+
+    if not prs:
+        return
+
+    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
+    max_workers = max(1, min(max_workers, 20))
+    total = len(prs)
+    print(f"[gather_pr_queue] enriching {total} PRs with metrics (workers={max_workers})...", flush=True)
+    t0 = time.monotonic()
+
+    files_by_id: dict[str, list[dict]] = {}
+
+    if tracker == "jira":
+        from scripts.mq._shared import fetch_pr_files
+
+        def _fetch_bb(pr: dict) -> tuple[str, list[dict]]:
+            pr_id = str(pr.get("id", ""))
+            try:
+                return pr_id, fetch_pr_files(config, pr_id)
+            except Exception as exc:
+                print(f"[gather_pr_queue] warn: diffstat failed PR#{pr_id}: {exc}", flush=True)
+                return pr_id, []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for pr_id, files in pool.map(_fetch_bb, prs):
+                files_by_id[pr_id] = files
+    else:
+        from scripts.common.gh_api import fetch_pr_files as gh_fetch_pr_files
+
+        gh_org = config.get("GH_ORG", "")
+        gh_repo = config.get("GH_REPO", "")
+
+        def _fetch_gh(pr: dict) -> tuple[str, list[dict]]:
+            pr_id = str(pr.get("id", ""))
+            try:
+                return pr_id, gh_fetch_pr_files(gh_org, gh_repo, pr_id)
+            except Exception as exc:
+                print(f"[gather_pr_queue] warn: GH files failed PR#{pr_id}: {exc}", flush=True)
+                return pr_id, []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for pr_id, files in pool.map(_fetch_gh, prs):
+                files_by_id[pr_id] = files
+
+    elapsed = time.monotonic() - t0
+    print(f"[gather_pr_queue] diffstat fetch complete: {total} PRs in {elapsed:.1f}s", flush=True)
+
+    for pr in prs:
+        files = files_by_id.get(str(pr.get("id", "")), [])
+        enrich_pr_with_metrics(pr, files=files or None)
+
+
 def main() -> None:
     config = load_config(required=[])
     workspace_dir = get_workspace_dir(config)
@@ -433,6 +495,8 @@ def main() -> None:
         result = _gather_jira(config, workspace_dir)
     else:
         result = _gather_github(config)
+
+    _enrich_prs_with_metrics(result.get("prs", []), config, default_tracker)
 
     out_path = workspace_dir / "pr_queue.json"
     out_path.write_text(json.dumps(result, indent=2))

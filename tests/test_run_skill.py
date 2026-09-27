@@ -297,3 +297,139 @@ def test_build_prompt_request_section_preserved():
     prompt = _build_prompt("some-skill", "ISSUE-99999 --dry-run", "# skill body")
     assert "## Request" in prompt
     assert "ISSUE-99999 --dry-run" in prompt
+
+
+# ---------------------------------------------------------------------------
+# _pr_queue_to_markdown — expanded columns and summary tables
+# ---------------------------------------------------------------------------
+
+from scripts.adhoc.run_skill import _pr_queue_to_markdown
+
+
+def _sample_pr_data():
+    """Build a minimal pr_queue.json dict with enriched PRs."""
+    return {
+        "sprint": "Sprint 42",
+        "pr_count": 2,
+        "prs": [
+            {
+                "id": "1",
+                "title": "feat: new dashboard",
+                "author": "alice",
+                "url": "https://bitbucket.org/acme/app/pull-requests/1",
+                "jira_url": "https://jira.example.com/browse/PROJ-1",
+                "age_days": 3,
+                "jira_key": "PROJ-1",
+                "jira_summary": "New dashboard",
+                "priority": "High",
+                "labels": [],
+                "reviewers": [],
+                "approved_by": ["bob"],
+                "changes_requested_by": [],
+                "approval_count": 1,
+                "ci_status": "pass",
+                # Enrichment fields from pr_classify
+                "pr_type": "feature",
+                "category": "ui",
+                "category_confidence": "file_path",
+                "blast_radius": "medium",
+                "risk_score": 22.5,
+                "risk_tier": "medium",
+                "complexity": "medium",
+                "is_hotspot": False,
+                "total_loc": 350,
+                "file_count": 8,
+            },
+            {
+                "id": "2",
+                "title": "fix: auth crash",
+                "author": "charlie",
+                "url": "https://bitbucket.org/acme/app/pull-requests/2",
+                "jira_url": "",
+                "age_days": 7,
+                "jira_key": "",
+                "jira_summary": "",
+                "priority": "",
+                "labels": [],
+                "reviewers": ["dave"],
+                "approved_by": [],
+                "changes_requested_by": [],
+                "approval_count": 0,
+                "ci_status": "fail",
+                # Enrichment fields
+                "pr_type": "bug",
+                "category": "security",
+                "category_confidence": "file_path",
+                "blast_radius": "high",
+                "risk_score": 45.0,
+                "risk_tier": "high",
+                "complexity": "low",
+                "is_hotspot": True,
+                "total_loc": 25,
+                "file_count": 2,
+            },
+        ],
+    }
+
+
+def test_pr_queue_markdown_has_expanded_columns():
+    md = _pr_queue_to_markdown(_sample_pr_data(), "Test PR Queue")
+    assert "| Cat |" in md
+    assert "| Type |" in md
+    assert "| Blast |" in md
+    assert "| Risk |" in md
+    assert "| LOC |" in md
+    assert "| Files |" in md
+    assert "| Cx |" in md
+
+
+def test_pr_queue_markdown_has_summary_tables():
+    md = _pr_queue_to_markdown(_sample_pr_data(), "Test PR Queue")
+    assert "### Category Breakdown" in md
+    assert "### Work Type Distribution" in md
+
+
+def test_pr_queue_markdown_hotspot_emoji():
+    md = _pr_queue_to_markdown(_sample_pr_data(), "Test PR Queue")
+    assert "🔥 security" in md
+
+
+def test_pr_queue_markdown_empty_prs():
+    md = _pr_queue_to_markdown({"prs": []}, "Test PR Queue")
+    assert "No open PRs found" in md
+
+
+def test_pr_queue_markdown_no_enrichment_graceful():
+    """PRs without enrichment fields should render with dash placeholders."""
+    data = {
+        "prs": [{
+            "id": "3", "title": "misc", "author": "eve", "url": "",
+            "jira_url": "", "age_days": 1, "jira_key": "", "jira_summary": "",
+            "priority": "", "labels": [], "reviewers": [], "approved_by": [],
+            "changes_requested_by": [], "approval_count": 0, "ci_status": "none",
+        }],
+    }
+    md = _pr_queue_to_markdown(data, "Test")
+    assert "—" in md
+
+
+def test_pr_queue_markdown_gh_style_pr():
+    """GH-style PRs (no jira_key/jira_url) render correctly with metrics."""
+    data = {
+        "prs": [{
+            "id": "55", "title": "feat: add oauth", "author": "alice",
+            "url": "https://github.com/org/repo/pull/55",
+            "jira_url": "", "age_days": 2, "jira_key": "", "jira_summary": "",
+            "priority": "", "labels": [{"name": "feature"}],
+            "reviewers": ["bob"], "approved_by": [],
+            "changes_requested_by": [], "approval_count": 0, "ci_status": "success",
+            "pr_type": "feature", "category": "auth", "blast_radius": "medium",
+            "risk_score": 18.0, "risk_tier": "medium", "complexity": "low",
+            "is_hotspot": True, "total_loc": 120, "file_count": 4,
+        }],
+    }
+    md = _pr_queue_to_markdown(data, "GH Queue")
+    assert "PR #55" in md
+    assert "🔥 auth" in md
+    assert "feature" in md
+    assert "120" in md

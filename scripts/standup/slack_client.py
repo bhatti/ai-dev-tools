@@ -360,14 +360,34 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
             if labels:
                 reviewer_info += f"  •  {' '.join(f'`{l}`' for l in labels)}"
 
+            # Compact metrics line
+            metrics_parts: list[str] = []
+            cat = pr.get("category", "")
+            if cat and cat != "unknown":
+                hotspot = "🔥" if pr.get("is_hotspot") else ""
+                metrics_parts.append(f"{hotspot}{cat}")
+            pt = pr.get("pr_type", "")
+            if pt and pt != "unknown":
+                metrics_parts.append(pt)
+            risk_tier = pr.get("risk_tier", "")
+            if risk_tier:
+                from scripts.common.pr_classify import RISK_EMOJI
+                r_emoji = RISK_EMOJI.get(risk_tier, "")
+                metrics_parts.append(f"{r_emoji}{risk_tier}")
+            total_loc = pr.get("total_loc", 0)
+            if total_loc:
+                metrics_parts.append(f"{total_loc:,}L")
+            metrics_line = "  •  ".join(metrics_parts) if metrics_parts else ""
+
             ci_prefix = f"{ci_icon} " if ci_icon else ""
             line = f"{ci_prefix}{priority_emoji}{jira_link}  {pr_link}  @{author} ({days}d)  {title_text}"
+            fields = [{"type": "mrkdwn", "text": reviewer_info}]
+            if metrics_line:
+                fields.append({"type": "mrkdwn", "text": metrics_line})
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},
-                "fields": [
-                    {"type": "mrkdwn", "text": reviewer_info},
-                ],
+                "fields": fields,
             })
     blocks.append({"type": "divider"})
     return blocks

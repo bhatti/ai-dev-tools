@@ -9,8 +9,9 @@ import pytest
 from scripts.mq.collect_ready import (
     _compute_age_hours, _classify_pr_type, _classify_pr_category,
     _normalize_pr, _enrich_prs_with_diffstat, _extract_issue_ref,
-    _classify_pr_flags, _apply_blast_cap,
+    _classify_pr_flags,
 )
+from scripts.common.pr_classify import apply_blast_cap as _apply_blast_cap
 
 
 class TestComputeAgeHours:
@@ -487,15 +488,14 @@ class TestClassifyPrFlags:
         # With empty env, _TEST_TITLE_RE is None — no title match.
         # We test the function respects _TEST_TITLE_RE=None by calling with no files.
         # Since patterns are compiled at import time, we test the guard in the function directly.
-        from scripts.mq import collect_ready as cr
-        import re
-        original = cr._TEST_TITLE_RE
+        from scripts.common import pr_classify as pc
+        original = pc._TEST_TITLE_RE
         try:
-            cr._TEST_TITLE_RE = None  # simulate env="" at import
-            flags = cr._classify_pr_flags(pr)
+            pc._TEST_TITLE_RE = None  # simulate env="" at import
+            flags = pc.classify_pr_flags(pr)
             assert flags["is_test_pr"] is False
         finally:
-            cr._TEST_TITLE_RE = original
+            pc._TEST_TITLE_RE = original
 
     # --- is_wip_pr ---
     def test_wip_title_detected(self):
@@ -605,3 +605,82 @@ class TestApplyBlastCap:
         assert prs[0]["blast_radius"] == "low"
         assert prs[0]["is_test_pr"] is True
         assert prs[0]["category"] == "test"
+
+
+class TestComplexityAndHotspot:
+    """Tests for complexity metric and hotspot detection set during enrichment."""
+
+    def _make_pr(self, **overrides):
+        base = {
+            "pr_number": 1, "blast_radius": "low", "scope": "unknown",
+            "category": "unknown", "category_confidence": "",
+            "title": "some change", "labels": [], "description": "",
+            "is_test_pr": False, "is_wip_pr": False, "is_docs_pr": False,
+            "branch": "", "total_loc": 0, "file_count": 0,
+            "complexity": "low", "is_hotspot": False,
+            "risk_score": 0, "risk_tier": "low", "risk_dimensions": {},
+        }
+        base.update(overrides)
+        return base
+
+    def test_complexity_low(self):
+        """Small PR: 10 LOC × 2 files = 20 → low."""
+        prs = [self._make_pr()]
+        files = [
+            {"path": "a.py", "additions": 5, "deletions": 0},
+            {"path": "b.py", "additions": 5, "deletions": 0},
+        ]
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("mod", "low", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["complexity"] == "low"
+
+    def test_complexity_medium(self):
+        """50 LOC × 15 files = 750 → medium."""
+        prs = [self._make_pr()]
+        files = [{"path": f"src/f{i}.py", "additions": 3, "deletions": 1} for i in range(15)]
+        # Total LOC = 15 * (3+1) = 60, 60*15 = 900 > 500 → medium
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("mod", "medium", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["complexity"] == "medium"
+
+    def test_complexity_high(self):
+        """Large PR: 200 LOC × 30 files = 6000 → high."""
+        prs = [self._make_pr()]
+        files = [{"path": f"src/f{i}.py", "additions": 5, "deletions": 2} for i in range(30)]
+        # Total LOC = 30 * 7 = 210, 210*30 = 6300 > 5000 → high
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("mod", "high", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["complexity"] == "high"
+
+    def test_hotspot_detected(self):
+        """PR touching auth/ path is flagged as hotspot."""
+        prs = [self._make_pr()]
+        files = [
+            {"path": "src/auth/login.py", "additions": 10, "deletions": 0},
+            {"path": "src/utils.py", "additions": 5, "deletions": 0},
+        ]
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("mod", "medium", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["is_hotspot"] is True
+
+    def test_hotspot_not_flagged_normal_files(self):
+        """PR touching only normal paths is not a hotspot."""
+        prs = [self._make_pr()]
+        files = [
+            {"path": "src/utils.py", "additions": 5, "deletions": 0},
+            {"path": "src/helpers.py", "additions": 3, "deletions": 0},
+        ]
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("mod", "low", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["is_hotspot"] is False
+
+    def test_normalize_defaults(self):
+        """_normalize_pr sets complexity='low' and is_hotspot=False by default."""
+        pr = _normalize_pr({"id": 1, "title": "test"}, "org/repo")
+        assert pr["complexity"] == "low"
+        assert pr["is_hotspot"] is False

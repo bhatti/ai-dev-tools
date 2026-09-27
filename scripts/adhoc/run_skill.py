@@ -173,6 +173,13 @@ def _strip_for_slack(text: str) -> str:
 
 def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
     """Convert pr_queue.json data to a Markdown report with tables and status badges."""
+    from scripts.common.pr_classify import (
+        PR_TYPE_EMOJI,
+        RISK_EMOJI,
+        build_category_breakdown,
+        build_work_type_distribution,
+    )
+
     prs: list[dict] = pr_data.get("prs", [])
     lines = [f"# {title}", ""]
 
@@ -193,6 +200,10 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
         lines.append(f"| {badge} {group_name} | {count} |")
     lines += ["", "---", ""]
 
+    # Category breakdown and work type distribution
+    lines += build_category_breakdown(prs)
+    lines += build_work_type_distribution(prs)
+
     # Per-group tables
     for group_name in PR_GROUP_ORDER:
         group_prs = grouped[group_name]
@@ -200,8 +211,10 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
             continue
         badge = PR_GROUP_BADGE.get(group_name, "")
         lines += [f"## {badge} {group_name} ({len(group_prs)})", ""]
-        lines += ["| CI | PR | Jira | Author | Age | Priority | Title | Reviewers |",
-                  "|----|-----|------|--------|-----|----------|-------|-----------|"]
+        lines += [
+            "| CI | PR | Jira | Author | Age | Priority | Title | Cat | Type | Blast | Risk | LOC | Files | Cx | Reviewers |",
+            "|----|-----|------|--------|-----|----------|-------|-----|------|-------|------|-----|-------|----|-----------| ",
+        ]
         for pr in group_prs:
             pr_url = pr.get("url", "")
             pr_num = pr_url.rstrip("/").split("/")[-1] if pr_url else pr.get("id", "?")
@@ -220,6 +233,24 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
             jira_cell = f"[{jira_key}]({jira_url})" if jira_url and jira_key else (jira_key or "—")
             priority_cell = f"{priority_badge} {priority}".strip() if priority else "—"
 
+            # Metrics columns
+            cat = pr.get("category", "—")
+            hotspot_prefix = "🔥 " if pr.get("is_hotspot") else ""
+            cat_cell = f"{hotspot_prefix}{cat}"
+            pt = pr.get("pr_type", "unknown")
+            type_cell = f"{PR_TYPE_EMOJI.get(pt, '❓')} {pt}"
+            blast = pr.get("blast_radius", "—")
+            blast_cell = f"{RISK_EMOJI.get(blast, '⚪')} {blast}"
+            risk_tier = pr.get("risk_tier", "—")
+            risk_score = pr.get("risk_score", 0)
+            risk_cell = f"{RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}" if isinstance(risk_score, (int, float)) else "—"
+            total_loc = pr.get("total_loc", 0)
+            loc_cell = f"{total_loc:,}" if total_loc else "—"
+            file_count = pr.get("file_count", 0)
+            files_cell = str(file_count) if file_count else "—"
+            cx = pr.get("complexity", "low")
+            cx_cell = RISK_EMOJI.get(cx, "—")
+
             reviewer_parts: list[str] = []
             if approved_by:
                 reviewer_parts.append("✅ " + ", ".join("@" + n.split()[0] for n in approved_by[:3]))
@@ -227,8 +258,12 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
                 reviewer_parts.append("🔔 " + ", ".join("@" + n.split()[0] for n in pending_reviewers[:4]))
             reviewer_cell = ";  ".join(reviewer_parts) if reviewer_parts else "—"
 
-            lines.append(f"| {ci_icon} | {pr_cell} | {jira_cell} | @{author} | {days}d"
-                         f" | {priority_cell} | {pr_title} | {reviewer_cell} |")
+            lines.append(
+                f"| {ci_icon} | {pr_cell} | {jira_cell} | @{author} | {days}d"
+                f" | {priority_cell} | {pr_title}"
+                f" | {cat_cell} | {type_cell} | {blast_cell} | {risk_cell}"
+                f" | {loc_cell} | {files_cell} | {cx_cell} | {reviewer_cell} |"
+            )
         lines.append("")
 
     return "\n".join(lines)

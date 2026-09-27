@@ -108,3 +108,24 @@ def resolve_github_issues(
         return search_fn(config, query, label, max_results)
 
     return []
+
+
+def fetch_pr_files(owner: str, repo: str, pr_number: str | int) -> list[dict]:
+    """Fetch file-level diffstat for a GitHub PR via gh CLI.
+
+    Returns list of {"path": str, "additions": int, "deletions": int}.
+    """
+    cmd = [
+        "gh", "api",
+        f"repos/{owner}/{repo}/pulls/{pr_number}/files",
+        "--paginate", "--jq",
+        '[.[] | {path: .filename, additions: .additions, deletions: .deletions}]',
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return []
+        files = json.loads(result.stdout or "[]")
+        return files if isinstance(files, list) else []
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return []

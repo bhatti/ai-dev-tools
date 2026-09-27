@@ -452,6 +452,10 @@ Scripts for scope-aware merge queue orchestration. Called by Formicary YAML jobs
 
 All scripts follow the standard pattern: Click CLI, `load_config(required=[...])`, `get_workspace_dir()`, `[tag]`-prefixed logging, exit codes 0/1/2.
 
+### Shared Classification (`scripts/common/pr_classify.py`)
+
+PR classification and risk scoring shared across MQ, PR-queue, and PR-audit pipelines. Provides a single taxonomy for PR type (feature/bug/security/...), category, blast radius, risk score/tier, complexity, and hotspot detection. All three pipelines call `enrich_pr_with_metrics(pr, files)` for consistent classification. Summary table builders (`build_category_breakdown`, `build_work_type_distribution`) produce identical Markdown tables across reports.
+
 ---
 
 ## Generic Skill Invocation (`ai-skill`)
