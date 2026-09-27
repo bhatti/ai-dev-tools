@@ -8,7 +8,6 @@ Required env: ANTHROPIC_API_KEY or CLAUDE_CODE_USE_BEDROCK=1
 Reads:  /workspace/lane_groups.json  (from group_by_scope)
         /workspace/ready_prs.json    (from collect_ready)
 Writes: /workspace/queue_summary.json
-        /workspace/reports/report.md
 
 Exit codes: 0=done, 1=error
 """
@@ -53,24 +52,47 @@ Analyze the merge queue using the instructions below.
 ## Data
 The following files are in /workspace — read them directly:
 - /workspace/ready_prs.json    — open PRs with scope, blast_radius, ci_status, author, age
-- /workspace/lane_groups.json  — PRs grouped into scope lanes
+- /workspace/lane_groups.json  — PRs grouped into scope lanes (lane_id = "target_branch/scope")
 
-Follow the skill steps exactly. Write your findings to /workspace/queue_summary.json as the
-final line of output in JSON: {{"status":"DONE","repo":...,"total_prs":N,"lanes":N,"high_risk_prs":N,"needs_human_review":N,"conflict_lanes":N}}
+Follow the skill steps exactly. Write your findings to /workspace/queue_summary.json.
+The JSON must include a "by_branch" summary keyed by target_branch:
+{{
+  "status": "DONE",
+  "repo": "<from ready_prs.json>",
+  "total_prs": N,
+  "lanes": N,
+  "high_risk_prs": N,
+  "needs_human_review": N,
+  "conflict_lanes": N,
+  "by_branch": {{
+    "<branch>": {{"prs": N, "lanes": N}},
+    ...
+  }}
+}}
 """
 
 _ANALYZE_PROMPT_FALLBACK = """\
 Analyze the open pull requests in /workspace/ready_prs.json and /workspace/lane_groups.json.
 
-For each lane in lane_groups.json:
+lane_groups.json has lanes with lane_id = "{target_branch}/{scope}".
+
+For each lane:
 1. Count PRs by blast_radius (low/medium/high)
 2. Flag any PR where ci_status is 'failed' or blast_radius is 'high' as needing human review
 3. Report oldest PR (highest age_hours) in each lane
+4. Group lanes by target_branch (lane_id.rsplit("/", 1)[0]) and count PRs and lanes per branch
 
 Write /workspace/queue_summary.json with:
-{"status":"DONE","repo":"<from ready_prs.json>","total_prs":N,"lanes":N,"high_risk_prs":N,"needs_human_review":N,"conflict_lanes":0}
-
-Also write /workspace/reports/report.md with a markdown summary table.
+{
+  "status": "DONE",
+  "repo": "<from ready_prs.json>",
+  "total_prs": N,
+  "lanes": N,
+  "high_risk_prs": N,
+  "needs_human_review": N,
+  "conflict_lanes": 0,
+  "by_branch": {"<branch>": {"prs": N, "lanes": N}, ...}
+}
 """
 
 

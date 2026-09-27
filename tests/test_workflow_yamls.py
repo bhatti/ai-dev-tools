@@ -248,3 +248,45 @@ class TestWorkflowYamlInteg:
                     f"dangling `\\`. This will cause 'yaml: could not find expected :' at runtime.\n"
                     f"Stored item: {item!r}"
                 )
+
+    def test_mq_analyze_artifacts_exclude_reports(self) -> None:
+        """ai-merge-queue analyze task must NOT upload ./reports.
+
+        Root cause of PermissionError in report task: analyze uploaded reports/ which the
+        helper (root/UID=0) extracted into the report pod, creating a root-owned directory
+        that UID=1000 (main container) could not write to, even with chmod.
+
+        Fix: only queue_summary.json and logs in analyze artifacts.
+        """
+        _skip_if_no_formicary()
+        import json
+        import ssl
+        import urllib.request
+
+        base_url = _formicary_url()
+        token = _formicary_token()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            f"{base_url}/api/jobs/definitions/ai-merge-queue",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            definition = json.load(resp)
+
+        tasks = {t["task_type"]: t for t in definition.get("tasks", [])}
+        analyze = tasks.get("analyze")
+        assert analyze is not None, "ai-merge-queue definition missing 'analyze' task"
+
+        # Artifacts may be stored as a dict with 'paths' key, or as a flat list,
+        # or as null when the task has no artifact config. All are acceptable here.
+        arts = analyze.get("artifacts") or {}
+        paths = arts.get("paths", []) if isinstance(arts, dict) else (arts or [])
+        assert "./reports" not in paths and "reports" not in paths, (
+            f"analyze task must NOT have './reports' in artifact paths.\n"
+            f"When the helper (root) extracts this artifact in the report pod, it creates\n"
+            f"a root-owned /workspace/reports/ directory that UID=1000 cannot write to.\n"
+            f"Actual artifact paths: {paths}"
+        )

@@ -675,7 +675,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         q_needs_review = queue_summary.get("needs_human_review", 0)
         q_conflicts = queue_summary.get("conflict_lanes", 0)
         q_emoji = "✅" if q_high == 0 else ("🔴" if q_high > 2 else "⚠️")
-        sections.append("## Merge Queue Analysis")
+        sections.append("## Queue Status")
         sections.append("")
         sections.append(f"{q_emoji} **{q_total} open PRs** across **{q_lanes} scope lanes**"
                         + (f" — repo: `{q_repo}`" if q_repo else ""))
@@ -709,15 +709,56 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sections.append("")
         sections.append(f"**{len(lane_list)}** scope lanes, **{total_prs}** PRs queued")
         sections.append("")
-        if lane_list:
-            sections.append("| Lane | PRs |")
-            sections.append("|------|-----|")
-            for lane in lane_list:
+
+        # Group lanes by target_branch.
+        # lane_id = "{target_branch}/{scope}" where target_branch may contain "/"
+        # (e.g. "goatbot/branches/FOO"). Use the PR's own target_branch field — never
+        # split lane_id — because lane_id splitting is ambiguous for multi-segment branches.
+        branch_lanes: dict[str, list[dict]] = {}
+        for lane in lane_list:
+            # Use target_branch from the first PR in this lane as the authoritative branch.
+            prs_in_lane = lane.get("prs", [])
+            if prs_in_lane:
+                branch = prs_in_lane[0].get("target_branch", "") or "unknown"
+            else:
+                # Fallback: infer from lane_id via rsplit
+                lid = lane.get("lane_id", "unknown/unknown")
+                branch = lid.rsplit("/", 1)[0] if "/" in lid else lid
+            branch_lanes.setdefault(branch, []).append(lane)
+
+        # Sort branches by descending PR count
+        def _branch_pr_count(b: str) -> int:
+            return sum(len(l.get("prs", [])) for l in branch_lanes[b])
+
+        for branch in sorted(branch_lanes, key=_branch_pr_count, reverse=True):
+            b_lanes = branch_lanes[branch]
+            b_pr_count = sum(len(l.get("prs", [])) for l in b_lanes)
+            sections.append(f"### Branch: {branch} ({b_pr_count} PR{'s' if b_pr_count != 1 else ''}, {len(b_lanes)} lane{'s' if len(b_lanes) != 1 else ''})")
+            sections.append("")
+            sections.append("| Lane | PRs | Risk |")
+            sections.append("|------|-----|------|")
+            for lane in b_lanes:
                 lid = lane.get("lane_id", "?")
+                _, scope_display = lid.rsplit("/", 1) if "/" in lid else (lid, lid)
+                if scope_display in ("unknown", "default"):
+                    display_name = branch if scope_display == "unknown" else "cross-scope"
+                else:
+                    display_name = scope_display
                 prs = lane.get("prs", [])
                 pr_nums = ", ".join(f"#{p.get('pr_number', '?')}" for p in prs[:5])
-                sections.append(f"| {lid} | {pr_nums} |")
+                if len(prs) > 5:
+                    pr_nums += f" +{len(prs)-5} more"
+                # Aggregate risk: any high → 🔴, any medium → 🟡, else 🟢
+                blasts = [p.get("blast_radius", "low") for p in prs]
+                if "high" in blasts:
+                    risk_emoji = "🔴 high"
+                elif "medium" in blasts:
+                    risk_emoji = "🟡 medium"
+                else:
+                    risk_emoji = "🟢 low"
+                sections.append(f"| {display_name} | {pr_nums} | {risk_emoji} |")
             sections.append("")
+
         ctx["LANE_COUNT"] = str(len(lane_list))
         ctx["QUEUED_PRS"] = str(total_prs)
 
@@ -737,11 +778,10 @@ def main() -> None:
     config = load_config(required=[])
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
+    # reports/ is created by the YAML script (mkdir -p) before Python runs, as UID=1000.
+    # mkdir here is a safe no-op guard for local runs outside Formicary.
     reports_dir = workspace / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    # dir may be root-owned when downloaded from a prior task artifact by the helper container
-    import subprocess as _sp
-    _sp.run(["chmod", "-R", "777", str(reports_dir)], check=False, capture_output=True)
 
     from scripts.mq._shared import parse_pr_ref
     pr_number, _ = parse_pr_ref(config.get("PR_NUMBER", ""))

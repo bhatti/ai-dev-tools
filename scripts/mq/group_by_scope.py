@@ -63,7 +63,9 @@ def main() -> None:
 
     out_path = workspace / "lane_groups.json"
     out_path.write_text(json.dumps(result, indent=2))
-    target_branches = sorted({l["lane_id"].split("/")[0] for l in lanes})
+    # rsplit("/", 1)[0] extracts the full target_branch even when it contains "/"
+    # e.g. "goatbot/branches/FOO/unknown" → "goatbot/branches/FOO"
+    target_branches = sorted({l["lane_id"].rsplit("/", 1)[0] for l in lanes})
     print(f"[group_by_scope] {len(lanes)} lanes across target branches {target_branches}: {', '.join(l['lane_id'] + '(' + str(l['pr_count']) + ')' for l in lanes)}", flush=True)
 
     fan_out_value = json.dumps([

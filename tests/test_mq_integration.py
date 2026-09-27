@@ -218,5 +218,5 @@ def test_bb_group_by_scope_segregates_by_target_branch() -> None:
                     f"but lane prefix is {expected_target!r}"
                 )
 
-        all_target_branches = sorted({l["lane_id"].split("/")[0] for l in lanes})
+        all_target_branches = sorted({l["lane_id"].rsplit("/", 1)[0] for l in lanes})
         print(f"\n[integ] {len(lanes)} lanes across target branches: {all_target_branches} ✓")
