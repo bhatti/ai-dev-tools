@@ -220,3 +220,40 @@ def test_bb_group_by_scope_segregates_by_target_branch() -> None:
 
         all_target_branches = sorted({l["lane_id"].rsplit("/", 1)[0] for l in lanes})
         print(f"\n[integ] {len(lanes)} lanes across target branches: {all_target_branches} ✓")
+
+
+# ── test 5: bb_helpers returns description field ──────────────────────────────
+
+def test_bb_prs_have_description_field() -> None:
+    """BB API response now includes description field in each PR."""
+    cfg = _require_bb_config()
+    from scripts.standup import bb_helpers
+
+    prs = bb_helpers.get_open_prs(cfg)
+    if not prs:
+        pytest.skip("no open PRs in BB repo")
+    for pr in prs[:3]:
+        assert "description" in pr, f"PR#{pr.get('id')} missing description field"
+    print(f"\n[integ] verified description field in {min(3, len(prs))} PRs ✓")
+
+
+# ── test 6: bb_helpers filters by target_branch ───────────────────────────────
+
+def test_bb_collect_ready_filters_by_target_branch() -> None:
+    """When target_branch is passed, only PRs targeting that branch are returned."""
+    from collections import Counter
+    from scripts.standup import bb_helpers
+
+    cfg = _require_bb_config()
+    all_prs = bb_helpers.get_open_prs(cfg)
+    if len(all_prs) < 2:
+        pytest.skip("need >=2 open PRs to test target_branch filtering")
+
+    common_branch = Counter(p["target_branch"] for p in all_prs if p.get("target_branch")).most_common(1)[0][0]
+    filtered = bb_helpers.get_open_prs(cfg, target_branch=common_branch)
+    assert all(p["target_branch"] == common_branch for p in filtered), (
+        f"Got PRs targeting branches other than {common_branch!r}: "
+        + str({p["target_branch"] for p in filtered if p["target_branch"] != common_branch})
+    )
+    assert len(filtered) <= len(all_prs)
+    print(f"\n[integ] filtered {len(all_prs)} → {len(filtered)} PRs for target_branch={common_branch!r} ✓")

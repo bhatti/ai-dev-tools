@@ -113,24 +113,30 @@ def _compute_gh_ci_status(rollup: list) -> str:
     return "success"
 
 
-def get_open_prs(config: dict) -> list[dict]:
+def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
     """Return open PRs relevant to the team — authored by or requesting review from team members.
 
     When STANDUP_TEAM_MEMBERS is set, only returns PRs where:
     - The author is a team member, OR
     - A team member is requested as reviewer
     This scopes PRs to the sprint board participants.
+
+    Optional target_branch: when non-empty, passes --base to gh pr list so only PRs
+    targeting that branch are returned (server-side filter, reduces API payload).
     """
     org = config["GH_ORG"]
     repo = config["GH_REPO"]
+    cmd = [
+        "gh", "pr", "list",
+        "-R", f"{org}/{repo}",
+        "--state", "open",
+        "--limit", "100",
+        "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName,baseRefName,labels,statusCheckRollup",
+    ]
+    if target_branch:
+        cmd += ["--base", target_branch]
     try:
-        result = _run([
-            "gh", "pr", "list",
-            "-R", f"{org}/{repo}",
-            "--state", "open",
-            "--limit", "100",
-            "--json", "number,title,author,createdAt,reviews,reviewRequests,url,headRefName,baseRefName,labels,statusCheckRollup",
-        ])
+        result = _run(cmd)
     except subprocess.CalledProcessError as e:
         print(f"[gather_gh] gh pr list failed (exit {e.returncode}): {e.stderr}", file=sys.stderr, flush=True)
         raise

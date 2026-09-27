@@ -264,8 +264,9 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
     if applied:
         print(f"::add-task-context REPO_SKILLS_COUNT::{applied}", flush=True)
 
-    # Prefer repo-specific review skill over the default ygs skill
-    _review_skill_candidates = ["review-pr", skill]
+    # Explicit --skill always wins; "review-pr" is a repo-local fallback only when using the default
+    _DEFAULT_SKILL = "ygs-review-pr"
+    _review_skill_candidates = [skill, "review-pr"] if skill != _DEFAULT_SKILL else ["review-pr", skill]
     skill_md = None
     actual_skill = skill
     for candidate in _review_skill_candidates:

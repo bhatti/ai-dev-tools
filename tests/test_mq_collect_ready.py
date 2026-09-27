@@ -2,10 +2,11 @@
 
 import json
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 
 import pytest
 
-from scripts.mq.collect_ready import _compute_age_hours, _normalize_pr
+from scripts.mq.collect_ready import _compute_age_hours, _classify_pr_type, _classify_pr_category, _normalize_pr, _enrich_prs_with_diffstat
 
 
 class TestComputeAgeHours:
@@ -97,7 +98,180 @@ class TestNormalizePr:
         assert result["repo"] == "own/repo"
 
     def test_scope_always_unknown(self):
-        """scope_router.py sets authoritative scope downstream; collect_ready always emits 'unknown'."""
+        """_enrich_prs_with_diffstat sets authoritative scope; collect_ready always emits 'unknown' initially."""
         pr = {"number": 3, "age_hours": 1.0}
         result = _normalize_pr(pr, "org/repo")
         assert result["scope"] == "unknown"
+
+    def test_pr_type_field_present(self):
+        pr = {"number": 5, "age_hours": 1.0, "title": "feat: add login", "labels": []}
+        result = _normalize_pr(pr, "org/repo")
+        assert "pr_type" in result
+        assert result["pr_type"] == "feature"
+
+
+class TestClassifyPrType:
+    def test_bug_from_label_dict(self):
+        pr = {"title": "some changes", "labels": [{"name": "bug"}]}
+        assert _classify_pr_type(pr) == "bug"
+
+    def test_bug_from_label_string(self):
+        pr = {"title": "update something", "labels": ["hotfix"]}
+        assert _classify_pr_type(pr) == "bug"
+
+    def test_feature_from_label(self):
+        pr = {"title": "some changes", "labels": [{"name": "feature"}]}
+        assert _classify_pr_type(pr) == "feature"
+
+    def test_feature_from_title(self):
+        pr = {"title": "feat: add new dashboard", "labels": []}
+        assert _classify_pr_type(pr) == "feature"
+
+    def test_bug_from_title(self):
+        pr = {"title": "fix: crash on empty input", "labels": []}
+        assert _classify_pr_type(pr) == "bug"
+
+    def test_unknown_when_no_signal(self):
+        pr = {"title": "update readme", "labels": []}
+        assert _classify_pr_type(pr) == "unknown"
+
+    def test_label_takes_priority_over_title(self):
+        pr = {"title": "feat: add billing fix", "labels": [{"name": "bug"}]}
+        assert _classify_pr_type(pr) == "bug"
+
+
+class TestClassifyPrCategory:
+    """_classify_pr_category returns (category, confidence). File paths are authoritative."""
+
+    def test_security_from_file_path(self):
+        files = [{"path": "crypto/signing.py", "additions": 10, "deletions": 2}]
+        cat, conf = _classify_pr_category({}, files)
+        assert cat == "security"
+        assert conf == "file_path"
+
+    def test_authn_authz_from_auth_dir(self):
+        """auth/ directory is authn_authz (more specific than generic security)."""
+        files = [{"path": "auth/login.py", "additions": 5, "deletions": 0}]
+        cat, conf = _classify_pr_category({}, files)
+        assert cat == "authn_authz"
+        assert conf == "file_path"
+
+    def test_sre_from_terraform_path(self):
+        files = [{"path": "terraform/modules/vpc.tf", "additions": 5, "deletions": 0}]
+        cat, conf = _classify_pr_category({}, files)
+        assert cat == "sre"
+        assert conf == "file_path"
+
+    def test_authn_authz_from_oauth_path(self):
+        files = [{"path": "src/oauth/token_refresh.go", "additions": 20, "deletions": 5}]
+        cat, conf = _classify_pr_category({}, files)
+        assert cat == "authn_authz"
+        assert conf == "file_path"
+
+    def test_data_from_migration_path(self):
+        files = [{"path": "migrations/0042_add_users.sql", "additions": 30, "deletions": 0}]
+        cat, conf = _classify_pr_category({}, files)
+        assert cat == "data"
+        assert conf == "file_path"
+
+    def test_api_from_label_when_no_files(self):
+        pr = {"title": "update deps", "labels": [{"name": "api"}], "description": ""}
+        cat, conf = _classify_pr_category(pr)
+        assert cat == "api"
+        assert conf == "label"
+
+    def test_sre_from_title_when_no_files_no_labels(self):
+        pr = {"title": "deploy new terraform module", "labels": [], "description": ""}
+        cat, conf = _classify_pr_category(pr)
+        assert cat == "sre"
+        assert conf == "title"
+
+    def test_unknown_when_no_signal(self):
+        pr = {"title": "fix typo in readme", "labels": [], "description": ""}
+        cat, conf = _classify_pr_category(pr)
+        assert cat == "unknown"
+        assert conf == "unknown"
+
+    def test_file_path_overrides_label(self):
+        """File path is authoritative even when label says something else."""
+        pr = {"title": "some change", "labels": [{"name": "frontend"}], "description": ""}
+        files = [{"path": "terraform/ecs.tf", "additions": 5, "deletions": 0}]
+        cat, conf = _classify_pr_category(pr, files)
+        assert cat == "sre"
+        assert conf == "file_path"
+
+    def test_category_present_in_normalize_pr(self):
+        pr = {"number": 5, "age_hours": 1.0, "title": "deploy infra", "labels": []}
+        result = _normalize_pr(pr, "org/repo")
+        assert "category" in result
+        assert "category_confidence" in result
+        # title matches sre pattern
+        assert result["category"] == "sre"
+        assert result["category_confidence"] == "title"
+
+    def test_enrich_sets_category_from_files(self):
+        prs = [{
+            "pr_number": 1, "blast_radius": "low", "scope": "unknown",
+            "category": "unknown", "category_confidence": "unknown",
+            "title": "some change", "labels": [], "description": "",
+        }]
+        files = [{"path": "terraform/main.tf", "additions": 10, "deletions": 0}]
+        # Patch at source modules since _enrich_prs_with_diffstat imports lazily
+        with patch("scripts.mq._shared.fetch_pr_files", return_value=files), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("sre", "low", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        assert prs[0]["category"] == "sre"
+        assert prs[0]["category_confidence"] == "file_path"
+
+    def test_enrich_keeps_defaults_on_empty_files(self):
+        """Empty file list (no changed files) keeps existing label/title classification."""
+        prs = [{
+            "pr_number": 2, "blast_radius": "low", "scope": "unknown",
+            "category": "api", "category_confidence": "label",
+            "title": "", "labels": [], "description": "",
+        }]
+        with patch("scripts.mq._shared.fetch_pr_files", return_value=[]), \
+             patch("scripts.mq.scope_router._compute_scope", return_value=("api", "low", [], set())):
+            _enrich_prs_with_diffstat(prs, {})
+        # Empty files list → _compute_scope not called → category unchanged
+        assert prs[0]["category"] == "api"
+        assert prs[0]["category_confidence"] == "label"
+
+    def test_enrich_best_effort_on_error(self):
+        """diffstat API failure leaves PR with its original classification — no exception raised."""
+        prs = [{
+            "pr_number": 3, "blast_radius": "low", "scope": "unknown",
+            "category": "backend", "category_confidence": "title",
+            "title": "", "labels": [], "description": "",
+        }]
+        with patch("scripts.mq._shared.fetch_pr_files", side_effect=RuntimeError("API timeout")):
+            _enrich_prs_with_diffstat(prs, {})  # must not raise
+        assert prs[0]["category"] == "backend"  # unchanged
+
+
+class TestTargetBranchFilter:
+    def test_target_branch_filter_in_ready_prs_json(self, tmp_path, monkeypatch):
+        """collect_ready writes target_branch_filter to ready_prs.json."""
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        with patch("scripts.mq.collect_ready.fetch_open_prs", return_value=[]) as mock_fetch, \
+             patch("scripts.mq.collect_ready._enrich_prs_with_diffstat"):
+            from click.testing import CliRunner
+            from scripts.mq.collect_ready import main
+            result = CliRunner().invoke(main, ["--target-branch", "stage"])
+            assert result.exit_code == 0, result.output
+            data = json.loads((tmp_path / "ready_prs.json").read_text())
+            assert data["target_branch_filter"] == "stage"
+            # Verify target_branch was passed to fetch_open_prs
+            call_kwargs = mock_fetch.call_args
+            assert call_kwargs[1].get("target_branch") == "stage"
+
+    def test_empty_target_branch_allowed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        with patch("scripts.mq.collect_ready.fetch_open_prs", return_value=[]) as mock_fetch, \
+             patch("scripts.mq.collect_ready._enrich_prs_with_diffstat"):
+            from click.testing import CliRunner
+            from scripts.mq.collect_ready import main
+            result = CliRunner().invoke(main, [])
+            assert result.exit_code == 0, result.output
+            data = json.loads((tmp_path / "ready_prs.json").read_text())
+            assert data["target_branch_filter"] == ""

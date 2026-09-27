@@ -363,23 +363,25 @@ def _cfg_for_repo(config: dict, repo_slug_or_url: str) -> dict:
     return cfg
 
 
-def fetch_open_prs(config: dict, label: str = "", repo_override: str = "") -> list[dict]:
+def fetch_open_prs(config: dict, label: str = "", repo_override: str = "", target_branch: str = "") -> list[dict]:
     """Fetch all open PRs without requiring a label. Reuses standup fetchers.
 
     Works for GitHub (gather_gh.get_open_prs) and Bitbucket (bb_helpers.get_open_prs).
     Optional label post-filters on the labels field.
     Bitbucket does not support labels — label filter is silently skipped for BB.
+    Optional target_branch: filters PRs to those targeting this branch. For GitHub,
+    passed as --base to gh pr list (server-side). For BB, post-filtered client-side.
     """
     cfg = _cfg_for_repo(config, repo_override)
 
     if resolve_tracker(cfg) == "bitbucket":
         from scripts.standup.bb_helpers import get_open_prs as _bb_open
-        prs = _bb_open(cfg)
+        prs = _bb_open(cfg, target_branch=target_branch)
         if label:
             print(f"[mq] info: Bitbucket does not support label filtering — ignoring label={label!r}", flush=True)
     else:
         from scripts.standup.gather_gh import get_open_prs as _gh_open
-        prs = _gh_open(cfg)
+        prs = _gh_open(cfg, target_branch=target_branch)
         if label:
             prs = [
                 p for p in prs

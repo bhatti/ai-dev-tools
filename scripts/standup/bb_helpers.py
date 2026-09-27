@@ -14,13 +14,16 @@ import requests
 from scripts.common.bitbucket_api import _auth, _BASE
 
 
-def get_open_prs(config: dict) -> list[dict]:
+def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
     """Return open PRs relevant to the team — authored by or reviewing for team members.
 
     When STANDUP_TEAM_MEMBERS is set, only returns PRs where:
     - The author display name matches a team member, OR
     - A team member is listed as reviewer
     Returns [] silently when BB credentials are not configured.
+
+    Optional target_branch: when non-empty, post-filters PRs to only those targeting
+    that branch (BB REST API does not support server-side destination branch filtering).
     """
     ws = config.get("BITBUCKET_WORKSPACE", "")
     repo = config.get("BITBUCKET_REPO", "")
@@ -73,6 +76,7 @@ def get_open_prs(config: dict) -> list[dict]:
             prs.append({
                 "id": pr["id"],
                 "title": pr.get("title", ""),
+                "description": pr.get("description", ""),
                 "author": author,
                 "branch": pr.get("source", {}).get("branch", {}).get("name", ""),
                 "target_branch": pr.get("destination", {}).get("branch", {}).get("name", ""),
@@ -84,4 +88,6 @@ def get_open_prs(config: dict) -> list[dict]:
         url = data.get("next") or ""
         if not url:
             break
+    if target_branch:
+        prs = [p for p in prs if p.get("target_branch", "") == target_branch]
     return prs

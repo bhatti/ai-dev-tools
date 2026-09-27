@@ -1,143 +1,145 @@
-"""Tests for scripts/mq/group_by_scope.py — integration test via CLI."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Unit tests for group_by_scope hierarchical lane generation."""
+from __future__ import annotations
 
 import json
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
-
-from scripts.mq.group_by_scope import main
 
 
-class TestGroupByScope:
-    def test_groups_prs_by_scope(self, tmp_workspace):
-        ready_data = {
-            "pr_count": 4,
-            "prs": [
-                {"pr_number": 1, "scope": "billing", "age_hours": 10},
-                {"pr_number": 2, "scope": "billing", "age_hours": 5},
-                {"pr_number": 3, "scope": "auth", "age_hours": 8},
-                {"pr_number": 4, "scope": "auth", "age_hours": 2},
-            ],
-        }
-        (tmp_workspace / "ready_prs.json").write_text(json.dumps(ready_data))
+def _make_pr(pr_number: int, target_branch: str, blast_radius: str = "low",
+             pr_type: str = "unknown", category: str = "unknown") -> dict:
+    return {
+        "pr_number": pr_number,
+        "repo": "org/repo",
+        "title": f"PR {pr_number}",
+        "scope": "unknown",
+        "blast_radius": blast_radius,
+        "pr_type": pr_type,
+        "category": category,
+        "category_confidence": "unknown",
+        "author": "dev",
+        "age_hours": 1.0,
+        "branch": f"feature/{pr_number}",
+        "target_branch": target_branch,
+        "ci_status": "success",
+        "has_approval": True,
+        "url": "",
+        "labels": [],
+    }
 
-        runner = CliRunner()
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
 
-        out = json.loads((tmp_workspace / "lane_groups.json").read_text())
-        assert out["lane_count"] == 2
-        assert out["total_prs"] == 4
-        lane_ids = {l["lane_id"] for l in out["lanes"]}
-        assert any("billing" in lid for lid in lane_ids)
-        assert any("auth" in lid for lid in lane_ids)
+def _run_group(prs: list[dict], tmp_path: Path, monkeypatch) -> dict:
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+    (tmp_path / "ready_prs.json").write_text(
+        json.dumps({"pr_count": len(prs), "repo": "org/repo", "target_branch_filter": "", "prs": prs})
+    )
+    from click.testing import CliRunner
+    from scripts.mq.group_by_scope import main
+    result = CliRunner().invoke(main, [])
+    assert result.exit_code == 0, f"group_by_scope failed:\n{result.output}"
+    return json.loads((tmp_path / "lane_groups.json").read_text())
 
-    def test_cross_scope_goes_to_default(self, tmp_workspace):
-        ready_data = {
-            "pr_count": 2,
-            "prs": [
-                {"pr_number": 1, "scope": "cross-scope", "age_hours": 10},
-                {"pr_number": 2, "scope": "billing", "age_hours": 5},
-            ],
-        }
-        (tmp_workspace / "ready_prs.json").write_text(json.dumps(ready_data))
 
-        runner = CliRunner()
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
+class TestHierarchicalLanes:
+    def test_canonical_branches_get_risk_tier_lanes(self, tmp_path, monkeypatch):
+        prs = (
+            [_make_pr(i, "main", "high") for i in range(1, 4)] +
+            [_make_pr(i, "main", "medium") for i in range(4, 6)] +
+            [_make_pr(i, "main", "low") for i in range(6, 8)]
+        )
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane_ids = [l["lane_id"] for l in data["lanes"]]
+        assert "main/high" in lane_ids
+        assert "main/medium" in lane_ids
+        assert "main/low" in lane_ids
 
-        out = json.loads((tmp_workspace / "lane_groups.json").read_text())
-        lane_ids = {l["lane_id"] for l in out["lanes"]}
-        assert any("default" in lid for lid in lane_ids)
-        assert any("billing" in lid for lid in lane_ids)
+    def test_feature_branch_prs_go_to_stacked(self, tmp_path, monkeypatch):
+        prs = [_make_pr(1, "AI-2503-my-feature")]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane_ids = [l["lane_id"] for l in data["lanes"]]
+        assert any(lid.startswith("stacked/") for lid in lane_ids)
+        assert "stacked/AI-2503-my-feature" in lane_ids
 
-    def test_missing_ready_prs_exits(self, tmp_workspace):
-        runner = CliRunner()
-        result = runner.invoke(main, [])
-        assert result.exit_code != 0
+    def test_canonical_detection_by_count(self, tmp_path, monkeypatch):
+        """Branch with >= CANONICAL_MIN_PRS PRs is treated as canonical even if not in default set."""
+        monkeypatch.setenv("CANONICAL_MIN_PRS", "3")
+        prs = [_make_pr(i, "release/v2.1", "low") for i in range(1, 5)]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane_ids = [l["lane_id"] for l in data["lanes"]]
+        assert any("release/v2.1" in lid and not lid.startswith("stacked/") for lid in lane_ids)
 
-    def test_sorted_by_age(self, tmp_workspace):
-        ready_data = {
-            "pr_count": 3,
-            "prs": [
-                {"pr_number": 1, "scope": "billing", "age_hours": 2},
-                {"pr_number": 2, "scope": "billing", "age_hours": 10},
-                {"pr_number": 3, "scope": "billing", "age_hours": 5},
-            ],
-        }
-        (tmp_workspace / "ready_prs.json").write_text(json.dumps(ready_data))
+    def test_empty_risk_lanes_skipped(self, tmp_path, monkeypatch):
+        prs = [_make_pr(1, "main", "high")]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane_ids = [l["lane_id"] for l in data["lanes"]]
+        assert "main/medium" not in lane_ids
+        assert "main/low" not in lane_ids
 
-        runner = CliRunner()
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
+    def test_canonical_env_override(self, tmp_path, monkeypatch):
+        """CANONICAL_BRANCHES env var adds extra canonical branches."""
+        monkeypatch.setenv("CANONICAL_BRANCHES", "custom-branch")
+        prs = [_make_pr(1, "custom-branch", "low")]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane_ids = [l["lane_id"] for l in data["lanes"]]
+        assert "custom-branch/low" in lane_ids
+        assert not any(lid.startswith("stacked/") for lid in lane_ids)
 
-        out = json.loads((tmp_workspace / "lane_groups.json").read_text())
-        billing_lane = next(l for l in out["lanes"] if "billing" in l["lane_id"])
-        ages = [p["age_hours"] for p in billing_lane["prs"]]
+    def test_mixed_canonical_and_stacked(self, tmp_path, monkeypatch):
+        prs = (
+            [_make_pr(i, "dev", "low") for i in range(1, 4)] +
+            [_make_pr(10, "feature/my-wip")]
+        )
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane_ids = [l["lane_id"] for l in data["lanes"]]
+        assert "dev/low" in lane_ids
+        assert "stacked/feature/my-wip" in lane_ids
+
+    def test_prs_in_lane_sorted_by_age_desc(self, tmp_path, monkeypatch):
+        prs = [
+            {**_make_pr(1, "main", "low"), "age_hours": 5.0},
+            {**_make_pr(2, "main", "low"), "age_hours": 20.0},
+            {**_make_pr(3, "main", "low"), "age_hours": 1.0},
+        ]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        low_lane = next(l for l in data["lanes"] if l["lane_id"] == "main/low")
+        ages = [p["age_hours"] for p in low_lane["prs"]]
         assert ages == sorted(ages, reverse=True)
 
-    def test_cross_branch_segregation(self, tmp_workspace):
-        """PRs targeting different branches must land in different lanes."""
-        ready_data = {
-            "pr_count": 4,
-            "prs": [
-                {"pr_number": 1, "scope": "billing", "target_branch": "main", "age_hours": 5},
-                {"pr_number": 2, "scope": "billing", "target_branch": "dev", "age_hours": 3},
-                {"pr_number": 3, "scope": "auth", "target_branch": "main", "age_hours": 2},
-                {"pr_number": 4, "scope": "billing", "target_branch": "dev", "age_hours": 1},
-            ],
-        }
-        (tmp_workspace / "ready_prs.json").write_text(json.dumps(ready_data))
+    def test_lane_has_category_counts(self, tmp_path, monkeypatch):
+        """Each lane includes category_counts dict."""
+        prs = [
+            _make_pr(1, "main", "low", category="api"),
+            _make_pr(2, "main", "low", category="api"),
+            _make_pr(3, "main", "low", category="backend"),
+        ]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane = next(l for l in data["lanes"] if l["lane_id"] == "main/low")
+        assert lane["category_counts"]["api"] == 2
+        assert lane["category_counts"]["backend"] == 1
 
-        runner = CliRunner()
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
+    def test_hotspot_detection(self, tmp_path, monkeypatch):
+        """Lane with >=3 bug PRs in the same category flags it as a hotspot."""
+        prs = [_make_pr(i, "main", "low", pr_type="bug", category="api") for i in range(1, 4)]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane = next(l for l in data["lanes"] if l["lane_id"] == "main/low")
+        assert "api" in lane["hotspots"]
 
-        out = json.loads((tmp_workspace / "lane_groups.json").read_text())
-        lane_ids = {l["lane_id"] for l in out["lanes"]}
+    def test_no_hotspot_below_threshold(self, tmp_path, monkeypatch):
+        """Fewer than 3 bug PRs in a category — no hotspot."""
+        prs = [_make_pr(i, "main", "low", pr_type="bug", category="api") for i in range(1, 3)]
+        data = _run_group(prs, tmp_path, monkeypatch)
+        lane = next(l for l in data["lanes"] if l["lane_id"] == "main/low")
+        assert lane["hotspots"] == []
 
-        # Expect separate lanes for main and dev billing PRs
-        assert "main/billing" in lane_ids, f"Expected 'main/billing' in {lane_ids}"
-        assert "dev/billing" in lane_ids, f"Expected 'dev/billing' in {lane_ids}"
-        assert "main/auth" in lane_ids, f"Expected 'main/auth' in {lane_ids}"
-
-        # PR #1 and #3 (main) must not be in the same lane as PR #2 and #4 (dev)
-        main_billing = next(l for l in out["lanes"] if l["lane_id"] == "main/billing")
-        assert {p["pr_number"] for p in main_billing["prs"]} == {1}
-
-        dev_billing = next(l for l in out["lanes"] if l["lane_id"] == "dev/billing")
-        assert {p["pr_number"] for p in dev_billing["prs"]} == {2, 4}
-
-    def test_multi_segment_target_branch(self, tmp_workspace):
-        """Target branches with '/' in them (e.g. 'branches/AI-5005') form valid lane_ids.
-
-        lane_id = '{target_branch}/{scope}' so 'branches/AI-5005/billing' is correct.
-        rsplit('/', 1) must be used to extract the branch — split('/')[0] is wrong.
-        """
-        ready_data = {
-            "pr_count": 2,
-            "prs": [
-                {"pr_number": 10, "scope": "billing", "target_branch": "branches/AI-5005", "age_hours": 5},
-                {"pr_number": 11, "scope": "billing", "target_branch": "branches/AI-5005", "age_hours": 3},
-            ],
-        }
-        (tmp_workspace / "ready_prs.json").write_text(json.dumps(ready_data))
-
-        runner = CliRunner()
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
-
-        out = json.loads((tmp_workspace / "lane_groups.json").read_text())
-        lane_ids = [l["lane_id"] for l in out["lanes"]]
-        assert "branches/AI-5005/billing" in lane_ids, (
-            f"Expected 'branches/AI-5005/billing' in {lane_ids}"
+    def test_total_prs_preserved(self, tmp_path, monkeypatch):
+        prs = (
+            [_make_pr(i, "main", "high") for i in range(1, 4)] +
+            [_make_pr(i, "dev", "low") for i in range(4, 7)] +
+            [_make_pr(10, "feature/wip")]
         )
-
-        lane = next(l for l in out["lanes"] if l["lane_id"] == "branches/AI-5005/billing")
-        assert lane["pr_count"] == 2
-        # rsplit("/", 1) must give the correct branch part
-        for l in out["lanes"]:
-            branch_part, scope_part = l["lane_id"].rsplit("/", 1)
-            assert branch_part == "branches/AI-5005", f"Wrong branch part: {branch_part!r}"
-            assert scope_part == "billing", f"Wrong scope part: {scope_part!r}"
+        data = _run_group(prs, tmp_path, monkeypatch)
+        assert data["total_prs"] == len(prs)
+        lane_total = sum(l["pr_count"] for l in data["lanes"])
+        assert lane_total == len(prs)

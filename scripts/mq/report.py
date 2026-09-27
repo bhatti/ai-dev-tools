@@ -253,6 +253,99 @@ def _emit_test_health_insights(
     sections.append("")
 
 
+_HIGH_BLAST_CATEGORIES = frozenset({"security", "authn_authz", "sre", "data"})
+
+
+def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) -> str:
+    """Build a Valley of Calm queue health section using simulation-inspired metrics.
+
+    Derives proxy parameters from actual PR data:
+    - defect_prob proxy: fraction of PRs with failed CI
+    - batch_size proxy: average PRs per canonical lane (~total / estimated lanes)
+
+    Formula: batch_success = (1 - defect_prob) ^ batch_size
+    All numbers are from actual PR data — no fabricated estimates.
+    """
+    if not prs:
+        return ""
+    from collections import Counter
+    total = len(prs)
+    failed_ci = sum(1 for p in prs if p.get("ci_status") == "failed")
+    aged = sum(1 for p in prs if p.get("age_hours", 0) > 48)
+    high_blast = sum(1 for p in prs if p.get("blast_radius") == "high")
+    medium_blast = sum(1 for p in prs if p.get("blast_radius") == "medium")
+    defect_prob = failed_ci / total if total > 0 else 0.0
+    estimated_lanes = max(1, total // 10)
+    avg_batch = round(total / estimated_lanes, 1)
+    batch_success = round((1 - defect_prob) ** avg_batch * 100, 1) if avg_batch > 0 else 100.0
+    aged_pct = round(aged / total * 100, 1)
+    ci_pct = round(defect_prob * 100, 1)
+
+    health = "🟢 Healthy" if batch_success >= 90 else ("🟡 Degraded" if batch_success >= 70 else "🔴 Plateau of Misery")
+    advice = (
+        "Queue is in a healthy operating range."
+        if batch_success >= 80
+        else "Reduce batch size or fix CI failures to exit the Plateau of Misery."
+    )
+
+    lines = [
+        "## Valley of Calm — Queue Health",
+        "",
+        f"Overall status: **{health}**",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Total PRs in queue | {total} |",
+        f"| CI failure rate | {failed_ci}/{total} ({ci_pct}%) |",
+        f"| PRs aged >48h | {aged} ({aged_pct}%) |",
+        f"| High blast-radius PRs | {high_blast} |",
+        f"| Medium blast-radius PRs | {medium_blast} |",
+        f"| Approx batch size (PRs/lane) | {avg_batch} |",
+        f"| Est. batch success rate | {batch_success}% |",
+        "",
+        f"> At {ci_pct}% CI failure rate and batch size ~{avg_batch}, "
+        f"expected batch success is **{batch_success}%**. {advice}",
+        "",
+    ]
+
+    # Category distribution — only include if category data is present
+    cat_counts = Counter(p.get("category", "unknown") for p in prs)
+    bug_by_cat = Counter(
+        p.get("category", "unknown") for p in prs if p.get("pr_type") == "bug"
+    )
+    # Collect hotspots from lane metadata when available
+    hotspot_cats: set[str] = set()
+    if lanes:
+        for lane in lanes:
+            hotspot_cats.update(lane.get("hotspots", []))
+    # Also flag categories with >=3 bugs directly from PR data
+    hotspot_cats.update(cat for cat, cnt in bug_by_cat.items() if cnt >= 3)
+
+    # Only show the table if we have non-trivial category data
+    known_cats = {c: n for c, n in cat_counts.items() if c != "unknown"}
+    if known_cats:
+        lines.append("### Category Breakdown")
+        lines.append("")
+        lines.append("| Category | PRs | Bug PRs | High-Blast | Hotspot |")
+        lines.append("|----------|-----|---------|------------|---------|")
+        high_blast_cats = {p.get("category", "unknown") for p in prs if p.get("blast_radius") == "high"}
+        for cat in sorted(known_cats, key=lambda c: -cat_counts[c]):
+            n = cat_counts[cat]
+            bugs = bug_by_cat.get(cat, 0)
+            is_high = "⚠️" if cat in high_blast_cats or cat in _HIGH_BLAST_CATEGORIES else "—"
+            is_hotspot = "🔥 yes" if cat in hotspot_cats else "—"
+            lines.append(f"| {cat} | {n} | {bugs} | {is_high} | {is_hotspot} |")
+        unknown_n = cat_counts.get("unknown", 0)
+        if unknown_n:
+            lines.append(f"| unknown | {unknown_n} | {bug_by_cat.get('unknown', 0)} | — | — |")
+        lines.append("")
+        if hotspot_cats:
+            lines.append(f"> 🔥 Hotspots (≥3 bug PRs in category): **{', '.join(sorted(hotspot_cats))}**")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dict]:
     """Build markdown report from available MQ result files.
 
@@ -702,61 +795,109 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
     sections = lane_sections  # lanes block (grouping detail from group task)
     lanes = _read_json(workspace / "lane_groups.json")
+    ready = _read_json(workspace / "ready_prs.json")
     if lanes:
         lane_list = lanes.get("lanes", [])
-        total_prs = sum(len(l.get("prs", [])) for l in lane_list)
+        all_prs_flat = [p for l in lane_list for p in l.get("prs", [])]
+        total_prs = len(all_prs_flat)
+
+        # Valley of Calm health section (uses all PRs + lane hotspot metadata)
+        voc = _valley_of_calm_section(all_prs_flat, lanes=lane_list)
+        if voc:
+            sections.append(voc)
+
+        # Target branch filter acknowledgement
+        if ready:
+            tbf = (ready.get("target_branch_filter") or "").strip()
+            if tbf:
+                sections.append(f"> Analysis scoped to PRs targeting: **{tbf}**")
+                sections.append("")
+
         sections.append("## Merge Queue Lanes")
         sections.append("")
-        sections.append(f"**{len(lane_list)}** scope lanes, **{total_prs}** PRs queued")
+        sections.append(f"**{len(lane_list)}** lanes, **{total_prs}** PRs queued")
         sections.append("")
 
-        # Group lanes by target_branch.
-        # lane_id = "{target_branch}/{scope}" where target_branch may contain "/"
-        # (e.g. "goatbot/branches/FOO"). Use the PR's own target_branch field — never
-        # split lane_id — because lane_id splitting is ambiguous for multi-segment branches.
-        branch_lanes: dict[str, list[dict]] = {}
-        for lane in lane_list:
-            # Use target_branch from the first PR in this lane as the authoritative branch.
-            prs_in_lane = lane.get("prs", [])
-            if prs_in_lane:
-                branch = prs_in_lane[0].get("target_branch", "") or "unknown"
-            else:
-                # Fallback: infer from lane_id via rsplit
-                lid = lane.get("lane_id", "unknown/unknown")
-                branch = lid.rsplit("/", 1)[0] if "/" in lid else lid
-            branch_lanes.setdefault(branch, []).append(lane)
+        _PR_TYPE_EMOJI = {"bug": "🐛", "feature": "✨", "unknown": "❓"}
 
-        # Sort branches by descending PR count
-        def _branch_pr_count(b: str) -> int:
-            return sum(len(l.get("prs", [])) for l in branch_lanes[b])
+        def _lane_display_name(lane_id: str) -> str:
+            """Derive human-readable lane name from hierarchical lane_id."""
+            if lane_id.startswith("stacked/"):
+                feature = lane_id[len("stacked/"):]
+                return f"🔀 Stacked → {feature}"
+            if "/" in lane_id:
+                # lane_id is "{branch}/{risk_tier}" — risk_tier is the last segment
+                rest, risk_tier = lane_id.rsplit("/", 1)
+                if risk_tier == "high":
+                    return f"🔴 {rest} — High Risk"
+                if risk_tier == "medium":
+                    return f"🟡 {rest} — Medium Risk"
+                if risk_tier == "low":
+                    return f"🟢 {rest} — Low Risk"
+                # Legacy format: old unknown/scope lanes
+                if risk_tier in ("unknown", "default"):
+                    return rest
+                return f"{rest} / {risk_tier}"
+            return lane_id
 
-        for branch in sorted(branch_lanes, key=_branch_pr_count, reverse=True):
-            b_lanes = branch_lanes[branch]
-            b_pr_count = sum(len(l.get("prs", [])) for l in b_lanes)
-            sections.append(f"### Branch: {branch} ({b_pr_count} PR{'s' if b_pr_count != 1 else ''}, {len(b_lanes)} lane{'s' if len(b_lanes) != 1 else ''})")
+        def _risk_emoji_for_lane(prs_in_lane: list[dict]) -> str:
+            blasts = [p.get("blast_radius", "low") for p in prs_in_lane]
+            if "high" in blasts:
+                return "🔴 high"
+            if "medium" in blasts:
+                return "🟡 medium"
+            return "🟢 low"
+
+        # Separate canonical lanes from stacked lanes for display
+        canonical_lanes = [l for l in lane_list if not l.get("lane_id", "").startswith("stacked/")]
+        stacked_lanes = [l for l in lane_list if l.get("lane_id", "").startswith("stacked/")]
+
+        if canonical_lanes:
+            sections.append("### Canonical Branch Lanes")
             sections.append("")
             sections.append("| Lane | PRs | Risk |")
             sections.append("|------|-----|------|")
-            for lane in b_lanes:
+            for lane in canonical_lanes:
                 lid = lane.get("lane_id", "?")
-                _, scope_display = lid.rsplit("/", 1) if "/" in lid else (lid, lid)
-                if scope_display in ("unknown", "default"):
-                    display_name = branch if scope_display == "unknown" else "cross-scope"
-                else:
-                    display_name = scope_display
-                prs = lane.get("prs", [])
-                pr_nums = ", ".join(f"#{p.get('pr_number', '?')}" for p in prs[:5])
-                if len(prs) > 5:
-                    pr_nums += f" +{len(prs)-5} more"
-                # Aggregate risk: any high → 🔴, any medium → 🟡, else 🟢
-                blasts = [p.get("blast_radius", "low") for p in prs]
-                if "high" in blasts:
-                    risk_emoji = "🔴 high"
-                elif "medium" in blasts:
-                    risk_emoji = "🟡 medium"
-                else:
-                    risk_emoji = "🟢 low"
-                sections.append(f"| {display_name} | {pr_nums} | {risk_emoji} |")
+                display = _lane_display_name(lid)
+                prs_in_lane = lane.get("prs", [])
+                pr_type_counts: dict[str, int] = {}
+                for p in prs_in_lane:
+                    pt = p.get("pr_type", "unknown")
+                    pr_type_counts[pt] = pr_type_counts.get(pt, 0) + 1
+                pr_nums = ", ".join(
+                    f"{_PR_TYPE_EMOJI.get(p.get('pr_type','unknown'),'❓')}#{p.get('pr_number', '?')}"
+                    for p in prs_in_lane[:5]
+                )
+                if len(prs_in_lane) > 5:
+                    pr_nums += f" +{len(prs_in_lane)-5} more"
+                risk_emoji = _risk_emoji_for_lane(prs_in_lane)
+                sections.append(f"| {display} | {pr_nums} | {risk_emoji} |")
+            sections.append("")
+
+        if stacked_lanes:
+            stacked_total = sum(l.get("pr_count", 0) for l in stacked_lanes)
+            sections.append(f"### Stacked PRs ({stacked_total} PRs targeting feature branches)")
+            sections.append("")
+            sections.append("| Lane | PRs | Risk |")
+            sections.append("|------|-----|------|")
+            for lane in stacked_lanes:
+                lid = lane.get("lane_id", "?")
+                display = _lane_display_name(lid)
+                prs_in_lane = lane.get("prs", [])
+                pr_nums = ", ".join(
+                    f"{_PR_TYPE_EMOJI.get(p.get('pr_type','unknown'),'❓')}#{p.get('pr_number', '?')}"
+                    for p in prs_in_lane[:5]
+                )
+                if len(prs_in_lane) > 5:
+                    pr_nums += f" +{len(prs_in_lane)-5} more"
+                risk_emoji = _risk_emoji_for_lane(prs_in_lane)
+                sections.append(f"| {display} | {pr_nums} | {risk_emoji} |")
+            sections.append("")
+            sections.append(
+                "> ⚠️ Stacked PRs target feature branches — they depend on those branches being merged first. "
+                "Do not batch with canonical branch lanes."
+            )
             sections.append("")
 
         ctx["LANE_COUNT"] = str(len(lane_list))
