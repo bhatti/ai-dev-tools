@@ -1,9 +1,11 @@
 """Tests for scripts/mq/report.py"""
 
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.mq.report import _build_report, _read_json
+from scripts.mq.report import _build_report, _read_json, _valley_of_calm_section
 
 
 class TestReadJson:
@@ -380,3 +382,103 @@ class TestContractTestReport:
         md, ctx = _build_report(tmp_path, "1", "Test")
         assert "Contract + Fuzz Security Testing" not in md
         assert "CONTRACT_STATUS" not in ctx
+
+
+def _make_prs(n, pr_type="feature", ci_status="none", blast_radius="low", age_hours=2.0):
+    return [
+        {
+            "pr_number": i + 1,
+            "blast_radius": blast_radius,
+            "title": f"PR {i + 1}",
+            "category": "backend",
+            "pr_type": pr_type,
+            "age_hours": age_hours,
+            "ci_status": ci_status,
+            "approval_count": 1,
+            "reviewer_count": 1,
+            "url": "",
+        }
+        for i in range(n)
+    ]
+
+
+class TestDeploymentRiskSection:
+    def test_no_deployment_section_by_default(self):
+        prs = _make_prs(10)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEPLOYMENT_PROFILE", None)
+            result = _valley_of_calm_section(prs)
+        assert "Deployment Risk Position" not in result
+
+    def test_no_deployment_section_when_empty_profile(self):
+        prs = _make_prs(10)
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "  "}):
+            result = _valley_of_calm_section(prs)
+        assert "Deployment Risk Position" not in result
+
+    def test_deployment_section_with_cd_profile(self):
+        prs = _make_prs(8, pr_type="feature") + _make_prs(2, pr_type="bug")
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "cd"}):
+            result = _valley_of_calm_section(prs)
+        assert "Deployment Risk Position" in result
+        assert "cd" in result
+        assert "Release cadence" in result
+        assert "Release train success" in result
+        assert "Rollback feasibility" in result
+        assert "Deployment maturity" in result
+
+    def test_deployment_section_with_weekly_train(self):
+        prs = _make_prs(45, pr_type="feature") + _make_prs(5, pr_type="bug")
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "weekly-train"}):
+            result = _valley_of_calm_section(prs)
+        assert "Deployment Risk Position" in result
+        assert "weekly-train" in result
+        assert "Releases stacked" in result
+
+    def test_gauge_has_blue_marker(self):
+        prs = _make_prs(10)
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "cd"}):
+            result = _valley_of_calm_section(prs)
+        assert "🔵" in result
+
+    def test_rollback_trap_warning_with_manual_profile(self):
+        prs = _make_prs(10)
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "manual"}):
+            result = _valley_of_calm_section(prs)
+        assert "Rollback trap" in result
+        assert "roll-forward" in result.lower()
+
+    def test_maturity_breakdown_table(self):
+        prs = _make_prs(10)
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "daily-train"}):
+            result = _valley_of_calm_section(prs)
+        assert "Deployment maturity breakdown" in result
+        assert "Automated Testing" in result
+        assert "Canary Deployment" in result
+        assert "Observability" in result
+
+    def test_high_defect_rate_red_status(self):
+        prs = _make_prs(3, pr_type="feature") + _make_prs(7, pr_type="bug")
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "weekly-train"}):
+            result = _valley_of_calm_section(prs)
+        assert "Calamity zone" in result or "Warning" in result
+
+    def test_unknown_profile_no_deployment_section(self):
+        prs = _make_prs(10)
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "nonexistent-preset"}):
+            result = _valley_of_calm_section(prs)
+        assert "Deployment Risk Position" not in result
+
+    def test_empty_prs_no_section(self):
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "cd"}):
+            result = _valley_of_calm_section([])
+        assert result == ""
+
+    def test_integration_via_build_report(self, tmp_path):
+        prs = _make_prs(5, pr_type="feature") + _make_prs(1, pr_type="bug")
+        (tmp_path / "lane_groups.json").write_text(json.dumps({
+            "lanes": [{"lane_id": "main/low", "prs": prs}]
+        }))
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "cd"}):
+            md, ctx = _build_report(tmp_path, "1", "Deploy Test")
+        assert "Deployment Risk Position" in md

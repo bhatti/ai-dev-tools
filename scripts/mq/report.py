@@ -256,7 +256,10 @@ def _emit_test_health_insights(
 _HIGH_BLAST_CATEGORIES = frozenset({"security", "authn_authz", "sre", "data"})
 
 # Display constants reused across per-PR table helpers
-_PR_TYPE_EMOJI: dict[str, str] = {"bug": "🐛", "feature": "✨", "unknown": "❓"}
+_PR_TYPE_EMOJI: dict[str, str] = {
+    "bug": "🐛", "feature": "✨", "refactor": "♻️", "chore": "🔧",
+    "security": "🔒", "test": "🧪", "docs": "📝", "unknown": "❓",
+}
 _RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]
 _RISK_EMOJI: dict[str, str] = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
@@ -274,11 +277,16 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     if not prs:
         return ""
     from collections import Counter
+    from scripts.mq.simulate import (
+        deployment_risk_summary,
+        load_deployment_profile,
+        merge_batch_success,
+    )
     total = len(prs)
     failed_ci = sum(1 for p in prs if p.get("ci_status") == "failed")
     aged = sum(1 for p in prs if p.get("age_hours", 0) > 48)
-    high_blast = sum(1 for p in prs if p.get("blast_radius") == "high")
-    medium_blast = sum(1 for p in prs if p.get("blast_radius") == "medium")
+    high_blast = sum(1 for p in prs if p.get("risk_tier", p.get("blast_radius")) == "high")
+    medium_blast = sum(1 for p in prs if p.get("risk_tier", p.get("blast_radius")) == "medium")
     # CI data availability: BB bulk API never sets ci_status from actual pipeline runs.
     # When ALL PRs show "none", treat CI as unavailable and use aged PRs as health proxy.
     ci_available = any(p.get("ci_status") not in ("none", None, "") for p in prs)
@@ -290,7 +298,7 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
 
     # Health assessment: when CI unavailable, use aged PRs as primary pressure signal
     if ci_available:
-        batch_success = round((1 - defect_prob) ** avg_batch * 100, 1) if avg_batch > 0 else 100.0
+        batch_success = round(merge_batch_success(defect_prob, avg_batch) * 100, 1) if avg_batch > 0 else 100.0
         health = "🟢 Healthy" if batch_success >= 90 else ("🟡 Degraded" if batch_success >= 70 else "🔴 Plateau of Misery")
         health_basis = f"CI failure rate {ci_pct}% at batch size ~{avg_batch}"
     else:
@@ -349,7 +357,7 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
         lines.append("")
         lines.append("| Category | PRs | Bug PRs | High-Blast | Hotspot |")
         lines.append("|----------|-----|---------|------------|---------|")
-        high_blast_cats = {p.get("category", "unknown") for p in prs if p.get("blast_radius") == "high"}
+        high_blast_cats = {p.get("category", "unknown") for p in prs if p.get("risk_tier", p.get("blast_radius")) == "high"}
         for cat in sorted(known_cats, key=lambda c: -cat_counts[c]):
             n = cat_counts[cat]
             bugs = bug_by_cat.get(cat, 0)
@@ -364,7 +372,207 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
             lines.append(f"> 🔥 Hotspots (≥3 bug PRs in category): **{', '.join(sorted(hotspot_cats))}**")
             lines.append("")
 
+    # PR Type Distribution — connects to simulation's defect rate knob
+    type_counts = Counter(p.get("pr_type", "unknown") for p in prs)
+    if total > 0 and any(t != "unknown" for t in type_counts):
+        lines.append("### Work Type Distribution")
+        lines.append("")
+        lines.append("| Type | Count | % | Signal |")
+        lines.append("|------|-------|---|--------|")
+        type_order = ["feature", "bug", "security", "refactor", "chore", "test", "docs", "unknown"]
+        type_signals = {
+            "bug": "defect indicator",
+            "security": "defect indicator (security)",
+            "feature": "new functionality",
+            "refactor": "tech debt reduction",
+            "chore": "maintenance / KTLO",
+            "test": "quality investment",
+            "docs": "documentation",
+            "unknown": "unclassified",
+        }
+        for t in type_order:
+            n = type_counts.get(t, 0)
+            if n == 0:
+                continue
+            pct = round(n / total * 100, 1)
+            signal = type_signals.get(t, "")
+            emoji = _PR_TYPE_EMOJI.get(t, "")
+            lines.append(f"| {emoji} {t} | {n} | {pct}% | {signal} |")
+        lines.append("")
+
+        # Defect rate proxy — maps to Joe's model
+        n_bugs = type_counts.get("bug", 0) + type_counts.get("security", 0)
+        defect_pct = round(n_bugs / total * 100, 1)
+        if n_bugs > 0:
+            defect_ratio = round(total / n_bugs)
+            batch_success_est = round(merge_batch_success(n_bugs / total, avg_batch) * 100, 1)
+            if defect_pct > 15:
+                health_emoji = "🔴"
+                health_label = "high defect rate"
+            elif defect_pct > 8:
+                health_emoji = "🟡"
+                health_label = "moderate defect rate"
+            else:
+                health_emoji = "🟢"
+                health_label = "healthy defect rate"
+            lines.append(
+                f"> {health_emoji} **Defect rate proxy: {defect_pct}%** "
+                f"({n_bugs} bug+security PRs / {total} total) — ~1-in-{defect_ratio} commit rate. "
+                f"At batch size ~{avg_batch}, est. batch success ≈ {batch_success_est}% "
+                f"({health_label})."
+            )
+            lines.append("")
+            feature_count = type_counts.get("feature", 0)
+            if feature_count > 0:
+                fb_ratio = round(feature_count / n_bugs, 1) if n_bugs else float("inf")
+                lines.append(
+                    f"> Feature:Bug ratio = **{fb_ratio}:1** "
+                    f"({feature_count} features / {n_bugs} bugs). "
+                    + ("Healthy — shipping more value than fixing." if fb_ratio >= 3
+                       else "Below 3:1 — team is spending significant effort on defect repair."
+                       if fb_ratio >= 1
+                       else "⚠️ More bugs than features — investigate root causes.")
+                )
+                lines.append("")
+        else:
+            lines.append(f"> 🟢 No bug or security PRs in queue — defect rate proxy: 0%")
+            lines.append("")
+
+    # Review health — unreviewed high-risk PRs, review depth
+    high_risk_prs = [p for p in prs if p.get("risk_tier", p.get("blast_radius")) == "high"]
+    unreviewed_high = [p for p in high_risk_prs if p.get("reviewer_count", 0) == 0]
+    no_reviewers = sum(1 for p in prs if p.get("reviewer_count", 0) == 0)
+    approved = sum(1 for p in prs if p.get("approval_count", 0) > 0)
+
+    if total > 0:
+        lines.append("### Review Health")
+        lines.append("")
+        lines.append("| Metric | Value | Signal |")
+        lines.append("|--------|-------|--------|")
+        lines.append(f"| High-risk PRs | {len(high_risk_prs)} ({round(len(high_risk_prs)/total*100)}%) "
+                     f"| {'🔴 >30%' if len(high_risk_prs)/total > 0.3 else '🟢 healthy'} |")
+        lines.append(f"| Unreviewed (no assignees) | {no_reviewers}/{total} "
+                     f"| {'⚠️ review gap' if no_reviewers > total * 0.5 else '—'} |")
+        if unreviewed_high:
+            lines.append(f"| Unreviewed high-risk | {len(unreviewed_high)}/{len(high_risk_prs)} "
+                         f"| 🔴 high-risk PRs without reviewers |")
+        if approved > 0:
+            lines.append(f"| Approved | {approved}/{total} ({round(approved/total*100)}%) "
+                         f"| ready to merge |")
+        lines.append("")
+
+    # Deployment Risk Position — only when DEPLOYMENT_PROFILE is configured
+    profile_name = os.environ.get("DEPLOYMENT_PROFILE", "").strip()
+    if profile_name and total > 0:
+        deploy_lines = _deployment_risk_lines(
+            profile_name, total, type_counts, avg_batch,
+            load_deployment_profile, deployment_risk_summary,
+        )
+        lines.extend(deploy_lines)
+
     return "\n".join(lines)
+
+
+def _deployment_risk_lines(
+    profile_name: str,
+    total: int,
+    type_counts: dict,
+    avg_batch: float,
+    load_profile_fn,
+    risk_summary_fn,
+) -> list[str]:
+    """Render the Deployment Risk Position sub-section.
+
+    Extracted from _valley_of_calm_section to keep CC manageable.
+    Returns a list of markdown lines (empty if profile is invalid).
+    """
+    n_defect_prs = type_counts.get("bug", 0) + type_counts.get("security", 0)
+    deploy_defect_rate = n_defect_prs / total if total > 0 else 0.0
+
+    profile = load_profile_fn(profile_name, queue_size=total)
+    if not profile:
+        return []
+
+    risk = risk_summary_fn(
+        defect_rate=deploy_defect_rate,
+        merge_batch_size=avg_batch,
+        prs_per_release=profile["prs_per_release"],
+        maturity_capabilities=profile["maturity"],
+        releases_stacked=profile["releases_stacked"],
+    )
+
+    lines: list[str] = []
+    lines.append("### Deployment Risk Position")
+    lines.append("")
+
+    gauge = risk["gauge"]
+    lines.append(f"{gauge['bar']}  {gauge['description']}")
+    lines.append("")
+
+    cadence = profile.get("release_cadence", "unknown")
+    prs_rel = profile["prs_per_release"]
+    r_success = round(risk["release_train_success"] * 100, 1)
+    adj_success = round(risk["adjusted_release_success"] * 100, 1)
+
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
+    lines.append(f"| Release cadence | {cadence} ({prs_rel} PRs/release) |")
+    lines.append(f"| Release train success | {r_success}% (raw) → {adj_success}% (maturity-adjusted) |")
+
+    rb = risk["rollback"]
+    rb_emoji = "✅" if rb["can_rollback"] else "⚠️"
+    lines.append(f"| Rollback feasibility | {rb_emoji} {rb['strategy']} "
+                 f"(MTTR ×{rb['mttr_multiplier']}) |")
+    lines.append(f"| Releases stacked | {profile['releases_stacked']} |")
+
+    mat = risk["maturity"]
+    tier_emoji = {"foundational": "🔴", "intermediate": "🟡", "advanced": "🟢"}.get(
+        mat["maturity_tier"], "⚪")
+    lines.append(f"| Deployment maturity | {tier_emoji} {mat['maturity_tier']} "
+                 f"({mat['maturity_score']}/{mat['maturity_max']}) |")
+    lines.append(f"| Risk multiplier | ×{mat['effective_risk_multiplier']} |")
+    lines.append("")
+
+    cal = risk["calamity"]
+    headroom = cal["headroom_pct"]
+    max_safe = cal.get("max_safe_batch")
+    if cal["status"] == "red":
+        lines.append(
+            f"> 🔴 **Calamity zone** — current release success ({adj_success}%) is below "
+            f"the 70% threshold. Reduce batch size or improve deployment maturity."
+        )
+    elif cal["status"] == "yellow":
+        max_safe_str = f"{max_safe:.0f}" if max_safe is not None else "∞"
+        lines.append(
+            f"> 🟡 **Warning** — {headroom:.0f}% headroom before calamity threshold. "
+            f"Max safe batch: ~{max_safe_str} PRs. Consider reducing release train size."
+        )
+    else:
+        lines.append(
+            f"> 🟢 **Healthy** — {headroom:.0f}% headroom. "
+            f"Release train size is well within safe bounds."
+        )
+    lines.append("")
+
+    if not rb["can_rollback"]:
+        lines.append(f"> ⚠️ **Rollback trap**: {rb['reason']}")
+        lines.append("")
+
+    lines.append("**Deployment maturity breakdown:**")
+    lines.append("")
+    lines.append("| Dimension | Value | Weight | Contribution |")
+    lines.append("|-----------|-------|--------|--------------|")
+    for dim_name, dim_data in mat["dimensions"].items():
+        label = dim_name.replace("_", " ").title()
+        val = dim_data["value"]
+        w = dim_data["weight"]
+        contrib = dim_data["contribution"]
+        bar_len = round(val * 10)
+        bar = "█" * bar_len + "░" * (10 - bar_len)
+        lines.append(f"| {label} | {bar} {val:.1f} | {w}× | {contrib:.1f} |")
+    lines.append("")
+
+    return lines
 
 
 def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dict]:
@@ -892,8 +1100,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
         def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
             """Emit per-PR detail table + summary list for one risk tier."""
-            sec.append("| PR | Title | Category | Type | Blast | CI | Age | Reviewers | Issues |")
-            sec.append("|----|-------|----------|------|-------|----|-----|-----------|--------|")
+            sec.append("| PR | Title | Category | Type | Blast | Risk | CI | Age | Reviewers | Issues |")
+            sec.append("|----|-------|----------|------|-------|------|----|-----|-----------|--------|")
             for p in prs_in_tier:
                 pr_link = _pr_link(p)
                 title = (p.get("title") or "")[:50]
@@ -910,6 +1118,9 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     type_emoji += "📝"
                 blast = p.get("blast_radius", "low")
                 blast_cell = f"{_RISK_EMOJI.get(blast, '⚪')} {blast}"
+                risk_score = p.get("risk_score", 0)
+                risk_tier = p.get("risk_tier", blast)
+                risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
                 ci_cell = _ci_cell(p.get("ci_status", "none"))
                 age = _age_label(p.get("age_hours", 0))
                 approvals = p.get("approval_count", 0)
@@ -918,7 +1129,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 issue_cell = _issue_cell(p.get("issue_ref"))
                 sec.append(
                     f"| {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
-                    f"| {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                    f"| {risk_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                 )
             sec.append("")
             # Per-PR summary with full title + issue ref.
@@ -1012,12 +1223,12 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             for lane in stacked_lanes:
                 feature = lane.get("lane_id", "").replace("stacked/", "", 1)
                 prs_in_lane = lane.get("prs", [])
-                n_high = sum(1 for p in prs_in_lane if p.get("blast_radius") == "high")
-                n_med = sum(1 for p in prs_in_lane if p.get("blast_radius") == "medium")
+                n_high = sum(1 for p in prs_in_lane if p.get("risk_tier", p.get("blast_radius")) == "high")
+                n_med = sum(1 for p in prs_in_lane if p.get("risk_tier", p.get("blast_radius")) == "medium")
                 sections.append(f"**→ {feature}** ({len(prs_in_lane)} PRs)")
                 sections.append("")
-                sections.append("| PR | Title | Target | Category | Type | Blast | CI | Age | Reviewers | Issues |")
-                sections.append("|----|-------|--------|----------|------|-------|----|-----|-----------|--------|")
+                sections.append("| PR | Title | Target | Category | Type | Blast | Risk | CI | Age | Reviewers | Issues |")
+                sections.append("|----|-------|--------|----------|------|-------|------|----|-----|-----------|--------|")
                 for p in prs_in_lane:
                     pr_link = _pr_link(p)
                     title = (p.get("title") or "")[:40]
@@ -1027,15 +1238,18 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
                     blast = p.get("blast_radius", "low")
                     blast_cell = f"{_RISK_EMOJI.get(blast,'⚪')} {blast}"
+                    risk_score = p.get("risk_score", 0)
+                    risk_tier = p.get("risk_tier", blast)
+                    risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
                     ci_cell = _ci_cell(p.get("ci_status", "none"))
                     age = _age_label(p.get("age_hours", 0))
                     approvals = p.get("approval_count", 0)
                     reviewers = p.get("reviewer_count", 0)
-                    rev_cell = f"{approvals}/{reviewers} ✅" if reviewers else "—"
+                    rev_cell = _rev_cell(approvals, reviewers)
                     issue_cell = _issue_cell(p.get("issue_ref"))
                     sections.append(
                         f"| {pr_link} | {title} | {target} | {cat} | {type_emoji} | {blast_cell} "
-                        f"| {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                        f"| {risk_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                     )
                 sections.append("")
 

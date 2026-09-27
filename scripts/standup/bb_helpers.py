@@ -44,11 +44,12 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
     if target_branch:
         base_params["q"] = f'destination.branch.name="{target_branch}"'
     prs: list[dict] = []
+    params: dict | None = base_params
     for _ in range(5):          # max 5 pages = 250 PRs
         resp = requests.get(
             url,
             auth=_auth(config),
-            params=base_params,
+            params=params,
             timeout=30,
         )
         if not resp.ok:
@@ -99,6 +100,7 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
         url = data.get("next") or ""
         if not url:
             break
+        params = None  # next URL already embeds query params
     if target_branch:
         prs = [p for p in prs if p.get("target_branch", "") == target_branch]
     return prs

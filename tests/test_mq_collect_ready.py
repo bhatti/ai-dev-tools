@@ -239,8 +239,12 @@ class TestClassifyPrType:
         pr = {"title": "fix: crash on empty input", "labels": []}
         assert _classify_pr_type(pr) == "bug"
 
-    def test_unknown_when_no_signal(self):
+    def test_chore_when_title_says_update(self):
         pr = {"title": "update readme", "labels": []}
+        assert _classify_pr_type(pr) == "chore"
+
+    def test_unknown_when_no_signal(self):
+        pr = {"title": "tweak spacing in header", "labels": []}
         assert _classify_pr_type(pr) == "unknown"
 
     def test_label_takes_priority_over_title(self):
@@ -383,6 +387,30 @@ class TestTargetBranchFilter:
             assert result.exit_code == 0, result.output
             data = json.loads((tmp_path / "ready_prs.json").read_text())
             assert data["target_branch_filter"] == ""
+
+    def test_safety_filter_removes_wrong_branch_prs(self, tmp_path, monkeypatch):
+        """collect_ready's safety filter removes PRs that slipped past upstream filtering."""
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        mixed_prs = [
+            {"id": 1, "title": "stage pr", "target_branch": "stage", "author": "a",
+             "branch": "f1", "created": "2025-01-01T00:00:00Z", "url": "http://x/1",
+             "age_hours": 1, "reviewers": [], "reviewer_count": 0, "approval_count": 0},
+            {"id": 2, "title": "dev pr", "target_branch": "dev", "author": "b",
+             "branch": "f2", "created": "2025-01-01T00:00:00Z", "url": "http://x/2",
+             "age_hours": 2, "reviewers": [], "reviewer_count": 0, "approval_count": 0},
+            {"id": 3, "title": "another stage pr", "target_branch": "stage", "author": "c",
+             "branch": "f3", "created": "2025-01-01T00:00:00Z", "url": "http://x/3",
+             "age_hours": 3, "reviewers": [], "reviewer_count": 0, "approval_count": 0},
+        ]
+        with patch("scripts.mq.collect_ready.fetch_open_prs", return_value=mixed_prs), \
+             patch("scripts.mq.collect_ready._enrich_prs_with_diffstat"):
+            from click.testing import CliRunner
+            from scripts.mq.collect_ready import main
+            result = CliRunner().invoke(main, ["--target-branch", "stage"])
+            assert result.exit_code == 0, result.output
+            data = json.loads((tmp_path / "ready_prs.json").read_text())
+            assert data["pr_count"] == 2
+            assert all(p["target_branch"] == "stage" for p in data["prs"])
 
 
 class TestClassifyPrFlags:

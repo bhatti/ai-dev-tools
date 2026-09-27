@@ -24,13 +24,30 @@ import click
 
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.mq._shared import (
+    SENSITIVE_PATHS,
     _cfg_for_repo,
     fetch_open_prs,
+    is_test_file,
     repo_slug,
 )
 
-_BUG_KEYWORDS = re.compile(r'\b(fix|bug|hotfix|patch|defect|regression|crash)\b', re.IGNORECASE)
+_BUG_KEYWORDS = re.compile(
+    r'\b(fix|bug|hotfix|hot.?fix|patch|defect|regression|crash|revert|rollback|roll.?back|roll.?forward|workaround|broken)\b',
+    re.IGNORECASE,
+)
 _FEAT_KEYWORDS = re.compile(r'\b(feat|feature|story|enhancement|implement|add)\b', re.IGNORECASE)
+_REFACTOR_KEYWORDS = re.compile(
+    r'\b(refactor|cleanup|clean.up|detangle|extract|reorganize|restructure|simplify|split|rename|move)\b',
+    re.IGNORECASE,
+)
+_CHORE_KEYWORDS = re.compile(
+    r'\b(chore|deps?|dependency|upgrade|bump|update|version|migrate)\b',
+    re.IGNORECASE,
+)
+_SECURITY_KEYWORDS = re.compile(
+    r'\b(vulnerability|cve|rce|ssrf|xss|injection|exploit|0-?day|zero.?day|security.?fix)\b',
+    re.IGNORECASE,
+)
 
 # Compiled at module level — called once per PR (250+ times per run)
 _JIRA_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,9}-\d+)\b')  # e.g. PROJ-123, AB-1
@@ -88,6 +105,136 @@ _PR_FLAG_BLAST_CAPS: dict[str, str] = {
     "is_docs_pr": "low",
     "is_wip_pr":  "medium",
 }
+
+# Security-sensitive title/description keywords — force sensitive_paths score to max.
+# Env-var configurable: set SECURITY_TITLE_KEYWORDS="" to disable.
+_SECURITY_TITLE_RE: re.Pattern | None = _compile_opt(
+    "SECURITY_TITLE_KEYWORDS",
+    r"\b(vulnerability|cve|rce|injection|ssrf|xss|exploit|0-day|zero-day)\b",
+)
+
+# Category blast modifiers: added to blast_radius dimension score.
+# See shared/merge-queue-metrics.md#pr-categories.
+_CATEGORY_BLAST_MODIFIERS: dict[str, int] = {
+    "security": 2, "authn_authz": 2,
+    "sre": 1, "data": 1,
+}
+
+# Risk dimension weights — see shared/merge-queue-metrics.md#risk-dimensions
+_RISK_WEIGHTS: dict[str, float] = {
+    "size": 1.5, "file_count": 1.0, "blast_radius": 2.0,
+    "sensitive_paths": 2.5, "test_coverage": 1.5, "historical": 1.0,
+}
+
+# Risk tier thresholds (composite score boundaries)
+_RISK_TIER_LOW_MAX = 15
+_RISK_TIER_MEDIUM_MAX = 30
+
+
+def _compute_risk_score(pr: dict, files: list[dict] | None = None) -> dict:
+    """Compute multi-dimension risk score per merge-queue-metrics.md.
+
+    Returns {"risk_score": float, "risk_tier": str, "risk_dimensions": {dim: int}}.
+    Works without files (graceful degradation using PR metadata only).
+    """
+    dims: dict[str, int] = {}
+
+    # --- size: total lines changed ---
+    total_loc = 0
+    if files:
+        total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+    if total_loc <= 20:
+        dims["size"] = 1
+    elif total_loc <= 50:
+        dims["size"] = 2
+    elif total_loc <= 100:
+        dims["size"] = 3
+    elif total_loc <= 200:
+        dims["size"] = 5
+    elif total_loc <= 500:
+        dims["size"] = 7
+    elif total_loc <= 1000:
+        dims["size"] = 9
+    else:
+        dims["size"] = 10
+
+    # --- file_count ---
+    n_files = len(files) if files else 0
+    if n_files <= 3:
+        dims["file_count"] = 1
+    elif n_files <= 5:
+        dims["file_count"] = 2
+    elif n_files <= 10:
+        dims["file_count"] = 3
+    elif n_files <= 20:
+        dims["file_count"] = 5
+    elif n_files <= 50:
+        dims["file_count"] = 8
+    else:
+        dims["file_count"] = 10
+
+    # --- blast_radius: from pre-computed field + category modifier ---
+    blast = pr.get("blast_radius", "low")
+    blast_score = {"low": 2, "medium": 5, "high": 9}.get(blast, 2)
+    category = pr.get("category", "unknown")
+    blast_score = min(10, blast_score + _CATEGORY_BLAST_MODIFIERS.get(category, 0))
+    dims["blast_radius"] = blast_score
+
+    # --- sensitive_paths: count non-test files matching SENSITIVE_PATHS regex ---
+    sensitive_count = 0
+    if files:
+        sensitive_count = sum(
+            1 for f in files
+            if SENSITIVE_PATHS.search(f.get("path", "")) and not is_test_file(f.get("path", ""))
+        )
+    # Title keyword booster: security-related titles force max score
+    text = f"{pr.get('title', '')} {pr.get('description', '') or ''}"
+    if _SECURITY_TITLE_RE and _SECURITY_TITLE_RE.search(text):
+        sensitive_count = max(sensitive_count, 5)
+    if sensitive_count == 0:
+        dims["sensitive_paths"] = 0
+    elif sensitive_count == 1:
+        dims["sensitive_paths"] = 3
+    elif sensitive_count == 2:
+        dims["sensitive_paths"] = 5
+    elif sensitive_count == 3:
+        dims["sensitive_paths"] = 7
+    elif sensitive_count == 4:
+        dims["sensitive_paths"] = 8
+    else:
+        dims["sensitive_paths"] = 10
+
+    # --- test_coverage: ratio of test files to total files ---
+    if files and n_files > 0:
+        test_count = sum(1 for f in files if is_test_file(f.get("path", "")))
+        ratio = test_count / n_files
+        if ratio >= 1.0:
+            dims["test_coverage"] = 0
+        elif ratio >= 0.5:
+            dims["test_coverage"] = 2
+        elif ratio >= 0.25:
+            dims["test_coverage"] = 4
+        elif ratio > 0:
+            dims["test_coverage"] = 6
+        else:
+            dims["test_coverage"] = 8
+    else:
+        dims["test_coverage"] = 3  # neutral default when no file data
+
+    # --- historical: default neutral (no defect history integration yet) ---
+    dims["historical"] = 3
+
+    # --- composite score ---
+    score = sum(dims[k] * _RISK_WEIGHTS[k] for k in dims)
+
+    if score <= _RISK_TIER_LOW_MAX:
+        tier = "low"
+    elif score <= _RISK_TIER_MEDIUM_MAX:
+        tier = "medium"
+    else:
+        tier = "high"
+
+    return {"risk_score": round(score, 1), "risk_tier": tier, "risk_dimensions": dims}
 
 
 def _classify_pr_flags(pr: dict, files: list[dict] | None = None) -> dict[str, bool]:
@@ -244,19 +391,47 @@ def _classify_pr_category(pr: dict, files: list[dict] | None = None) -> tuple[st
     return "unknown", "unknown"
 
 
-def _classify_pr_type(pr: dict) -> str:
-    """Classify PR as bug/feature/unknown using labels first, then title keywords."""
-    labels = [l.get("name", l) if isinstance(l, dict) else str(l) for l in pr.get("labels", [])]
+def _classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
+    """Classify PR into work type: bug, feature, refactor, chore, security, test, docs, unknown.
+
+    Priority: security (title keywords) > labels > title keywords > flags > unknown.
+    Security-keyword PRs are always 'security' regardless of labels — a vulnerability
+    fix labelled 'bug' is still a security fix for risk scoring purposes.
+    """
+    title = pr.get("title", "")
+    description = pr.get("description", "") or pr.get("body", "") or ""
+    text = f"{title} {description}"
+
+    if _SECURITY_KEYWORDS.search(text):
+        return "security"
+
+    labels = [la.get("name", la) if isinstance(la, dict) else str(la) for la in pr.get("labels", [])]
     label_str = " ".join(labels).lower()
+
     if any(k in label_str for k in ("bug", "fix", "hotfix", "defect")):
         return "bug"
     if any(k in label_str for k in ("feature", "feat", "story", "enhancement")):
         return "feature"
-    title = pr.get("title", "")
+    if any(k in label_str for k in ("refactor", "cleanup", "tech-debt", "tech_debt")):
+        return "refactor"
+    if any(k in label_str for k in ("chore", "deps", "dependency", "maintenance")):
+        return "chore"
+
     if _BUG_KEYWORDS.search(title):
         return "bug"
     if _FEAT_KEYWORDS.search(title):
         return "feature"
+    if _REFACTOR_KEYWORDS.search(title):
+        return "refactor"
+    if _CHORE_KEYWORDS.search(title):
+        return "chore"
+
+    if flags:
+        if flags.get("is_test_pr"):
+            return "test"
+        if flags.get("is_docs_pr"):
+            return "docs"
+
     return "unknown"
 
 
@@ -286,6 +461,7 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
                 pr["is_test_pr"] = flags["is_test_pr"]
                 pr["is_wip_pr"] = flags["is_wip_pr"]
                 pr["is_docs_pr"] = flags["is_docs_pr"]
+                pr["pr_type"] = _classify_pr_type(pr, flags)
                 # Category: test category wins — tests/auth/ must not become authn_authz
                 if flags["is_test_pr"]:
                     pr["category"] = "test"
@@ -296,6 +472,11 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
                     pr["category_confidence"] = confidence
                 # Apply blast cap AFTER category is set (data-driven cap table)
                 pr["blast_radius"] = _apply_blast_cap(blast_radius, flags)
+                # Compute multi-dimension risk score (uses blast_radius + category already set)
+                risk = _compute_risk_score(pr, files)
+                pr["risk_score"] = risk["risk_score"]
+                pr["risk_tier"] = risk["risk_tier"]
+                pr["risk_dimensions"] = risk["risk_dimensions"]
         except Exception as exc:
             print(f"[collect_ready] warn: diffstat failed PR#{pr['pr_number']}: {exc}", flush=True)
 
@@ -358,7 +539,7 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         "is_test_pr": flags["is_test_pr"],
         "is_wip_pr": flags["is_wip_pr"],
         "is_docs_pr": flags["is_docs_pr"],
-        "pr_type": _classify_pr_type(pr),
+        "pr_type": _classify_pr_type(pr, flags),
         "author": author_login,
         "age_hours": round(float(age_hours), 1),
         "branch": pr.get("headRefName", "") or pr.get("branch", ""),
@@ -370,6 +551,9 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         "url": pr.get("url", ""),
         "labels": pr.get("labels", []),
         "issue_ref": _extract_issue_ref(pr),
+        "risk_score": 0,
+        "risk_tier": "low",
+        "risk_dimensions": {},
     }
 
 
@@ -393,8 +577,27 @@ def main(label: str, repo: str, target_branch: str) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
 
     print(f"[collect_ready] repo={slug} target_branch={target_branch!r} label={label!r} prs_found={len(raw_prs)}", flush=True)
+    if target_branch and raw_prs:
+        from collections import Counter
+        branch_dist = Counter(p.get("target_branch", p.get("baseRefName", "?")) for p in raw_prs)
+        top3 = branch_dist.most_common(3)
+        print(f"[collect_ready] target_branch distribution (top 3): {dict(top3)}", flush=True)
 
     ready_prs = [_normalize_pr(pr, slug) for pr in raw_prs]
+
+    # Safety filter: enforce target_branch even if upstream fetcher missed some PRs.
+    # BB API server-side filtering may silently ignore the q parameter on some endpoints,
+    # and pagination can return PRs from other branches on subsequent pages.
+    if target_branch:
+        before = len(ready_prs)
+        ready_prs = [p for p in ready_prs if p.get("target_branch", "") == target_branch]
+        if before != len(ready_prs):
+            print(
+                f"[collect_ready] target_branch safety filter: {before} → {len(ready_prs)} "
+                f"(removed {before - len(ready_prs)} PRs not targeting {target_branch!r})",
+                flush=True,
+            )
+
     ready_prs.sort(key=lambda p: p["age_hours"], reverse=True)
 
     # Enrich blast_radius and scope via per-PR diffstat calls (best-effort)

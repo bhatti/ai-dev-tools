@@ -100,10 +100,8 @@ def main() -> None:
 
     for pr in prs:
         target = pr.get("target_branch", "") or "unknown"
-        blast = pr.get("blast_radius", "low")
-        risk_tier = blast if blast in _RISK_ORDER else "low"
-        # blast_radius is already capped for test/WIP/docs PRs at collection time;
-        # no special handling needed — the field is the single source of truth.
+        risk_tier = pr.get("risk_tier", pr.get("blast_radius", "low"))
+        risk_tier = risk_tier if risk_tier in _RISK_ORDER else "low"
 
         if target in canonical:
             canonical_buckets[(target, risk_tier)].append(pr)
