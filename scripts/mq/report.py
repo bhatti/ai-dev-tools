@@ -739,6 +739,9 @@ def main() -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     reports_dir = workspace / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
+    # dir may be root-owned when downloaded from a prior task artifact by the helper container
+    import subprocess as _sp
+    _sp.run(["chmod", "-R", "777", str(reports_dir)], check=False, capture_output=True)
 
     from scripts.mq._shared import parse_pr_ref
     pr_number, _ = parse_pr_ref(config.get("PR_NUMBER", ""))

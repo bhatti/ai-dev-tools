@@ -3869,6 +3869,97 @@ def test_42_mq_collect_group(base_env: dict[str, str]) -> TestResult:
                  f"BB: fixture prs={bb_prs} lanes={bb_lanes}")
 
 
+def test_43_mq_report_permissions(base_env: dict[str, str]) -> TestResult:
+    """Validate that report.py can write to /workspace/reports even when the directory
+    is pre-created by root (simulating artifact download by the Formicary helper container).
+
+    Regression test for:
+        PermissionError: [Errno 13] Permission denied: '/workspace/reports/report.md'
+    Root cause: helper container (UID=0) downloads artifacts into /workspace/reports/
+    before report task runs as UID=1000.
+    Fix: report.py calls chmod -R 777 on reports_dir after mkdir.
+    """
+    result = TestResult("mq-report-permissions")
+    ws = "/workspace/mq_report_perm"
+    env = dict(base_env)
+    env["WORKSPACE_DIR"] = ws
+
+    with pod_fixture("mq-report-permissions") as pod:
+        # Setup workspace
+        setup = exec_step(pod, "setup", f"mkdir -p {ws}/logs", env, timeout=30)
+        result.steps.append(setup)
+        if not setup.ok:
+            return _fail(result, setup, setup.stderr[-200:])
+
+        # Inject BB fixture ready_prs.json so report.py has data to work with
+        inject = exec_step(pod, "inject-fixture",
+            f"cat > {ws}/ready_prs.json <<'__EOF__'\n"
+            + '{"pr_count":2,"repo":"cribl/cribl","prs":['
+            + '{"pr_number":10,"title":"Fix auth","author":"alice","scope":"unknown","blast_radius":"low","age_hours":5.0,"branch":"fix/auth","ci_status":"success","has_approval":true,"url":"https://bitbucket.org/cribl/cribl/pull-requests/10","labels":[],"repo":"cribl/cribl"},'
+            + '{"pr_number":11,"title":"Billing","author":"bob","scope":"unknown","blast_radius":"high","age_hours":48.0,"branch":"feat/billing","ci_status":"none","has_approval":false,"url":"https://bitbucket.org/cribl/cribl/pull-requests/11","labels":[],"repo":"cribl/cribl"}'
+            + ']}\n__EOF__',
+            env, timeout=15)
+        result.steps.append(inject)
+        if not inject.ok:
+            return _fail(result, inject, inject.stderr[-200:])
+
+        # Also inject a minimal queue_summary.json (analyze output)
+        inject_summary = exec_step(pod, "inject-summary",
+            f"cat > {ws}/queue_summary.json <<'__EOF__'\n"
+            + '{"status":"DONE","repo":"cribl/cribl","total_prs":2,"lanes":1,"high_risk_prs":1,"needs_human_review":1,"conflict_lanes":0}\n'
+            + "__EOF__",
+            env, timeout=15)
+        result.steps.append(inject_summary)
+        if not inject_summary.ok:
+            return _fail(result, inject_summary, inject_summary.stderr[-200:])
+
+        # Simulate root-owned reports/ dir (what Formicary helper container does on artifact download)
+        make_root_dir = exec_step(pod, "make-root-reports-dir",
+            f"mkdir -p {ws}/reports && chmod 700 {ws}/reports",
+            env, timeout=15)
+        result.steps.append(make_root_dir)
+        if not make_root_dir.ok:
+            return _fail(result, make_root_dir, "failed to create root-owned reports dir")
+
+        # Verify the dir is not writable by UID=1000 (simulate root ownership effect)
+        # (In a real pod, root-owned dir has mode 700 and UID=0; here we just use mode 700)
+        check_locked = exec_step(pod, "verify-dir-locked",
+            f"python3 -c \""
+            f"import os; path='{ws}/reports/probe.txt';\n"
+            f"try:\n  open(path,'w').close(); print('WRITABLE — chmod test inconclusive in user namespace')\n"
+            f"except PermissionError: print('LOCKED as expected')\n\"",
+            env, timeout=10)
+        result.steps.append(check_locked)
+
+        # Run report.py — it must succeed regardless of pre-existing dir permissions
+        report_env = dict(env)
+        report_env["DEFAULT_TRACKER"] = "bitbucket"
+        report_env["BITBUCKET_WORKSPACE"] = "cribl"
+        report_env["BITBUCKET_REPO"] = "cribl"
+        report_env["REPORT_TITLE"] = "Merge Queue Analysis"
+        report_env["TASK_TYPE"] = "report"
+        report_env.pop("SLACK_BOT_TOKEN", None)   # no Slack post in pod test
+
+        report_step = exec_step(pod, "run-report",
+            "python -m scripts.mq.report",
+            report_env, timeout=60)
+        result.steps.append(report_step)
+        if not report_step.ok:
+            return _fail(result, report_step,
+                         f"report.py failed — likely permission issue not fixed: {report_step.stderr[-400:]}")
+
+        # Verify report.md was written
+        verify = exec_step(pod, "verify-report-md",
+            f"test -f {ws}/reports/report.md && wc -l {ws}/reports/report.md",
+            report_env, timeout=10)
+        result.steps.append(verify)
+        if not verify.ok:
+            return _fail(result, verify, f"/workspace/reports/report.md not written: {verify.stderr[-200:]}")
+
+    lines = verify.stdout.strip().split()[0] if verify.stdout.strip() else "?"
+    return _pass(result, f"report.md written ({lines} lines), permission fix confirmed")
+
+
 def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
                                pod_label: str) -> TestResult:
     """Shared read-only gate-review pipeline: clone → scope → risk → report.
@@ -4846,6 +4937,7 @@ ALL_TESTS: dict[str, callable] = {
     "mq-full-pipeline":       test_33_mq_full_pipeline,
     "mq-test-impact-branch":  test_34_mq_test_impact_branch,
     "mq-collect-group":       test_42_mq_collect_group,
+    "mq-report-permissions":  test_43_mq_report_permissions,
     "gate-review-gh":         test_35_gate_review_gh,
     "gate-review-bb":         test_36_gate_review_bb,
     "gate-check-logic":       test_37_gate_check_logic,
