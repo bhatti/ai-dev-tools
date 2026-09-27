@@ -110,8 +110,8 @@ def _fetch_shard_results_from_api(
                         pass
             if shard_results:
                 return sorted(shard_results, key=lambda r: r.get("shard_id", 0))
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[mq-report] shard API fetch failed: {exc}", flush=True)
     return []
 
 
@@ -262,6 +262,13 @@ _PR_TYPE_EMOJI: dict[str, str] = {
 }
 _RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]
 _RISK_EMOJI: dict[str, str] = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+
+
+def _pr_link(pr: dict) -> str:
+    """Format a PR number as a markdown link."""
+    num = pr.get("pr_number", "?")
+    url = pr.get("url", "")
+    return f"[#{num}]({url})" if url else f"#{num}"
 
 
 def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) -> str:
@@ -1116,11 +1123,6 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             key = issue_ref.get("key", "")
             url = issue_ref.get("url", "")
             return f"[{key}]({url})" if url else key
-
-        def _pr_link(pr: dict) -> str:
-            num = pr.get("pr_number", "?")
-            url = pr.get("url", "")
-            return f"[#{num}]({url})" if url else f"#{num}"
 
         def _rev_cell(approval_count: int, reviewer_count: int) -> str:
             """Reviewer/approval cell.
