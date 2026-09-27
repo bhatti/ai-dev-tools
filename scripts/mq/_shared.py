@@ -10,7 +10,7 @@ import re
 
 import requests
 
-from scripts.common.bitbucket_api import _auth as bb_auth, _repo as bb_repo_url
+from scripts.common.bitbucket_api import _auth as bb_auth, _repo as bb_repo_url, _BASE as _BB_BASE
 from scripts.common.shell import run_cmd
 
 _JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
@@ -408,6 +408,60 @@ def label_pr(config: dict, pr_number: str, label: str) -> None:
         ], check=False)
     except Exception as e:
         print(f"[mq] warn: could not label PR: {e}", flush=True)
+
+
+def fetch_bb_pr_metadata(config: dict, pr_number: str) -> dict:
+    """Fetch extended PR metadata: comment count, build status, reviewers.
+
+    Shared utility — single API call for fields not in the bulk list endpoint.
+    Returns dict with: comment_count, build_status, reviewer_names, approval_count.
+    """
+    ws = config.get("BITBUCKET_WORKSPACE", "")
+    repo = config.get("BITBUCKET_REPO", "")
+    if not ws or not repo:
+        return {}
+    auth = bb_auth(config)
+    result: dict = {}
+    try:
+        pr_url = f"{bb_repo_url(ws, repo)}/pullrequests/{pr_number}"
+        resp = requests.get(pr_url, auth=auth, timeout=15)
+        if not resp.ok:
+            return {}
+        pr_data = resp.json()
+        result["comment_count"] = pr_data.get("comment_count", 0)
+        participants = pr_data.get("participants", [])
+        result["reviewer_names"] = [
+            p.get("user", {}).get("display_name", "")
+            for p in participants if p.get("role") == "REVIEWER"
+        ]
+        result["approval_count"] = sum(
+            1 for p in participants if p.get("approved", False)
+        )
+        commit_hash = (pr_data.get("source", {}).get("commit", {}).get("hash", ""))
+        if commit_hash:
+            status_url = f"{_BB_BASE}/repositories/{ws}/{repo}/commit/{commit_hash}/statuses"
+            resp = requests.get(status_url, auth=auth, params={"pagelen": 25}, timeout=15)
+            if resp.ok:
+                statuses = resp.json().get("values", [])
+                states = [s.get("state", "").upper() for s in statuses]
+                if any(s == "FAILED" for s in states):
+                    result["build_status"] = "failed"
+                elif all(s == "SUCCESSFUL" for s in states):
+                    result["build_status"] = "success"
+                elif any(s == "INPROGRESS" for s in states):
+                    result["build_status"] = "pending"
+                else:
+                    result["build_status"] = "none"
+                result["build_count_total"] = len(statuses)
+                result["build_count_passed"] = sum(1 for s in states if s == "SUCCESSFUL")
+                result["build_count_failed"] = sum(1 for s in states if s == "FAILED")
+            else:
+                result["build_status"] = "none"
+        else:
+            result["build_status"] = "none"
+    except Exception as exc:
+        print(f"[mq] warn: PR metadata fetch failed PR#{pr_number}: {exc}", flush=True)
+    return result
 
 
 SENSITIVE_PATHS = re.compile(

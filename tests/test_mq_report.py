@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.mq.report import _build_report, _read_json, _valley_of_calm_section
+from scripts.mq.report import (
+    _build_report, _generate_risk_heatmap_html, _read_json, _valley_of_calm_section,
+)
 
 
 class TestReadJson:
@@ -403,18 +405,20 @@ def _make_prs(n, pr_type="feature", ci_status="none", blast_radius="low", age_ho
 
 
 class TestDeploymentRiskSection:
-    def test_no_deployment_section_by_default(self):
+    def test_deployment_section_defaults_to_weekly_train(self):
         prs = _make_prs(10)
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEPLOYMENT_PROFILE", None)
             result = _valley_of_calm_section(prs)
-        assert "Deployment Risk Position" not in result
+        assert "Deployment Risk Position" in result
+        assert "weekly-train" in result
 
-    def test_no_deployment_section_when_empty_profile(self):
+    def test_deployment_section_defaults_when_empty_profile(self):
         prs = _make_prs(10)
         with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "  "}):
             result = _valley_of_calm_section(prs)
-        assert "Deployment Risk Position" not in result
+        assert "Deployment Risk Position" in result
+        assert "weekly-train" in result
 
     def test_deployment_section_with_cd_profile(self):
         prs = _make_prs(8, pr_type="feature") + _make_prs(2, pr_type="bug")
@@ -482,3 +486,69 @@ class TestDeploymentRiskSection:
         with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "cd"}):
             md, ctx = _build_report(tmp_path, "1", "Deploy Test")
         assert "Deployment Risk Position" in md
+
+
+class TestRiskHeatmapHtml:
+    def _write_prs(self, tmp_path, n=20, bug_count=2):
+        prs = _make_prs(n - bug_count, pr_type="feature") + _make_prs(bug_count, pr_type="bug")
+        (tmp_path / "ready_prs.json").write_text(json.dumps(prs))
+        return prs
+
+    def test_generates_html_file(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        self._write_prs(tmp_path)
+        _generate_risk_heatmap_html(tmp_path, reports)
+        heatmap = reports / "risk_heatmap.html"
+        assert heatmap.exists()
+        html = heatmap.read_text()
+        assert "Risk Heatmap" in html
+        assert "Defect Rate" in html
+
+    def test_heatmap_has_color_zones(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        self._write_prs(tmp_path)
+        _generate_risk_heatmap_html(tmp_path, reports)
+        html = (reports / "risk_heatmap.html").read_text()
+        assert "#2ea043" in html  # green
+        assert "#cf222e" in html  # red
+
+    def test_heatmap_has_current_position(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        self._write_prs(tmp_path, n=20, bug_count=2)
+        _generate_risk_heatmap_html(tmp_path, reports)
+        html = (reports / "risk_heatmap.html").read_text()
+        assert "Your position" in html
+
+    def test_no_heatmap_when_no_prs_file(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        _generate_risk_heatmap_html(tmp_path, reports)
+        assert not (reports / "risk_heatmap.html").exists()
+
+    def test_no_heatmap_when_empty_prs(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        (tmp_path / "ready_prs.json").write_text("[]")
+        _generate_risk_heatmap_html(tmp_path, reports)
+        assert not (reports / "risk_heatmap.html").exists()
+
+    def test_heatmap_with_deployment_profile(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        self._write_prs(tmp_path, n=50, bug_count=5)
+        with patch.dict(os.environ, {"DEPLOYMENT_PROFILE": "weekly-train"}):
+            _generate_risk_heatmap_html(tmp_path, reports)
+        html = (reports / "risk_heatmap.html").read_text()
+        assert "PRs/release: 50" in html
+
+    def test_heatmap_shows_summary_stats(self, tmp_path):
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        self._write_prs(tmp_path, n=30, bug_count=3)
+        _generate_risk_heatmap_html(tmp_path, reports)
+        html = (reports / "risk_heatmap.html").read_text()
+        assert "Queue size: 30" in html
+        assert "Defect-proxy rate: 10.0%" in html

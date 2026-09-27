@@ -26,28 +26,61 @@ from scripts.common.config import get_workspace_dir, load_config
 from scripts.mq._shared import (
     SENSITIVE_PATHS,
     _cfg_for_repo,
+    fetch_bb_pr_metadata,
     fetch_open_prs,
+    fetch_pr_files,
     is_test_file,
     repo_slug,
+    resolve_tracker,
 )
 
 _BUG_KEYWORDS = re.compile(
-    r'\b(fix|bug|hotfix|hot.?fix|patch|defect|regression|crash|revert|rollback|roll.?back|roll.?forward|workaround|broken)\b',
+    r'\b(fix(?:e[ds])?|bug|hotfix|hot.?fix|patch(?:e[ds])?|defect|regression|crash(?:e[ds])?'
+    r'|revert(?:ed|ing)?|rollback|roll.?back|roll.?forward|workaround|broken)\b',
     re.IGNORECASE,
 )
-_FEAT_KEYWORDS = re.compile(r'\b(feat|feature|story|enhancement|implement|add)\b', re.IGNORECASE)
+_FEAT_KEYWORDS = re.compile(
+    r'\b(feat|feature|story|enhancement|implement(?:ed|ing|s)?|add(?:ed|ing|s)?'
+    r'|creat(?:e[ds]?|ing)|introduc(?:e[ds]?|ing)|support(?:ed|ing|s)?'
+    r'|enabl(?:e[ds]?|ing)|integrat(?:e[ds]?|ing)|allow(?:ed|ing|s)?|provid(?:e[ds]?|ing))\b',
+    re.IGNORECASE,
+)
 _REFACTOR_KEYWORDS = re.compile(
-    r'\b(refactor|cleanup|clean.up|detangle|extract|reorganize|restructure|simplify|split|rename|move)\b',
+    r'\b(refactor(?:ed|ing|s)?|cleanup|clean.?up|detangle|extract(?:ed|ing|s)?'
+    r'|reorganize|restructure|simplify|split|rename[ds]?|move[ds]?'
+    r'|remov(?:e[ds]?|ing)|delet(?:e[ds]?|ing)|replac(?:e[ds]?|ing)'
+    r'|optimiz(?:e[ds]?|ing)|improv(?:e[ds]?|ing)|rework(?:ed|ing)?'
+    r'|consolidat(?:e[ds]?|ing)|deprecat(?:e[ds]?|ing)|decouple[ds]?)\b',
     re.IGNORECASE,
 )
 _CHORE_KEYWORDS = re.compile(
-    r'\b(chore|deps?|dependency|upgrade|bump|update|version|migrate)\b',
+    r'\b(chore|deps?|dependency|upgrade[ds]?|bump(?:ed|ing|s)?|update[ds]?|version|migrate[ds]?)\b',
     re.IGNORECASE,
 )
 _SECURITY_KEYWORDS = re.compile(
     r'\b(vulnerability|cve|rce|ssrf|xss|injection|exploit|0-?day|zero.?day|security.?fix)\b',
     re.IGNORECASE,
 )
+_DOCS_TITLE_KEYWORDS = re.compile(
+    r'\b(doc(?:s|umentation)?|readme|changelog|license|contributing)\b',
+    re.IGNORECASE,
+)
+_TEST_TITLE_KEYWORDS = re.compile(
+    r'\b(test(?:s|ing)?|spec(?:s)?|e2e|unit.?test|integration.?test|sdet|qa)\b',
+    re.IGNORECASE,
+)
+
+_CONVENTIONAL_COMMIT_RE = re.compile(
+    r'^(?:[\[\]A-Z0-9_-]+\s+)?'
+    r'(feat|fix|docs|chore|refactor|test|ci|style|perf|build|revert)'
+    r'[\(:\s]',
+    re.IGNORECASE,
+)
+_CONVENTIONAL_TYPE_MAP: dict[str, str] = {
+    "feat": "feature", "fix": "bug", "docs": "docs", "chore": "chore",
+    "refactor": "refactor", "test": "test", "ci": "chore", "style": "refactor",
+    "perf": "refactor", "build": "chore", "revert": "bug",
+}
 
 # Compiled at module level — called once per PR (250+ times per run)
 _JIRA_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,9}-\d+)\b')  # e.g. PROJ-123, AB-1
@@ -394,9 +427,10 @@ def _classify_pr_category(pr: dict, files: list[dict] | None = None) -> tuple[st
 def _classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
     """Classify PR into work type: bug, feature, refactor, chore, security, test, docs, unknown.
 
-    Priority: security (title keywords) > labels > title keywords > flags > unknown.
+    Priority: security keywords > labels > conventional commit prefix > title keywords > flags > unknown.
     Security-keyword PRs are always 'security' regardless of labels — a vulnerability
     fix labelled 'bug' is still a security fix for risk scoring purposes.
+    Labels beat conventional commit prefix because humans set labels intentionally.
     """
     title = pr.get("title", "")
     description = pr.get("description", "") or pr.get("body", "") or ""
@@ -417,6 +451,10 @@ def _classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
     if any(k in label_str for k in ("chore", "deps", "dependency", "maintenance")):
         return "chore"
 
+    cc_match = _CONVENTIONAL_COMMIT_RE.match(title)
+    if cc_match:
+        return _CONVENTIONAL_TYPE_MAP.get(cc_match.group(1).lower(), "unknown")
+
     if _BUG_KEYWORDS.search(title):
         return "bug"
     if _FEAT_KEYWORDS.search(title):
@@ -425,6 +463,11 @@ def _classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
         return "refactor"
     if _CHORE_KEYWORDS.search(title):
         return "chore"
+
+    if _DOCS_TITLE_KEYWORDS.search(title):
+        return "docs"
+    if _TEST_TITLE_KEYWORDS.search(title):
+        return "test"
 
     if flags:
         if flags.get("is_test_pr"):
@@ -437,7 +480,6 @@ def _classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
 
 def _fetch_diffstat_for_pr(config: dict, pr_number: str) -> list[dict]:
     """Fetch diffstat for a single PR. Thread-safe wrapper for concurrent use."""
-    from scripts.mq._shared import fetch_pr_files
     return fetch_pr_files(config, pr_number)
 
 
@@ -488,11 +530,47 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
     elapsed = time.monotonic() - t0
     print(f"[collect_ready] diffstat fetch complete: {total} PRs in {elapsed:.1f}s", flush=True)
 
+    is_bb = resolve_tracker(config) == "bitbucket"
+    if is_bb:
+        t1 = time.monotonic()
+        print(f"[collect_ready] fetching BB build status + metadata (concurrent)...", flush=True)
+        metadata: dict[int, dict] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_pr = {
+                pool.submit(fetch_bb_pr_metadata, config, str(pr["pr_number"])): pr["pr_number"]
+                for pr in prs
+            }
+            for future in as_completed(future_to_pr):
+                pr_num = future_to_pr[future]
+                try:
+                    metadata[pr_num] = future.result()
+                except Exception:
+                    metadata[pr_num] = {}
+        for pr in prs:
+            meta = metadata.get(pr["pr_number"], {})
+            if meta.get("build_status"):
+                pr["ci_status"] = meta["build_status"]
+            if meta.get("comment_count") is not None:
+                pr["comment_count"] = meta["comment_count"]
+            if meta.get("approval_count") is not None:
+                pr["approval_count"] = meta["approval_count"]
+            if meta.get("reviewer_names"):
+                pr["reviewer_names"] = meta["reviewer_names"]
+                pr["reviewer_count"] = len(meta["reviewer_names"])
+            if meta.get("build_count_total"):
+                pr["build_count_total"] = meta["build_count_total"]
+                pr["build_count_passed"] = meta.get("build_count_passed", 0)
+                pr["build_count_failed"] = meta.get("build_count_failed", 0)
+        print(f"[collect_ready] metadata fetch complete in {time.monotonic() - t1:.1f}s", flush=True)
+
     for pr in prs:
         files = diffstats.get(pr["pr_number"], [])
         if not files:
             continue
         try:
+            total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+            pr["total_loc"] = total_loc
+            pr["file_count"] = len(files)
             scope_name, blast_radius, _, _ = _compute_scope(files, {})
             if scope_name and scope_name not in ("unknown", "cross-scope"):
                 pr["scope"] = scope_name
@@ -587,6 +665,8 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         "url": pr.get("url", ""),
         "labels": pr.get("labels", []),
         "issue_ref": _extract_issue_ref(pr),
+        "total_loc": 0,
+        "file_count": 0,
         "risk_score": 0,
         "risk_tier": "low",
         "risk_dimensions": {},

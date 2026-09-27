@@ -6,6 +6,7 @@ from scripts.mq._shared import (
     _bb_find_pr_by_jira_key,
     _cfg_for_repo,
     apply_repo_override,
+    fetch_bb_pr_metadata,
     fetch_changed_files_from_diff,
     fetch_open_prs,
     is_branch_or_tag,
@@ -471,3 +472,140 @@ class TestFetchOpenPrs:
         call_cfg = mock_gh.call_args[0][0]
         assert call_cfg["GH_ORG"] == "myorg"
         assert call_cfg["GH_REPO"] == "myrepo"
+
+
+class TestFetchBbPrMetadata:
+    """Unit tests for fetch_bb_pr_metadata — mocked HTTP calls."""
+
+    _CONFIG = {"BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "repo",
+               "BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t"}
+
+    @patch("scripts.mq._shared.requests.get")
+    def test_returns_all_fields_on_success(self, mock_get):
+        pr_resp = MagicMock()
+        pr_resp.ok = True
+        pr_resp.json.return_value = {
+            "comment_count": 5,
+            "participants": [
+                {"user": {"display_name": "Alice"}, "role": "REVIEWER", "approved": True},
+                {"user": {"display_name": "Bob"}, "role": "REVIEWER", "approved": False},
+                {"user": {"display_name": "Author"}, "role": "AUTHOR", "approved": False},
+            ],
+            "source": {"commit": {"hash": "abc123"}},
+        }
+        status_resp = MagicMock()
+        status_resp.ok = True
+        status_resp.json.return_value = {
+            "values": [
+                {"state": "SUCCESSFUL"},
+                {"state": "FAILED"},
+            ]
+        }
+        mock_get.side_effect = [pr_resp, status_resp]
+
+        result = fetch_bb_pr_metadata(self._CONFIG, "42")
+        assert result["comment_count"] == 5
+        assert result["reviewer_names"] == ["Alice", "Bob"]
+        assert result["approval_count"] == 1
+        assert result["build_status"] == "failed"
+        assert result["build_count_total"] == 2
+        assert result["build_count_passed"] == 1
+        assert result["build_count_failed"] == 1
+
+    @patch("scripts.mq._shared.requests.get")
+    def test_returns_empty_on_http_error(self, mock_get):
+        resp = MagicMock()
+        resp.ok = False
+        mock_get.return_value = resp
+        assert fetch_bb_pr_metadata(self._CONFIG, "99") == {}
+
+    @patch("scripts.mq._shared.requests.get")
+    def test_returns_none_build_status_when_no_commit(self, mock_get):
+        pr_resp = MagicMock()
+        pr_resp.ok = True
+        pr_resp.json.return_value = {
+            "comment_count": 0, "participants": [],
+            "source": {"commit": {}},
+        }
+        mock_get.return_value = pr_resp
+        result = fetch_bb_pr_metadata(self._CONFIG, "1")
+        assert result["build_status"] == "none"
+
+    def test_returns_empty_when_no_workspace(self):
+        assert fetch_bb_pr_metadata({}, "1") == {}
+
+    @patch("scripts.mq._shared.requests.get")
+    def test_all_successful_builds(self, mock_get):
+        pr_resp = MagicMock()
+        pr_resp.ok = True
+        pr_resp.json.return_value = {
+            "comment_count": 0, "participants": [],
+            "source": {"commit": {"hash": "abc"}},
+        }
+        status_resp = MagicMock()
+        status_resp.ok = True
+        status_resp.json.return_value = {
+            "values": [{"state": "SUCCESSFUL"}, {"state": "SUCCESSFUL"}]
+        }
+        mock_get.side_effect = [pr_resp, status_resp]
+        result = fetch_bb_pr_metadata(self._CONFIG, "5")
+        assert result["build_status"] == "success"
+
+    @patch("scripts.mq._shared.requests.get")
+    def test_exception_returns_partial(self, mock_get):
+        mock_get.side_effect = ConnectionError("timeout")
+        result = fetch_bb_pr_metadata(self._CONFIG, "1")
+        assert isinstance(result, dict)
+
+
+class TestTargetBranchIntegration:
+    """Verify --target-branch flag flows end-to-end from CLI to the safety filter."""
+
+    @patch("scripts.mq.collect_ready.fetch_open_prs")
+    def test_target_branch_passed_to_fetcher(self, mock_fetch, tmp_path, monkeypatch):
+        """The --target-branch CLI flag must be passed to fetch_open_prs."""
+        from click.testing import CliRunner
+        from scripts.mq.collect_ready import main as collect_main
+        mock_fetch.return_value = []
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(collect_main, ["--target-branch", "stage"])
+        assert result.exit_code == 0
+        _, kwargs = mock_fetch.call_args
+        assert kwargs.get("target_branch") == "stage"
+
+    @patch("scripts.mq.collect_ready.fetch_open_prs")
+    def test_target_alias_works(self, mock_fetch, tmp_path, monkeypatch):
+        """The --target alias for --target-branch must also work."""
+        from click.testing import CliRunner
+        from scripts.mq.collect_ready import main as collect_main
+        mock_fetch.return_value = []
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(collect_main, ["--target", "stage"])
+        assert result.exit_code == 0
+        _, kwargs = mock_fetch.call_args
+        assert kwargs.get("target_branch") == "stage"
+
+    @patch("scripts.mq.collect_ready.fetch_open_prs")
+    def test_safety_filter_removes_wrong_branch(self, mock_fetch, tmp_path, monkeypatch):
+        """PRs targeting wrong branch must be filtered by the safety filter."""
+        from click.testing import CliRunner
+        from scripts.mq.collect_ready import main as collect_main
+        mock_fetch.return_value = [
+            {"id": 1, "title": "PR 1", "headRefName": "feat-1", "baseRefName": "stage",
+             "author": "alice", "createdAt": "2026-09-20T00:00:00Z", "additions": 10,
+             "deletions": 5, "labels": [], "target_branch": "stage"},
+            {"id": 2, "title": "PR 2", "headRefName": "feat-2", "baseRefName": "dev",
+             "author": "bob", "createdAt": "2026-09-20T00:00:00Z", "additions": 20,
+             "deletions": 10, "labels": [], "target_branch": "dev"},
+        ]
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(collect_main, ["--target-branch", "stage"])
+        assert result.exit_code == 0
+        import json
+        data = json.loads((tmp_path / "ready_prs.json").read_text())
+        prs = data.get("prs", data) if isinstance(data, dict) else data
+        assert len(prs) == 1
+        assert prs[0]["target_branch"] == "stage"

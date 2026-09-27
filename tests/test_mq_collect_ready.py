@@ -328,8 +328,7 @@ class TestClassifyPrCategory:
             "title": "some change", "labels": [], "description": "",
         }]
         files = [{"path": "terraform/main.tf", "additions": 10, "deletions": 0}]
-        # Patch at source modules since _enrich_prs_with_diffstat imports lazily
-        with patch("scripts.mq._shared.fetch_pr_files", return_value=files), \
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
              patch("scripts.mq.scope_router._compute_scope", return_value=("sre", "low", [], set())):
             _enrich_prs_with_diffstat(prs, {})
         assert prs[0]["category"] == "sre"
@@ -342,7 +341,7 @@ class TestClassifyPrCategory:
             "category": "api", "category_confidence": "label",
             "title": "", "labels": [], "description": "",
         }]
-        with patch("scripts.mq._shared.fetch_pr_files", return_value=[]), \
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=[]), \
              patch("scripts.mq.scope_router._compute_scope", return_value=("api", "low", [], set())):
             _enrich_prs_with_diffstat(prs, {})
         # Empty files list → _compute_scope not called → category unchanged
@@ -356,7 +355,7 @@ class TestClassifyPrCategory:
             "category": "backend", "category_confidence": "title",
             "title": "", "labels": [], "description": "",
         }]
-        with patch("scripts.mq._shared.fetch_pr_files", side_effect=RuntimeError("API timeout")):
+        with patch("scripts.mq.collect_ready.fetch_pr_files", side_effect=RuntimeError("API timeout")):
             _enrich_prs_with_diffstat(prs, {})  # must not raise
         assert prs[0]["category"] == "backend"  # unchanged
 
@@ -600,7 +599,7 @@ class TestApplyBlastCap:
             {"path": "tests/auth/test_login.py"},
             {"path": "tests/auth/test_oauth.py"},
         ]
-        with patch("scripts.mq._shared.fetch_pr_files", return_value=files), \
+        with patch("scripts.mq.collect_ready.fetch_pr_files", return_value=files), \
              patch("scripts.mq.scope_router._compute_scope", return_value=("cross-scope", "high", [], set())):
             _enrich_prs_with_diffstat(prs, {})
         assert prs[0]["blast_radius"] == "low"

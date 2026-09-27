@@ -461,9 +461,40 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
                          f"| ready to merge |")
         lines.append("")
 
-    # Deployment Risk Position — only when DEPLOYMENT_PROFILE is configured
-    profile_name = os.environ.get("DEPLOYMENT_PROFILE", "").strip()
-    if profile_name and total > 0:
+    # Stale / obsolete PR flagging — PRs older than 14 days pose decay risk
+    stale_14d = [p for p in prs if p.get("age_hours", 0) > 336]  # 14 days
+    stale_30d = [p for p in prs if p.get("age_hours", 0) > 720]  # 30 days
+    stale_60d = [p for p in prs if p.get("age_hours", 0) > 1440]  # 60 days
+    if stale_14d:
+        lines.append("### Stale PRs — Decay Risk")
+        lines.append("")
+        lines.append(f"**{len(stale_14d)}** PRs older than 14 days "
+                     f"({len(stale_30d)} >30d, {len(stale_60d)} >60d)")
+        lines.append("")
+        if stale_60d:
+            lines.append("> 🔴 PRs open >60 days are likely obsolete — consider closing or rebasing.")
+        elif stale_30d:
+            lines.append("> 🟡 PRs open >30 days accumulate merge conflicts and may need rebase.")
+        else:
+            lines.append("> ℹ️ PRs open >14 days — verify they haven't gone stale.")
+        lines.append("")
+        lines.append("| PR | Title | Age | Risk | Author |")
+        lines.append("|-----|-------|-----|------|--------|")
+        for p in sorted(stale_14d, key=lambda x: -x.get("age_hours", 0))[:15]:
+            pr_link = _pr_link(p)
+            title = p.get("title", "")[:50]
+            days = round(p.get("age_hours", 0) / 24)
+            risk_tier = p.get("risk_tier", "low")
+            risk_emoji = _RISK_EMOJI.get(risk_tier, "⚪")
+            author = p.get("author", "unknown")
+            lines.append(f"| {pr_link} | {title} | {days}d | {risk_emoji} {risk_tier} | {author} |")
+        if len(stale_14d) > 15:
+            lines.append(f"| | _+{len(stale_14d) - 15} more stale PRs_ | | | |")
+        lines.append("")
+
+    # Default to weekly-train when no profile explicitly configured
+    profile_name = os.environ.get("DEPLOYMENT_PROFILE", "").strip() or "weekly-train"
+    if total > 0:
         deploy_lines = _deployment_risk_lines(
             profile_name, total, type_counts, avg_batch,
             load_deployment_profile, deployment_risk_summary,
@@ -1071,6 +1102,12 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             if age_hours < 24:
                 return f"{age_hours:.0f}h"
             days = age_hours / 24
+            if days >= 60:
+                return f"⛔ {days:.0f}d"
+            if days >= 30:
+                return f"🔴 {days:.0f}d"
+            if days >= 14:
+                return f"🟡 {days:.0f}d"
             return f"{days:.0f}d"
 
         def _issue_cell(issue_ref: dict | None) -> str:
@@ -1100,8 +1137,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
         def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
             """Emit per-PR detail table + summary list for one risk tier."""
-            sec.append("| PR | Title | Category | Type | Blast | Risk | CI | Age | Reviewers | Issues |")
-            sec.append("|----|-------|----------|------|-------|------|----|-----|-----------|--------|")
+            sec.append("| PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |")
+            sec.append("|----|-------|----------|------|-------|------|-----|-------|----|-----|-----------|--------|")
             for p in prs_in_tier:
                 pr_link = _pr_link(p)
                 title = (p.get("title") or "")[:50]
@@ -1121,6 +1158,10 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 risk_score = p.get("risk_score", 0)
                 risk_tier = p.get("risk_tier", blast)
                 risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
+                loc = p.get("total_loc", 0)
+                loc_cell = f"{loc:,}" if loc else "—"
+                file_count = p.get("file_count", 0)
+                files_cell = str(file_count) if file_count else "—"
                 ci_cell = _ci_cell(p.get("ci_status", "none"))
                 age = _age_label(p.get("age_hours", 0))
                 approvals = p.get("approval_count", 0)
@@ -1129,7 +1170,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 issue_cell = _issue_cell(p.get("issue_ref"))
                 sec.append(
                     f"| {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
-                    f"| {risk_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                    f"| {risk_cell} | {loc_cell} | {files_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                 )
             sec.append("")
             # Per-PR summary with full title + issue ref.
@@ -1227,8 +1268,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 n_med = sum(1 for p in prs_in_lane if p.get("risk_tier", p.get("blast_radius")) == "medium")
                 sections.append(f"**→ {feature}** ({len(prs_in_lane)} PRs)")
                 sections.append("")
-                sections.append("| PR | Title | Target | Category | Type | Blast | Risk | CI | Age | Reviewers | Issues |")
-                sections.append("|----|-------|--------|----------|------|-------|------|----|-----|-----------|--------|")
+                sections.append("| PR | Title | Target | Category | Type | Blast | Risk | LOC | CI | Age | Reviewers | Issues |")
+                sections.append("|----|-------|--------|----------|------|-------|------|-----|----|-----|-----------|--------|")
                 for p in prs_in_lane:
                     pr_link = _pr_link(p)
                     title = (p.get("title") or "")[:40]
@@ -1241,6 +1282,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     risk_score = p.get("risk_score", 0)
                     risk_tier = p.get("risk_tier", blast)
                     risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
+                    loc = p.get("total_loc", 0)
+                    loc_cell = f"{loc:,}" if loc else "—"
                     ci_cell = _ci_cell(p.get("ci_status", "none"))
                     age = _age_label(p.get("age_hours", 0))
                     approvals = p.get("approval_count", 0)
@@ -1249,7 +1292,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     issue_cell = _issue_cell(p.get("issue_ref"))
                     sections.append(
                         f"| {pr_link} | {title} | {target} | {cat} | {type_emoji} | {blast_cell} "
-                        f"| {risk_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                        f"| {risk_cell} | {loc_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                     )
                 sections.append("")
 
@@ -1266,6 +1309,174 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         + lane_sections
     )
     return "\n".join(ordered), ctx
+
+
+def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
+    """Generate a standalone HTML risk heatmap showing batch size vs defect rate.
+
+    Produces reports/risk_heatmap.html with a color-coded grid and current
+    position marker. No JS dependencies — pure inline CSS/HTML.
+    """
+    from scripts.mq.simulate import merge_batch_success, load_deployment_profile
+
+    prs_file = workspace / "ready_prs.json"
+    if not prs_file.exists():
+        return
+
+    try:
+        prs = json.loads(prs_file.read_text())
+    except Exception:
+        return
+    if not prs:
+        return
+
+    total = len(prs)
+    type_counts: dict[str, int] = {}
+    for p in prs:
+        t = p.get("pr_type", "unknown")
+        type_counts[t] = type_counts.get(t, 0) + 1
+    n_defect = type_counts.get("bug", 0) + type_counts.get("security", 0)
+    actual_defect_rate = n_defect / total if total else 0.0
+
+    lane_file = workspace / "lane_groups.json"
+    if lane_file.exists():
+        try:
+            lane_data = json.loads(lane_file.read_text())
+            lane_list = lane_data.get("lanes", []) if isinstance(lane_data, dict) else lane_data
+            sizes = [len(l.get("prs", [])) for l in lane_list if isinstance(l, dict) and l.get("prs")]
+            avg_batch = sum(sizes) / len(sizes) if sizes else total
+        except Exception:
+            avg_batch = total
+    else:
+        avg_batch = total
+
+    profile_name = os.environ.get("DEPLOYMENT_PROFILE", "").strip()
+    prs_per_release = int(avg_batch)
+    if profile_name:
+        profile = load_deployment_profile(profile_name, queue_size=total)
+        if profile:
+            prs_per_release = profile.get("prs_per_release", int(avg_batch))
+
+    defect_rates = [0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20]
+    batch_sizes = [1, 3, 5, 10, 15, 20, 30, 50, 75, 100]
+
+    rows_html = []
+    for dr in defect_rates:
+        cells = []
+        for bs in batch_sizes:
+            success = merge_batch_success(dr, bs)
+            pct = round(success * 100, 1)
+            if success >= 0.90:
+                bg = "#2ea043"
+            elif success >= 0.70:
+                bg = "#d4a017"
+            elif success >= 0.50:
+                bg = "#e3822a"
+            else:
+                bg = "#cf222e"
+            is_current = (
+                abs(dr - actual_defect_rate) <= 0.015
+                and abs(bs - avg_batch) <= max(5, avg_batch * 0.3)
+            )
+            border = "3px solid #0969da" if is_current else "1px solid #30363d"
+            marker = " *" if is_current else ""
+            cells.append(
+                f'<td style="background:{bg};color:#fff;border:{border};'
+                f'text-align:center;padding:6px;font-size:13px;min-width:55px">'
+                f'{pct}%{marker}</td>'
+            )
+        label = f"{dr*100:.1f}%"
+        rows_html.append(f'<tr><td style="padding:6px;font-weight:bold;background:#161b22;'
+                         f'color:#c9d1d9;text-align:right">{label}</td>{"".join(cells)}</tr>')
+
+    header_cells = "".join(
+        f'<th style="padding:6px;background:#161b22;color:#c9d1d9;min-width:55px">{bs}</th>'
+        for bs in batch_sizes
+    )
+
+    summary_lines = [
+        f"Queue size: {total} PRs",
+        f"Defect-proxy rate: {actual_defect_rate*100:.1f}%",
+        f"Avg batch (lane) size: {avg_batch:.0f}",
+        f"PRs/release: {prs_per_release}",
+        f"Current merge success: {merge_batch_success(actual_defect_rate, avg_batch)*100:.1f}%",
+    ]
+
+    import html as _html
+    type_breakdown = _html.escape(" | ".join(f"{k}: {v}" for k, v in sorted(type_counts.items(), key=lambda x: -x[1])[:8]))
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merge Queue Risk Heatmap</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0d1117; color: #c9d1d9; max-width: 1100px; margin: 40px auto; padding: 0 20px; }}
+  h1 {{ color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 8px; }}
+  h2 {{ color: #79c0ff; margin-top: 28px; }}
+  table {{ border-collapse: collapse; margin: 16px 0; }}
+  .summary {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+              padding: 16px; margin: 16px 0; }}
+  .summary p {{ margin: 4px 0; }}
+  .legend {{ display: flex; gap: 16px; margin: 12px 0; flex-wrap: wrap; }}
+  .legend-item {{ display: flex; align-items: center; gap: 6px; }}
+  .legend-box {{ width: 20px; height: 20px; border-radius: 3px; }}
+  .current-marker {{ border: 3px solid #0969da; display: inline-block; width: 16px; height: 16px; border-radius: 3px; }}
+  .type-bar {{ display: flex; height: 28px; border-radius: 4px; overflow: hidden; margin: 8px 0; }}
+  .type-bar div {{ display: flex; align-items: center; justify-content: center;
+                   font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; }}
+</style>
+</head>
+<body>
+<h1>Merge Queue Risk Heatmap</h1>
+
+<div class="summary">
+  {"<br>".join(f"<p>{line}</p>" for line in summary_lines)}
+  <p style="font-size:12px;color:#8b949e;margin-top:8px">Type breakdown: {type_breakdown}</p>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-box" style="background:#2ea043"></div> &ge;90% success</div>
+  <div class="legend-item"><div class="legend-box" style="background:#d4a017"></div> 70–89%</div>
+  <div class="legend-item"><div class="legend-box" style="background:#e3822a"></div> 50–69%</div>
+  <div class="legend-item"><div class="legend-box" style="background:#cf222e"></div> &lt;50%</div>
+  <div class="legend-item"><div class="current-marker"></div> Your position</div>
+</div>
+
+<h2>Batch Success Rate: Defect Rate × Batch Size</h2>
+<p style="font-size:13px;color:#8b949e">Formula: (1 − defect_rate)<sup>batch_size</sup> — probability that ALL PRs in a batch are defect-free</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="padding:6px;background:#161b22;color:#8b949e">Defect Rate ↓ \\ Batch →</th>
+      {header_cells}
+    </tr>
+  </thead>
+  <tbody>
+    {"".join(rows_html)}
+  </tbody>
+</table>
+
+<h2>Reading the Heatmap</h2>
+<ul style="line-height:1.8">
+  <li><strong>Green cells (&ge;90%)</strong> — safe zone. Small batches or low defect rates.</li>
+  <li><strong>Yellow cells (70–89%)</strong> — caution. One-in-three to one-in-ten chance of a bad batch.</li>
+  <li><strong>Orange cells (50–69%)</strong> — danger. Coin-flip whether your batch is clean.</li>
+  <li><strong>Red cells (&lt;50%)</strong> — calamity zone. More likely to fail than succeed.</li>
+  <li><strong>Blue border (*)</strong> — your current approximate position based on queue defect rate and batch size.</li>
+</ul>
+
+<p style="font-size:12px;color:#484f58;margin-top:32px">
+  Generated from merge queue analysis. Model: Joe Magerramov's Valley of Calm.
+</p>
+</body>
+</html>"""
+
+    (reports_dir / "risk_heatmap.html").write_text(html)
+    print("[mq-report] reports/risk_heatmap.html written", flush=True)
 
 
 def main() -> None:
@@ -1300,6 +1511,11 @@ def main() -> None:
         print("[mq-report] reports/report.html written", flush=True)
     except Exception as e:
         print(f"[mq-report] HTML render failed (non-fatal): {e}", flush=True)
+
+    try:
+        _generate_risk_heatmap_html(workspace, reports_dir)
+    except Exception as e:
+        print(f"[mq-report] risk heatmap generation failed (non-fatal): {e}", flush=True)
 
     slack_text = format_for_slack(report_text)
 
