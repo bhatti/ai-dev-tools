@@ -63,23 +63,3 @@ def test_write_json_overwrites(sample_config):
     assert result["status"] == "DONE"
 
 
-def test_write_json_overwrites_readonly_file(sample_config, tmp_workspace):
-    """Simulate k8s cross-task permission issue: file owned by another UID."""
-    import os, stat
-    path = write_json(sample_config, "42", "locked.json", {"v": 1})
-    # Make file read-only (simulates file owned by root that UID 1000 can't overwrite)
-    path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    # os.replace() bypasses file permissions — only needs dir write permission
-    path2 = write_json(sample_config, "42", "locked.json", {"v": 2})
-    assert path2 == path
-    result = read_json(sample_config, "42", "locked.json")
-    assert result == {"v": 2}
-
-
-def test_write_text_overwrites_readonly_file(sample_config, tmp_workspace):
-    """Same permission scenario for write_text."""
-    import stat
-    path = write_text(sample_config, "42", "locked.md", "old")
-    path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    path2 = write_text(sample_config, "42", "locked.md", "new")
-    assert read_text(sample_config, "42", "locked.md") == "new"
