@@ -632,8 +632,9 @@ class TestBuildPrMetricsTable:
                 "complexity": "low", "is_hotspot": False}]
         lines = build_pr_metrics_table(prs)
         header = lines[2]
-        for col in ["PR", "Issue", "Author", "Title", "Cat", "Type", "Blast", "Risk", "LOC", "Files", "Cx", "Hotspot"]:
+        for col in ["PR", "Issue", "Author", "Title", "Cat", "Type", "Blast", "Risk", "LOC", "Files", "Cx"]:
             assert col in header, f"Missing column: {col}"
+        assert "Hotspot" not in header, "Hotspot is shown as 🔥 prefix on Cat, not a separate column"
 
     def test_missing_fields_graceful(self):
         prs = [{"pr_number": 99}]

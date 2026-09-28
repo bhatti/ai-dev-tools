@@ -4,6 +4,8 @@ All inter-step communication goes through JSON/markdown files.
 """
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from scripts.common.config import get_issue_dir
@@ -13,15 +15,35 @@ def _resolve(config: dict, issue_id: str, filename: str) -> Path:
     return get_issue_dir(config, issue_id) / filename
 
 
+def _safe_write(path: Path, content: str) -> None:
+    """Write content atomically via temp file + os.replace().
+
+    In k8s pods, /workspace is a shared emptyDir. A previous task may have
+    created *path* as a different UID, making direct overwrite fail with
+    PermissionError.  os.replace() only requires write+execute on the
+    *directory*, not ownership of the target file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        os.write(fd, content.encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        os.replace(tmp, str(path))
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_json(config: dict, issue_id: str, filename: str, data: dict) -> Path:
     """Write JSON artifact, creating parent dirs as needed."""
     path = _resolve(config, issue_id, filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except PermissionError:
-        path.unlink(missing_ok=True)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _safe_write(path, json.dumps(data, indent=2))
     return path
 
 
@@ -36,12 +58,7 @@ def read_json(config: dict, issue_id: str, filename: str) -> dict | None:
 def write_text(config: dict, issue_id: str, filename: str, content: str) -> Path:
     """Write text artifact (plan.md, learnings.md, etc.)."""
     path = _resolve(config, issue_id, filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(content, encoding="utf-8")
-    except PermissionError:
-        path.unlink(missing_ok=True)
-        path.write_text(content, encoding="utf-8")
+    _safe_write(path, content)
     return path
 
 

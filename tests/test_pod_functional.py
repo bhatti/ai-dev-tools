@@ -4916,6 +4916,66 @@ def test_41_contract_artifact_handoff(base_env: dict[str, str]) -> TestResult:
                 )
 
 
+def test_44_artifact_write_permissions(base_env: dict[str, str]) -> TestResult:
+    """Validate artifacts.py _safe_write handles root-owned files via tempfile + os.replace().
+
+    Regression test for:
+        PermissionError: [Errno 13] Permission denied: '/workspace/reports/skill_update_plan_result.json'
+    Root cause: previous task (e.g. audit-prs running as root via Claude sandbox) creates files
+    that UID=1000 cannot overwrite or unlink. The fix uses tempfile + os.replace() which only
+    needs directory write permission.
+    """
+    result = TestResult("artifact-write-permissions")
+    ws = "/workspace/artifact_perm"
+    env = dict(base_env)
+    env["WORKSPACE_DIR"] = ws
+
+    with pod_fixture("artifact-perm") as pod:
+        setup = exec_step(pod, "setup", f"mkdir -p {ws}/reports", env, timeout=30)
+        result.steps.append(setup)
+        if not setup.ok:
+            return _fail(result, setup, setup.stderr[-200:])
+
+        # Create a root-owned read-only file (simulates cross-task permission issue)
+        create_locked = exec_step(pod, "create-locked-file",
+            f"echo '{{\"old\": true}}' > {ws}/reports/locked.json && chmod 444 {ws}/reports/locked.json",
+            env, timeout=15)
+        result.steps.append(create_locked)
+        if not create_locked.ok:
+            return _fail(result, create_locked, "failed to create locked file")
+
+        # Run artifacts.py write_json on the locked file — must succeed via _safe_write
+        write_step = exec_step(pod, "write-over-locked",
+            "python3 -c \""
+            "import sys; sys.path.insert(0, '/app');\n"
+            "from scripts.common.artifacts import write_json;\n"
+            f"path = write_json({{'WORKSPACE_DIR': '{ws}'}}, '', 'reports/locked.json', {{'new': True}});\n"
+            "import json; data = json.loads(path.read_text());\n"
+            "assert data == {'new': True}, f'unexpected: {{data}}';\n"
+            "print('OK: wrote over locked file successfully')\n\"",
+            env, timeout=30)
+        result.steps.append(write_step)
+        if not write_step.ok:
+            return _fail(result, write_step,
+                         f"_safe_write failed on locked file: {write_step.stderr[-400:]}")
+
+        # Also test write_text
+        write_text_step = exec_step(pod, "write-text-over-locked",
+            "python3 -c \""
+            "import sys; sys.path.insert(0, '/app');\n"
+            "from scripts.common.artifacts import write_text;\n"
+            f"path = write_text({{'WORKSPACE_DIR': '{ws}'}}, '', 'reports/locked.md', 'new content');\n"
+            "assert path.read_text() == 'new content';\n"
+            "print('OK: write_text over locked file succeeded')\n\"",
+            env, timeout=30)
+        result.steps.append(write_text_step)
+        if not write_text_step.ok:
+            return _fail(result, write_text_step,
+                         f"_safe_write failed for write_text: {write_text_step.stderr[-400:]}")
+
+        return _pass(result, "artifacts.py _safe_write handles permission-locked files")
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 ALL_TESTS: dict[str, callable] = {
@@ -4962,6 +5022,7 @@ ALL_TESTS: dict[str, callable] = {
     "fuzz-sqli-detection":    test_39_fuzz_sqli_detection,
     "contract-volume-isolation": test_40_contract_volume_isolation,
     "contract-artifact-handoff": test_41_contract_artifact_handoff,
+    "artifact-write-permissions": test_44_artifact_write_permissions,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

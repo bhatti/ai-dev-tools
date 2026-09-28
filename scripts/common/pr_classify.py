@@ -687,8 +687,8 @@ def build_pr_metrics_table(prs: list[dict]) -> list[str]:
     lines: list[str] = [
         "### Per-PR Metrics",
         "",
-        "| # | PR | Issue | Author | Title | Cat | Type | Blast | Risk | LOC | Files | Cx | Hotspot |",
-        "|---|-----|-------|--------|-------|-----|------|-------|------|-----|-------|----|---------|",
+        "| # | PR | Issue | Author | Title | Cat | Type | Blast | Risk | LOC | Files | Cx |",
+        "|---|-----|-------|--------|-------|-----|------|-------|------|-----|-------|-----|",
     ]
     for idx, p in enumerate(sorted_prs, 1):
         pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
