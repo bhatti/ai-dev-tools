@@ -17,7 +17,11 @@ def write_json(config: dict, issue_id: str, filename: str, data: dict) -> Path:
     """Write JSON artifact, creating parent dirs as needed."""
     path = _resolve(config, issue_id, filename)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except PermissionError:
+        path.unlink(missing_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
 
 
@@ -33,7 +37,11 @@ def write_text(config: dict, issue_id: str, filename: str, content: str) -> Path
     """Write text artifact (plan.md, learnings.md, etc.)."""
     path = _resolve(config, issue_id, filename)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    try:
+        path.write_text(content, encoding="utf-8")
+    except PermissionError:
+        path.unlink(missing_ok=True)
+        path.write_text(content, encoding="utf-8")
     return path
 
 

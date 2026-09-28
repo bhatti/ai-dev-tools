@@ -588,18 +588,25 @@ class TestBuildPrMetricsTable:
             {"pr_number": 123, "author": "alice", "category": "api",
              "pr_type": "bug", "blast_radius": "low", "risk_score": 25.0,
              "risk_tier": "medium", "total_loc": 150, "file_count": 5,
-             "complexity": "medium", "is_hotspot": True},
+             "complexity": "medium", "is_hotspot": True,
+             "url": "https://github.com/org/repo/pull/123",
+             "title": "Fix payment validation",
+             "linked_issue": {"key": "PROJ-42", "url": "https://jira.example.com/browse/PROJ-42"}},
             {"pr_number": 456, "author": "bob", "category": "ui",
              "pr_type": "feature", "blast_radius": "low", "risk_score": 10.0,
              "risk_tier": "low", "total_loc": 30, "file_count": 2,
-             "complexity": "low", "is_hotspot": False},
+             "complexity": "low", "is_hotspot": False,
+             "url": "https://github.com/org/repo/pull/456",
+             "title": "Add dashboard widget"},
         ]
         lines = build_pr_metrics_table(prs)
         text = "\n".join(lines)
         assert "### Per-PR Metrics" in text
-        assert "#123" in text
-        assert "#456" in text
+        assert "[#123]" in text
+        assert "[#456]" in text
         assert "🔥" in text
+        assert "[PROJ-42]" in text
+        assert "Fix payment" in text
 
     def test_sorted_by_risk_descending(self):
         prs = [
@@ -614,9 +621,9 @@ class TestBuildPrMetricsTable:
         ]
         lines = build_pr_metrics_table(prs)
         text = "\n".join(lines)
-        idx_pr2 = text.index("#2")
-        idx_pr1 = text.index("#1")
-        assert idx_pr2 < idx_pr1, "Higher risk PR should appear first"
+        idx_pr2 = text.index("| 1 |")
+        idx_pr1 = text.index("| 2 |")
+        assert idx_pr2 < idx_pr1, "Higher risk PR should appear first (row 1)"
 
     def test_all_column_headers_present(self):
         prs = [{"pr_number": 1, "author": "a", "category": "api",
@@ -625,7 +632,7 @@ class TestBuildPrMetricsTable:
                 "complexity": "low", "is_hotspot": False}]
         lines = build_pr_metrics_table(prs)
         header = lines[2]
-        for col in ["PR", "Author", "Cat", "Type", "Blast", "Risk", "LOC", "Files", "Cx", "Hotspot"]:
+        for col in ["PR", "Issue", "Author", "Title", "Cat", "Type", "Blast", "Risk", "LOC", "Files", "Cx", "Hotspot"]:
             assert col in header, f"Missing column: {col}"
 
     def test_missing_fields_graceful(self):

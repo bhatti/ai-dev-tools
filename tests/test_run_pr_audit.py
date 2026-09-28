@@ -359,13 +359,19 @@ class TestPromptTemplate:
             {"pr_number": 1, "author": "alice", "category": "api",
              "pr_type": "bug", "blast_radius": "low", "risk_score": 25.0,
              "risk_tier": "medium", "total_loc": 150, "file_count": 5,
-             "complexity": "medium", "is_hotspot": True},
+             "complexity": "medium", "is_hotspot": True,
+             "url": "https://github.com/org/repo/pull/1",
+             "title": "Fix API validation",
+             "linked_issue": {"key": "PROJ-1", "url": "https://jira.example.com/browse/PROJ-1"}},
         ]
         summary = _build_metrics_summary(prs)
         assert "Per-PR Metrics" in summary
-        assert "#1" in summary
+        assert "[#1]" in summary
         assert "🔥" in summary
         assert "Cat" in summary
+        assert "Issue" in summary
+        assert "Title" in summary
+        assert "[PROJ-1]" in summary
         assert "Pre-Computed PR Metrics Summary" in summary
 
 

@@ -675,7 +675,7 @@ def build_work_type_distribution(prs: list[dict]) -> list[str]:
 
 
 def build_pr_metrics_table(prs: list[dict]) -> list[str]:
-    """Build per-PR metrics table with Cat/Type/Blast/Risk/LOC/Cx/Hotspot columns.
+    """Build per-PR metrics table with link, issue, title, and risk columns.
 
     Sorted by risk_score descending so highest-risk PRs appear first.
     """
@@ -687,13 +687,27 @@ def build_pr_metrics_table(prs: list[dict]) -> list[str]:
     lines: list[str] = [
         "### Per-PR Metrics",
         "",
-        "| # | PR | Author | Cat | Type | Blast | Risk | LOC | Files | Cx | Hotspot |",
-        "|---|-----|--------|-----|------|-------|------|-----|-------|----|---------|",
+        "| # | PR | Issue | Author | Title | Cat | Type | Blast | Risk | LOC | Files | Cx | Hotspot |",
+        "|---|-----|-------|--------|-------|-----|------|-------|------|-----|-------|----|---------|",
     ]
     for idx, p in enumerate(sorted_prs, 1):
         pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
+        pr_url = p.get("url", "")
+        pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
+
+        linked = p.get("linked_issue") or {}
+        issue_key = linked.get("key", "")
+        issue_url = linked.get("url", "")
+        issue_cell = f"[{issue_key}]({issue_url})" if issue_url and issue_key else (issue_key or "—")
+
         author = p.get("author", "—")
+        title = (p.get("title") or "").replace("|", "\\|").replace("\n", " ")
+        if len(title) > 50:
+            title = title[:47] + "..."
+
         cat = p.get("category", "—")
+        hotspot_prefix = "🔥 " if p.get("is_hotspot") else ""
+        cat_cell = f"{hotspot_prefix}{cat}"
         pr_type = p.get("pr_type", "—")
         type_emoji = PR_TYPE_EMOJI.get(pr_type, "")
         blast = p.get("blast_radius", "—")
@@ -704,11 +718,11 @@ def build_pr_metrics_table(prs: list[dict]) -> list[str]:
         files = p.get("file_count", 0)
         cx = p.get("complexity", "—")
         cx_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(cx, "")
-        hotspot = "🔥" if p.get("is_hotspot") else "—"
         lines.append(
-            f"| {idx} | #{pr_num} | {author} | {cat} | {type_emoji} {pr_type} "
+            f"| {idx} | {pr_cell} | {issue_cell} | {author} | {title} "
+            f"| {cat_cell} | {type_emoji} {pr_type} "
             f"| {blast} | {risk_emoji} {risk_score:.0f} | {loc:,} | {files} "
-            f"| {cx_emoji} {cx} | {hotspot} |"
+            f"| {cx_emoji} {cx} |"
         )
     lines.append("")
     return lines
