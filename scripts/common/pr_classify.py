@@ -116,9 +116,18 @@ _DOCS_TITLE_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 _TEST_TITLE_KEYWORDS = re.compile(
-    r'\b(test(?:s|ing)?|spec(?:s)?|e2e|unit.?test|integration.?test|sdet|qa)\b',
+    r'\b(test(?:s|ing)?|spec(?:s)?|e2e|unit.?test|integration.?test|sdet|qa'
+    r'|flak(?:y|iness|e)|assert(?:ion)?s?)\b',
     re.IGNORECASE,
 )
+
+_TEST_EXACT_LABELS = frozenset({
+    # "test" (bare) is intentionally excluded: Jira uses it for issue type "Test"
+    # and components named "test", which means "needs testing", not "this PR adds tests".
+    # Use compound labels or title keywords to detect test PRs.
+    "tests", "testing", "flaky", "flaky-test", "flaky test",
+    "qa", "e2e", "e2e-test", "unit-test", "integration-test", "sdet", "spec",
+})
 
 _CONVENTIONAL_COMMIT_RE = re.compile(
     r'^(?:[\[\]A-Z0-9_-]+\s+)?'
@@ -376,8 +385,17 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
         return "refactor"
     if any(k in label_str for k in ("chore", "deps", "dependency", "maintenance")):
         return "chore"
-    if any(k in label_str for k in ("test", "flaky", "qa", "e2e", "spec")):
+    # Compound/specific test labels are definitive (e.g. "flaky-test", "qa", "e2e").
+    if any(lbl.lower() in _TEST_EXACT_LABELS for lbl in labels):
         return "test"
+    # Bare "test" label requires title corroboration: Jira uses "test" as an issue type
+    # for exploratory testing tasks unrelated to writing tests. Only classify as "test" when
+    # the title/jira_summary also signals test work (e.g. "fix flaky assertion" → test, but
+    # "Consider how... might be made fast" with Jira type "Test" → stays feature/bug).
+    if any(lbl.lower() == "test" for lbl in labels):
+        search_text_corr = f"{title} {jira_summary}".strip()
+        if _TEST_TITLE_KEYWORDS.search(search_text_corr):
+            return "test"
 
     cc_match = _CONVENTIONAL_COMMIT_RE.match(title)
     if cc_match:
