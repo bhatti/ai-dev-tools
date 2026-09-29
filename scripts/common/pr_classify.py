@@ -117,7 +117,7 @@ _DOCS_TITLE_KEYWORDS = re.compile(
 )
 _TEST_TITLE_KEYWORDS = re.compile(
     r'\b(test(?:s|ing)?|spec(?:s)?|e2e|unit.?test|integration.?test|sdet|qa'
-    r'|flak(?:y|iness|e)|assert(?:ion)?s?)\b',
+    r'|flak(?:y|iness|e))\b',
     re.IGNORECASE,
 )
 

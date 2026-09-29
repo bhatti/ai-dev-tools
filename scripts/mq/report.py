@@ -300,8 +300,8 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     high_blast = sum(1 for p in prs if p.get("risk_tier", p.get("blast_radius")) == "high")
     medium_blast = sum(1 for p in prs if p.get("risk_tier", p.get("blast_radius")) == "medium")
     # CI data availability: BB bulk API never sets ci_status from actual pipeline runs.
-    # When ALL PRs show "unknown"/"none", treat CI as unavailable and use aged PRs as health proxy.
-    ci_available = any(p.get("ci_status") not in ("unknown", "none", None, "") for p in prs)
+    # When ALL PRs show "unknown", treat CI as unavailable and use aged PRs as health proxy.
+    ci_available = any(p.get("ci_status") not in ("unknown", None, "") for p in prs)
     defect_prob = (failed_ci / total if ci_available and total > 0 else 0.0)
     estimated_lanes = max(1, total // 10)
     avg_batch = round(total / estimated_lanes, 1)
@@ -1036,7 +1036,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
         # Detect CI unavailability: BB API does not return CI status in bulk PR list
         all_ci = [p.get("ci_status", "unknown") for p in all_prs_flat]
-        ci_unavailable = all_ci and all(s in ("unknown", "none") for s in all_ci)
+        ci_unavailable = all_ci and all(s in ("unknown",) for s in all_ci)
 
         if ci_unavailable:
             sections.append(
