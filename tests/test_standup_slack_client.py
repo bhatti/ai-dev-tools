@@ -653,13 +653,13 @@ def test_post_report_no_fallback_when_no_job_id(mock_post, mock_render, mock_upl
 # ---------------------------------------------------------------------------
 
 def test_pr_group_ci_failure_overrides_approvals():
-    pr = {"ci_status": "failure", "approval_count": 2, "age_days": 0}
+    pr = {"ci_status": "fail", "approval_count": 2, "age_days": 0}
     assert pr_group(pr) == "CI FAILING"
 
 
 def test_pr_group_ready_to_merge_two_approvals():
-    assert pr_group({"ci_status": "success", "approval_count": 2}) == "READY TO MERGE"
-    assert pr_group({"ci_status": "none", "approval_count": 2}) == "READY TO MERGE"
+    assert pr_group({"ci_status": "pass", "approval_count": 2}) == "READY TO MERGE"
+    assert pr_group({"ci_status": "unknown", "approval_count": 2}) == "READY TO MERGE"
 
 
 def test_pr_group_approved_waiting_on_ci():
@@ -667,19 +667,19 @@ def test_pr_group_approved_waiting_on_ci():
 
 
 def test_pr_group_one_approval():
-    assert pr_group({"ci_status": "none", "approval_count": 1, "age_days": 0}) == "APPROVED (1 review)"
+    assert pr_group({"ci_status": "unknown", "approval_count": 1, "age_days": 0}) == "APPROVED (1 review)"
 
 
 def test_pr_group_stale():
-    assert pr_group({"ci_status": "none", "approval_count": 0, "age_days": 6}) == "STALE / AT RISK (>5d)"
+    assert pr_group({"ci_status": "unknown", "approval_count": 0, "age_days": 6}) == "STALE / AT RISK (>5d)"
 
 
 def test_pr_group_needs_review():
-    assert pr_group({"ci_status": "none", "approval_count": 0, "age_days": 2}) == "NEEDS REVIEW (>1d)"
+    assert pr_group({"ci_status": "unknown", "approval_count": 0, "age_days": 2}) == "NEEDS REVIEW (>1d)"
 
 
 def test_pr_group_in_review():
-    assert pr_group({"ci_status": "none", "approval_count": 0, "age_days": 1}) == "IN REVIEW"
+    assert pr_group({"ci_status": "unknown", "approval_count": 0, "age_days": 1}) == "IN REVIEW"
 
 
 def test_pr_group_fallback_approved_by_list():
@@ -757,7 +757,7 @@ _PR_DATA_SAMPLE = {
             "age_days": 2,
             "approved_by": ["Bob Jones", "Carol Lee"],
             "reviewers": [],
-            "ci_status": "success",
+            "ci_status": "pass",
             "approval_count": 2,
         },
         {
@@ -768,7 +768,7 @@ _PR_DATA_SAMPLE = {
             "age_days": 8,
             "approved_by": [],
             "reviewers": ["Eve"],
-            "ci_status": "none",
+            "ci_status": "unknown",
             "approval_count": 0,
             "priority": "High",
         },
@@ -827,7 +827,7 @@ def test_pr_queue_to_markdown_pipe_escaped():
             "age_days": 1,
             "approved_by": [],
             "reviewers": [],
-            "ci_status": "success",
+            "ci_status": "pass",
             "approval_count": 2,
         }],
     }

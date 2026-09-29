@@ -100,9 +100,10 @@ class TestClassifyPrType:
         pr = _bb_pr(title="some changes", branch="", source_branch="fix/payment-issue")
         assert classify_pr_type(pr) == "bug"
 
-    def test_unknown_when_no_signal(self):
+    def test_feature_fallback_when_no_signal(self):
+        # No keywords → defaults to "feature" (most generic type) rather than "unknown"
         pr = {"title": "hello world", "branch": "", "description": "", "labels": []}
-        assert classify_pr_type(pr) == "unknown"
+        assert classify_pr_type(pr) == "feature"
 
     def test_flags_test_pr(self):
         pr = _bb_pr(title="some code changes")
@@ -113,6 +114,32 @@ class TestClassifyPrType:
         pr = _bb_pr(title="some code changes")
         flags = {"is_test_pr": False, "is_docs_pr": True, "is_wip_pr": False}
         assert classify_pr_type(pr, flags=flags) == "docs"
+
+    def test_jira_summary_used_when_title_is_bare_key(self):
+        # BB PRs from gather_pr_queue store Jira key as title; jira_summary has the real text
+        pr = {"title": "CRIBL-44875", "jira_summary": "[Flaky Test] fix test instability in auth"}
+        assert classify_pr_type(pr) == "test"
+
+    def test_flaky_test_title_is_test_not_bug(self):
+        # "flaky" matches _BUG_KEYWORDS but "test" in title should take priority
+        pr = {"title": "[Flaky Test] fix test runner race condition"}
+        assert classify_pr_type(pr) == "test"
+
+    def test_label_test_overrides_bug_keywords(self):
+        pr = {"title": "fix flaky assertion", "labels": ["test"]}
+        assert classify_pr_type(pr) == "test"
+
+    def test_conventional_commit_unknown_prefix_defaults_to_feature(self):
+        # Unrecognized conventional commit prefix → feature, not unknown
+        pr = {"title": "wip: experiment with new auth approach"}
+        # "wip" is not in CONVENTIONAL_TYPE_MAP; should not match conventional commit RE
+        # but even if it did, fallback should be feature
+        result = classify_pr_type(pr)
+        assert result != "unknown"
+
+    def test_ui_change_with_no_keywords_is_feature(self):
+        pr = {"title": "Change the font color in the tags for the Limits panel"}
+        assert classify_pr_type(pr) == "feature"
 
 
 # ---------------------------------------------------------------------------
@@ -511,8 +538,9 @@ class TestCategoryTestFileFiltering:
 # ---------------------------------------------------------------------------
 
 class TestNewBugKeywords:
-    def test_flaky(self):
-        assert classify_pr_type(_bb_pr(title="[Flaky Test] fix test input")) == "bug"
+    def test_flaky_test_is_test_not_bug(self):
+        # Test keywords win over flaky (bug keyword) — "[Flaky Test]" is a test PR
+        assert classify_pr_type(_bb_pr(title="[Flaky Test] fix test input")) == "test"
 
     def test_should_not(self):
         assert classify_pr_type(_bb_pr(title="TLS settings should not be displayed")) == "bug"

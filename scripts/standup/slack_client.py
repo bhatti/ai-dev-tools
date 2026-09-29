@@ -252,7 +252,7 @@ def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
 
 
 PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
-PR_CI_EMOJI = {"success": "✅", "failure": "❌", "pending": "⏳", "none": ""}
+PR_CI_EMOJI = {"pass": "✅", "fail": "❌", "pending": "⏳", "unknown": ""}
 PR_GROUP_BADGE = {
     "CI FAILING": "🔴",
     "READY TO MERGE": "✅",
@@ -275,15 +275,15 @@ PR_GROUP_ORDER = [
 
 def pr_group(pr: dict) -> str:
     """Classify a PR dict into one of the PR_GROUP_ORDER groups."""
-    ci = pr.get("ci_status", "none")
+    ci = pr.get("ci_status", "unknown")
     # approval_count preferred; fall back to len(approved_by) for backward compat
     n = pr.get("approval_count")
     if n is None:
         n = len(pr.get("approved_by") or [])
     days = pr.get("age_days", 0)
-    if ci == "failure":
+    if ci == "fail":
         return "CI FAILING"
-    if n >= 2 and ci in ("success", "none"):
+    if n >= 2 and ci in ("pass", "unknown"):
         return "READY TO MERGE"
     if n >= 2 and ci == "pending":
         return "APPROVED — WAITING ON CI"
@@ -336,7 +336,7 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
             days = pr.get("age_days", 0)
             approved_by = pr.get("approved_by") or []
             pending = pr.get("reviewers") or []
-            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
+            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "unknown"), "")
 
             # Build clickable links
             jira_link = f"<{jira_url}|{jira_key}>" if jira_url and jira_key else jira_key

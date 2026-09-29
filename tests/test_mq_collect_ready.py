@@ -240,13 +240,15 @@ class TestClassifyPrType:
         pr = {"title": "fix: crash on empty input", "labels": []}
         assert _classify_pr_type(pr) == "bug"
 
-    def test_chore_when_title_says_update(self):
+    def test_docs_when_title_says_update_readme(self):
+        # "readme" matches docs keywords, which are checked before chore
         pr = {"title": "update readme", "labels": []}
-        assert _classify_pr_type(pr) == "chore"
+        assert _classify_pr_type(pr) == "docs"
 
-    def test_unknown_when_no_signal(self):
+    def test_feature_fallback_when_no_signal(self):
+        # No keywords → feature (most generic) rather than unknown
         pr = {"title": "tweak spacing in header", "labels": []}
-        assert _classify_pr_type(pr) == "unknown"
+        assert _classify_pr_type(pr) == "feature"
 
     def test_label_takes_priority_over_title(self):
         pr = {"title": "feat: add billing fix", "labels": [{"name": "bug"}]}

@@ -346,16 +346,23 @@ def classify_pr_category(pr: dict, files: list[dict] | None = None) -> tuple[str
 
 
 def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
-    """Classify PR into work type: bug, feature, refactor, chore, security, test, docs, unknown.
+    """Classify PR into work type: bug, feature, refactor, chore, security, test, docs, feature.
 
-    Priority: security keywords > labels > conventional commit prefix > title keywords
-              > title doc/test keywords > flags > branch keywords > unknown.
+    Priority: security keywords > labels > conventional commit prefix > test/doc keywords
+              > bug/feat/refactor/chore title keywords > flags > branch keywords
+              > description keywords > feature (default).
+
+    jira_summary is included alongside title so Jira-linked PRs are classified from issue text.
+    Test keywords are checked before bug keywords so "[Flaky Test]" → test, not bug.
     """
     title = pr.get("title", "")
+    # Include Jira issue summary so Jira-linked PRs classify from issue text, not bare key
+    jira_summary = pr.get("jira_summary", "") or ""
     description = pr.get("description", "") or pr.get("body", "") or ""
-    text = f"{title} {description}"
+    # Combined text for security scan; individual checks use title or jira_summary as appropriate
+    full_text = f"{title} {jira_summary} {description}"
 
-    if _SECURITY_KEYWORDS.search(text):
+    if _SECURITY_KEYWORDS.search(full_text):
         return "security"
 
     labels = _normalize_labels(pr)
@@ -369,24 +376,27 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
         return "refactor"
     if any(k in label_str for k in ("chore", "deps", "dependency", "maintenance")):
         return "chore"
+    if any(k in label_str for k in ("test", "flaky", "qa", "e2e", "spec")):
+        return "test"
 
     cc_match = _CONVENTIONAL_COMMIT_RE.match(title)
     if cc_match:
-        return _CONVENTIONAL_TYPE_MAP.get(cc_match.group(1).lower(), "unknown")
+        return _CONVENTIONAL_TYPE_MAP.get(cc_match.group(1).lower(), "feature")
 
-    if _BUG_KEYWORDS.search(title):
-        return "bug"
-    if _FEAT_KEYWORDS.search(title):
-        return "feature"
-    if _REFACTOR_KEYWORDS.search(title):
-        return "refactor"
-    if _CHORE_KEYWORDS.search(title):
-        return "chore"
-
-    if _DOCS_TITLE_KEYWORDS.search(title):
+    # Classify from combined title+jira_summary; test before bug so "[Flaky Test]" → test
+    search_text = f"{title} {jira_summary}".strip()
+    if _DOCS_TITLE_KEYWORDS.search(search_text):
         return "docs"
-    if _TEST_TITLE_KEYWORDS.search(title):
+    if _TEST_TITLE_KEYWORDS.search(search_text):
         return "test"
+    if _BUG_KEYWORDS.search(search_text):
+        return "bug"
+    if _FEAT_KEYWORDS.search(search_text):
+        return "feature"
+    if _REFACTOR_KEYWORDS.search(search_text):
+        return "refactor"
+    if _CHORE_KEYWORDS.search(search_text):
+        return "chore"
 
     if flags:
         if flags.get("is_test_pr"):
@@ -396,6 +406,8 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
 
     branch = (pr.get("branch", "") or pr.get("headRefName", "") or pr.get("source_branch", "") or pr.get("head_ref", "")).lower()
     if branch:
+        if _TEST_TITLE_KEYWORDS.search(branch):
+            return "test"
         if _BUG_KEYWORDS.search(branch):
             return "bug"
         if _FEAT_KEYWORDS.search(branch):
@@ -406,6 +418,8 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
             return "chore"
 
     if description:
+        if _TEST_TITLE_KEYWORDS.search(description):
+            return "test"
         if _BUG_KEYWORDS.search(description):
             return "bug"
         if _FEAT_KEYWORDS.search(description):
@@ -415,7 +429,7 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
         if _CHORE_KEYWORDS.search(description):
             return "chore"
 
-    return "unknown"
+    return "feature"
 
 
 def compute_risk_score(pr: dict, files: list[dict] | None = None) -> dict:

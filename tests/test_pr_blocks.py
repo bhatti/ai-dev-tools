@@ -23,7 +23,7 @@ def _pr(**kwargs) -> dict:
         "approved_by": [],
         "changes_requested_by": [],
         "approval_count": 0,
-        "ci_status": "none",
+        "ci_status": "unknown",
     }
     base.update(kwargs)
     return base
@@ -53,23 +53,23 @@ def _lines(pr_data: dict) -> list[str]:
 
 class TestPrGrouping:
     def test_ready_to_merge_two_approvals_green_ci(self):
-        pr = _pr(approval_count=2, approved_by=["tim", "shah"], ci_status="success")
+        pr = _pr(approval_count=2, approved_by=["tim", "shah"], ci_status="pass")
         assert _groups({"prs": [pr]}) == ["READY TO MERGE"]
 
     def test_ready_to_merge_green_ci_no_ci_configured(self):
-        pr = _pr(approval_count=2, approved_by=["tim", "shah"], ci_status="none")
+        pr = _pr(approval_count=2, approved_by=["tim", "shah"], ci_status="unknown")
         assert _groups({"prs": [pr]}) == ["READY TO MERGE"]
 
     def test_ci_failing_overrides_two_approvals(self):
-        pr = _pr(approval_count=2, approved_by=["tim", "shah"], ci_status="failure")
+        pr = _pr(approval_count=2, approved_by=["tim", "shah"], ci_status="fail")
         assert _groups({"prs": [pr]}) == ["CI FAILING"]
 
     def test_ci_failing_zero_approvals(self):
-        pr = _pr(approval_count=0, approved_by=[], ci_status="failure")
+        pr = _pr(approval_count=0, approved_by=[], ci_status="fail")
         assert _groups({"prs": [pr]}) == ["CI FAILING"]
 
     def test_approved_one_review(self):
-        pr = _pr(approval_count=1, approved_by=["tim"], ci_status="success")
+        pr = _pr(approval_count=1, approved_by=["tim"], ci_status="pass")
         assert _groups({"prs": [pr]}) == ["APPROVED (1 review)"]
 
     def test_approved_one_review_pending_ci(self):
@@ -77,21 +77,21 @@ class TestPrGrouping:
         assert _groups({"prs": [pr]}) == ["APPROVED (1 review)"]
 
     def test_stale_no_approvals(self):
-        pr = _pr(approval_count=0, approved_by=[], age_days=6.0, ci_status="none")
+        pr = _pr(approval_count=0, approved_by=[], age_days=6.0, ci_status="unknown")
         assert _groups({"prs": [pr]}) == ["STALE / AT RISK (>5d)"]
 
     def test_needs_review(self):
-        pr = _pr(approval_count=0, approved_by=[], age_days=2.0, ci_status="none")
+        pr = _pr(approval_count=0, approved_by=[], age_days=2.0, ci_status="unknown")
         assert _groups({"prs": [pr]}) == ["NEEDS REVIEW (>1d)"]
 
     def test_in_review(self):
-        pr = _pr(approval_count=0, approved_by=[], age_days=0.5, ci_status="none")
+        pr = _pr(approval_count=0, approved_by=[], age_days=0.5, ci_status="unknown")
         assert _groups({"prs": [pr]}) == ["IN REVIEW"]
 
     def test_group_order_ci_failing_first(self):
         prs = [
-            _pr(id="1", approval_count=2, approved_by=["x", "y"], ci_status="success"),
-            _pr(id="2", approval_count=0, ci_status="failure"),
+            _pr(id="1", approval_count=2, approved_by=["x", "y"], ci_status="pass"),
+            _pr(id="2", approval_count=0, ci_status="fail"),
         ]
         groups = _groups({"prs": prs})
         assert groups.index("CI FAILING") < groups.index("READY TO MERGE")
@@ -111,7 +111,7 @@ class TestPrGrouping:
         """APPROVED — WAITING ON CI sorts after READY TO MERGE but before APPROVED (1 review)."""
         prs = [
             _pr(id="1", approval_count=2, approved_by=["x", "y"], ci_status="pending"),
-            _pr(id="2", approval_count=1, approved_by=["x"], ci_status="success"),
+            _pr(id="2", approval_count=1, approved_by=["x"], ci_status="pass"),
         ]
         groups = _groups({"prs": prs})
         assert groups.index("APPROVED — WAITING ON CI") < groups.index("APPROVED (1 review)")
@@ -123,12 +123,12 @@ class TestPrGrouping:
 
 class TestCiEmojiDisplay:
     def test_failure_emoji_in_line(self):
-        pr = _pr(ci_status="failure")
+        pr = _pr(ci_status="fail")
         lines = _lines({"prs": [pr]})
         assert any("❌" in line for line in lines)
 
     def test_success_emoji_in_line(self):
-        pr = _pr(ci_status="success")
+        pr = _pr(ci_status="pass")
         lines = _lines({"prs": [pr]})
         assert any("✅" in line for line in lines)
 
@@ -138,7 +138,7 @@ class TestCiEmojiDisplay:
         assert any("⏳" in line for line in lines)
 
     def test_no_emoji_when_ci_none(self):
-        pr = _pr(ci_status="none")
+        pr = _pr(ci_status="unknown")
         lines = _lines({"prs": [pr]})
         assert not any(line.startswith("✅") or line.startswith("❌") or line.startswith("⏳") for line in lines)
 
@@ -149,7 +149,7 @@ class TestCiEmojiDisplay:
 
 class TestApprovedByDisplay:
     def test_actual_names_shown(self):
-        pr = _pr(approval_count=2, approved_by=["Tim", "Shahzad"], ci_status="success")
+        pr = _pr(approval_count=2, approved_by=["Tim", "Shahzad"], ci_status="pass")
         blocks = build_pr_blocks("Test", {"prs": [pr]})
         field_texts = [
             f["text"]
@@ -159,7 +159,7 @@ class TestApprovedByDisplay:
         assert any("@Tim" in t and "@Shahzad" in t for t in field_texts)
 
     def test_no_synthetic_approved_string(self):
-        pr = _pr(approval_count=2, approved_by=["Tim", "Shahzad"], ci_status="success")
+        pr = _pr(approval_count=2, approved_by=["Tim", "Shahzad"], ci_status="pass")
         blocks = build_pr_blocks("Test", {"prs": [pr]})
         field_texts = " ".join(
             f["text"]
