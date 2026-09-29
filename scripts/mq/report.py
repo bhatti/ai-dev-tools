@@ -295,13 +295,13 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
         merge_batch_success,
     )
     total = len(prs)
-    failed_ci = sum(1 for p in prs if p.get("ci_status") == "failed")
+    failed_ci = sum(1 for p in prs if p.get("ci_status") == "fail")
     aged = sum(1 for p in prs if p.get("age_hours", 0) > 48)
     high_blast = sum(1 for p in prs if p.get("risk_tier", p.get("blast_radius")) == "high")
     medium_blast = sum(1 for p in prs if p.get("risk_tier", p.get("blast_radius")) == "medium")
     # CI data availability: BB bulk API never sets ci_status from actual pipeline runs.
-    # When ALL PRs show "none", treat CI as unavailable and use aged PRs as health proxy.
-    ci_available = any(p.get("ci_status") not in ("none", None, "") for p in prs)
+    # When ALL PRs show "unknown"/"none", treat CI as unavailable and use aged PRs as health proxy.
+    ci_available = any(p.get("ci_status") not in ("unknown", "none", None, "") for p in prs)
     defect_prob = (failed_ci / total if ci_available and total > 0 else 0.0)
     estimated_lanes = max(1, total // 10)
     avg_batch = round(total / estimated_lanes, 1)
@@ -1035,8 +1035,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sections.append("")
 
         # Detect CI unavailability: BB API does not return CI status in bulk PR list
-        all_ci = [p.get("ci_status", "none") for p in all_prs_flat]
-        ci_unavailable = all_ci and all(s == "none" for s in all_ci)
+        all_ci = [p.get("ci_status", "unknown") for p in all_prs_flat]
+        ci_unavailable = all_ci and all(s in ("unknown", "none") for s in all_ci)
 
         if ci_unavailable:
             sections.append(
@@ -1048,9 +1048,9 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         def _ci_cell(ci_status: str) -> str:
             if ci_unavailable:
                 return "N/A"
-            if ci_status == "success":
+            if ci_status == "pass":
                 return "✅"
-            if ci_status == "failed":
+            if ci_status == "fail":
                 return "❌"
             if ci_status == "pending":
                 return "⏳"
@@ -1089,12 +1089,12 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             return "—"
 
         def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
-            """Emit per-PR detail table + summary list for one risk tier."""
+            """Emit per-PR detail table for one risk tier."""
             sec.append("| Status | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |")
             sec.append("|--------|-----|-------|----------|------|-------|------|-----|-------|----|-----|-----------|--------|")
             for p in prs_in_tier:
                 pr_link = _pr_link(p)
-                title = (p.get("title") or "")[:50]
+                title = (p.get("title") or "")[:80]
                 cat = p.get("category", "unknown")
                 conf = p.get("category_confidence", "")
                 cat_cell = f"{cat}*" if conf not in ("file_path", "label", "") else cat
@@ -1117,9 +1117,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 loc_cell = f"{loc:,}" if loc else "—"
                 file_count = p.get("file_count", 0)
                 files_cell = str(file_count) if file_count else "—"
-                cx = p.get("complexity", "low")
-                cx_cell = _RISK_EMOJI.get(cx, "—")
-                ci_cell = _ci_cell(p.get("ci_status", "none"))
+                ci_cell = _ci_cell(p.get("ci_status", "unknown"))
                 age = _age_label(p.get("age_hours", 0))
                 approvals = p.get("approval_count", 0)
                 reviewers = p.get("reviewer_count", 0)
@@ -1128,29 +1126,10 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 status = _format_pr_status(p).split(" ", 1)[1] if " " in _format_pr_status(p) else _format_pr_status(p)
                 sec.append(
                     f"| {status} | {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
-                    f"| {risk_cell} | {loc_cell} | {files_cell} | {cx_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
+                    f"| {risk_cell} | {loc_cell} | {files_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                 )
-            sec.append("")
-            # Per-PR summary with full title + issue ref.
-            # Capped at 20 per tier to avoid overwhelming Slack for large queues.
-            _DETAIL_CAP = 20
-            sec.append("**PR details:**")
-            sec.append("")
-            for p in prs_in_tier[:_DETAIL_CAP]:
-                pr_link = _pr_link(p)
-                title = p.get("title", "")
-                cat = p.get("category", "unknown")
-                pt = p.get("pr_type", "unknown")
-                type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
-                issue_ref = p.get("issue_ref")
-                issue_part = ""
-                if issue_ref:
-                    key = issue_ref.get("key", "")
-                    url = issue_ref.get("url", "")
-                    issue_part = f" [{key}]({url})" if url else f" {key}"
-                sec.append(f"- {pr_link}{issue_part}: {title} — {cat} {type_emoji}")
-            if len(prs_in_tier) > _DETAIL_CAP:
-                sec.append(f"- _(+{len(prs_in_tier) - _DETAIL_CAP} more — use `--target-branch` to narrow scope)_")
+            if len(prs_in_tier) > 20:
+                sec.append(f"_+{len(prs_in_tier) - 20} more — use `--target-branch` to narrow scope_")
             sec.append("")
 
         # Group canonical lanes by branch for hierarchical display
@@ -1246,7 +1225,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                     loc_cell = f"{loc:,}" if loc else "—"
                     cx = p.get("complexity", "low")
                     cx_cell = _RISK_EMOJI.get(cx, "—")
-                    ci_cell = _ci_cell(p.get("ci_status", "none"))
+                    ci_cell = _ci_cell(p.get("ci_status", "unknown"))
                     age = _age_label(p.get("age_hours", 0))
                     approvals = p.get("approval_count", 0)
                     reviewers = p.get("reviewer_count", 0)

@@ -96,21 +96,21 @@ _CI_PENDING_STATES = frozenset({"IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "
 def _compute_gh_ci_status(rollup: list) -> str:
     """Compute overall CI status from a GitHub statusCheckRollup array.
 
-    Returns "success", "failure", "pending", or "none".
+    Returns canonical values: "pass", "fail", "pending", or "unknown".
     Checks are a mix of CheckRun (__typename=CheckRun, conclusion/status fields)
     and StatusContext (__typename=StatusContext, state field).
     """
     if not rollup:
-        return "none"
+        return "unknown"
     for c in rollup:
         s = (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
         if s in _CI_FAILURE_STATES:
-            return "failure"
+            return "fail"
     for c in rollup:
         s = (c.get("status") or c.get("state") or "").upper()
         if s in _CI_PENDING_STATES:
             return "pending"
-    return "success"
+    return "pass"
 
 
 def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:

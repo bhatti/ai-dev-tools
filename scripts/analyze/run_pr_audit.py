@@ -355,17 +355,28 @@ _PR_AUDIT_PROMPT_TEMPLATE = """\
 
 ## MANDATORY: PR State Gate — No exceptions
 
-Before writing ANY finding, check the PR's `state` field:
+Before writing ANY finding, check the PR's `state` field. State changes both the **severity floor** and the **language** you use.
 
-- **state=merged** — This PR LANDED in the codebase. Gaps here are real risks. Generate findings normally.
-- **state=open** — This PR is currently IN REVIEW. Frame as a current risk, not a historical failure.
+- **state=merged** — This PR LANDED in the codebase. Gaps here are real risks that already shipped.
+  Generate findings normally. Use past-tense or present-risk language: "shipped without review", "is currently in codebase".
+
+- **state=open** — This PR is **IN PROGRESS**. The author may still be implementing, the review process
+  is still running, and existing bot findings may not yet be acknowledged or resolved.
+  **Mandatory framing rules for open PRs:**
+  1. Prefix every finding title with `[OPEN PR]` so readers immediately know the risk has not landed yet.
+  2. Use future-tense or conditional language: "if merged as-is", "author should address before merge", "review should verify X before approving".
+  3. **Do NOT use language like "must resolve before merging" with the same urgency as merged risks** — that implies the finding is blocking, which is the reviewer's call, not yours.
+  4. Cap the severity of open PR findings at HIGH (never CRITICAL) UNLESS the finding represents a pattern seen across 3+ PRs. A single open PR with a serious issue is a review concern, not a systemic CRITICAL finding.
+  5. In the executive summary, clearly separate: "Already shipped (merged PRs)" from "In-flight concerns (open PRs)".
+
 - **state=declined** — This PR was REJECTED. The review process WORKED. **DO NOT generate "merged without review" or "scope explosion that landed" findings for declined PRs.** A declined bot-authored PR with zero reviewers is evidence the process caught an issue, not evidence of a gap. Only flag a declined PR if it had zero review activity AND zero comments before decline (pure rubber-stamp decline of a bad PR without any engagement).
 
 Violating this rule creates false positives that destroy audit credibility.
 
-## Merged PR Data
+## PR Data (merged, open, and declined)
 
 The following PR data has been pre-fetched from the issue tracker.
+PRs include all states — apply the state gate above before writing any finding.
 Use the PR data to identify patterns, then verify findings by examining the actual code.
 
 {pr_context}
@@ -534,10 +545,16 @@ Write these files using relative paths from the repo root (the `reports/` symlin
      - Lead with the most frequent gap: "X/{n_prs} PRs [specific problem]"
      - State the top gap type (team_skill / process / tooling) and impact type
      - Name the highest-severity finding with its PR count
-   - **Critical/High/Medium/Low findings**: every finding title includes PR count + IDs
+     - **If any findings are from open PRs, explicitly note:** "N finding(s) are from open PRs still in review — not yet shipped"
+   - **Findings structure — separate shipped from in-flight**:
+     - First section: **Shipped gaps (merged PRs)** — risks already in the codebase, highest urgency
+     - Second section: **In-flight concerns (open PRs)** — prefixed `[OPEN PR]`, lower urgency, conditional language
+     - Within each section: Critical/High/Medium/Low, every finding title includes PR count + IDs
      e.g. "## HIGH: Missing error handling in async paths (6/{n_prs} PRs: #123, #145, #167, #189, #201, #223)"
      Each finding must state: gap_type, impact_type, evidence (specific PRs + what was observed),
      and a concrete recommendation targeting that specific pattern
+     - Open PR findings use language like: "if merged as-is", "author should address", "review should verify"
+     - Open PR findings never use: "must resolve before merging" or escalation language implying you are blocking
    - **Skills Assessment** rating coding/review/testing/SRE/security/architecture as Strong/Developing/Gap
      with evidence: "Gap — PRs #34, #67, #89 all introduced SQL queries without parameterization"
    - **Recommended Skill Updates**: only for gaps seen in 3+ PRs. For each, state:
@@ -555,7 +572,7 @@ Write these files using relative paths from the repo root (the `reports/` symlin
     "spec_gap_count":N,"design_gap_count":N,"skill_gap_count":N,"practice_gap_count":N,
     "findings":[{{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"spec|design|skill|practice",
       "gap_type":"team_skill|process|tooling","impact_type":"blocks_delivery|slows_delivery|increases_risk",
-      "frequency":N,"pr_number":N,"prs":[N,M],"title":"...","evidence":"specific finding","recommendation":"specific action"}}],
+      "frequency":N,"pr_number":N,"prs":[N,M],"pr_state":"merged|open|declined","title":"...","evidence":"specific finding","recommendation":"specific action"}}],
     "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"gap_type":"team_skill|process|tooling","recommendation":"..."}}],
     "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}},
     "metrics":{{"spec_coverage_pct":0.0,"ci_catch_rate":0.0,"code_review_skill_catch_rate":0.0,

@@ -16,6 +16,7 @@ from pathlib import Path
 from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
 from scripts.common.issue_fetcher import get_jira_linked_prs
 from scripts.common.pr_classify import enrich_pr_with_metrics as _enrich_pr_with_metrics
+from scripts.common.pr_metadata import _size_bucket as _size_bucket_fn
 
 KNOWN_BOTS = {
     "github-actions[bot]", "dependabot[bot]", "renovate[bot]",
@@ -86,16 +87,7 @@ def write_issues_raw() -> None:
 
 def size_bucket(additions: int, deletions: int) -> str:
     """Classify PR size into a standard bucket based on total lines changed."""
-    loc = additions + deletions
-    if loc < 50:
-        return "xs"
-    if loc < 200:
-        return "s"
-    if loc < 500:
-        return "m"
-    if loc < 1000:
-        return "l"
-    return "xl"
+    return _size_bucket_fn(additions + deletions)
 
 
 def compute_pr_state_summary(prs: list[dict]) -> dict:

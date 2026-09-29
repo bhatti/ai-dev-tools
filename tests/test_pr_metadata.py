@@ -97,6 +97,12 @@ class TestComputePrAge:
         future = (datetime.now(tz=timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         assert compute_pr_age({"created_at": future}) == 0
 
+    def test_bb_microseconds_with_timezone_offset(self):
+        # Bitbucket returns "2026-09-15T08:30:00.000000+00:00" — strptime[:26] fails; fromisoformat handles it
+        created = (datetime.now(tz=timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
+        age = compute_pr_age({"created_at": created})
+        assert 6 <= age <= 8, f"Expected ~7 days for BB microsecond format, got {age}"
+
     def test_invalid_date_returns_zero(self):
         assert compute_pr_age({"created_at": "not-a-date"}) == 0
 

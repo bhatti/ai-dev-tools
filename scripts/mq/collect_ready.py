@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.pr_metadata import _BB_CI_MAP as _bb_ci_map
 from scripts.common.pr_classify import (
     SENSITIVE_PATHS,
     classify_pr_category as _classify_pr_category,
@@ -113,7 +114,7 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
         for pr in prs:
             meta = metadata.get(pr["pr_number"], {})
             if meta.get("build_status"):
-                pr["ci_status"] = meta["build_status"]
+                pr["ci_status"] = _bb_ci_map.get(meta["build_status"].lower(), "unknown")
             if meta.get("comment_count") is not None:
                 pr["comment_count"] = meta["comment_count"]
             if meta.get("approval_count") is not None:

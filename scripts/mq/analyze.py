@@ -57,7 +57,7 @@ The following files are in /workspace — read them directly:
   category (pre-computed: security/authn_authz/sre/data/api/ui/config/backend/unknown),
   category_confidence (file_path|label|title|unknown),
   pr_type (bug/feature/unknown), author, age_hours, branch, target_branch,
-  ci_status (success|failed|pending|none — NOTE: BB API returns 'none' for all PRs;
+  ci_status (pass|fail|pending|unknown — NOTE: BB API returns 'unknown' for all PRs;
              do NOT compute CI failure rates from BB data),
   has_approval, approval_count, reviewer_count,
   issue_ref ({"key":"FOO-123","url":"..."} or null),
@@ -100,7 +100,7 @@ and labels — do NOT re-derive them. Use them directly.
 
 For each lane:
 1. Use pre-computed blast_radius to count PRs per risk tier (low/medium/high)
-2. Flag PRs where ci_status='failed' OR blast_radius='high' as needing human review
+2. Flag PRs where ci_status='fail' OR blast_radius='high' as needing human review
 3. Check category and hotspots fields — flag any hotspot categories prominently
 4. Report oldest PR (highest age_hours) in each lane
 5. Group canonical lanes by target branch, count PRs and lanes per branch

@@ -27,12 +27,20 @@ def compute_pr_age(pr: dict) -> int:
     created_at = pr.get("created_at") or pr.get("createdAt") or pr.get("created") or ""
     if not created_at:
         return 0
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S+00:00", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(created_at[:26], fmt[:len(created_at[:26])])
+    # fromisoformat handles all ISO 8601 variants including microseconds and timezone offsets
+    # (e.g. "2026-09-15T08:30:00.000000+00:00" from Bitbucket)
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-            now = datetime.now(tz=timezone.utc)
-            return max(0, (now - dt).days)
+        return max(0, (datetime.now(tz=timezone.utc) - dt).days)
+    except (ValueError, TypeError):
+        pass
+    # Fallback for any non-ISO format edge cases
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(created_at, fmt)
+            return max(0, (datetime.now(tz=timezone.utc) - dt.replace(tzinfo=timezone.utc)).days)
         except (ValueError, TypeError):
             continue
     return 0

@@ -206,7 +206,7 @@ def _build_pr_entry_from_devstatus(pr: dict, issue: dict, config: dict) -> dict:
         "approved_by": approved_by,
         "changes_requested_by": [],
         "approval_count": len(approved_by),
-        "ci_status": "none",  # BB CI status requires per-commit lookup; deferred
+        "ci_status": "unknown",  # BB CI status requires per-commit lookup; deferred
     }
 
 
@@ -332,7 +332,7 @@ def _gather_jira(config: dict, workspace_dir: Path | None = None) -> dict:
             "approved_by": [],
             "changes_requested_by": [],
             "approval_count": 0,
-            "ci_status": "none",
+            "ci_status": "unknown",
         })
 
     print(
@@ -399,7 +399,7 @@ def _gather_github(config: dict) -> dict:
             "approved_by": approved_by,
             "changes_requested_by": changes_requested_by,
             "approval_count": pr.get("approval_count", len(approved_by) if approved_by else 0),
-            "ci_status": pr.get("ci_status", "none"),
+            "ci_status": pr.get("ci_status", "unknown"),
         })
 
     return {

@@ -362,32 +362,32 @@ def test_priority_and_labels_from_signals_json(mock_prs, tmp_path):
 
 class TestComputeGhCiStatus:
     def test_empty_rollup(self):
-        assert _compute_gh_ci_status([]) == "none"
+        assert _compute_gh_ci_status([]) == "unknown"
 
     def test_none_rollup(self):
-        assert _compute_gh_ci_status(None) == "none"  # type: ignore[arg-type]
+        assert _compute_gh_ci_status(None) == "unknown"  # type: ignore[arg-type]
 
     def test_all_success(self):
         rollup = [
             {"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED"},
             {"__typename": "StatusContext", "state": "SUCCESS"},
         ]
-        assert _compute_gh_ci_status(rollup) == "success"
+        assert _compute_gh_ci_status(rollup) == "pass"
 
     def test_any_failure_conclusion(self):
         rollup = [
             {"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED"},
             {"__typename": "CheckRun", "conclusion": "FAILURE", "status": "COMPLETED"},
         ]
-        assert _compute_gh_ci_status(rollup) == "failure"
+        assert _compute_gh_ci_status(rollup) == "fail"
 
     def test_status_context_error(self):
         rollup = [{"__typename": "StatusContext", "state": "ERROR"}]
-        assert _compute_gh_ci_status(rollup) == "failure"
+        assert _compute_gh_ci_status(rollup) == "fail"
 
     def test_action_required(self):
         rollup = [{"__typename": "CheckRun", "conclusion": "ACTION_REQUIRED", "status": "COMPLETED"}]
-        assert _compute_gh_ci_status(rollup) == "failure"
+        assert _compute_gh_ci_status(rollup) == "fail"
 
     def test_pending_no_failure(self):
         rollup = [
@@ -401,7 +401,7 @@ class TestComputeGhCiStatus:
             {"__typename": "CheckRun", "conclusion": None, "status": "IN_PROGRESS"},
             {"__typename": "CheckRun", "conclusion": "FAILURE", "status": "COMPLETED"},
         ]
-        assert _compute_gh_ci_status(rollup) == "failure"
+        assert _compute_gh_ci_status(rollup) == "fail"
 
     def test_queued_is_pending(self):
         rollup = [{"__typename": "CheckRun", "conclusion": None, "status": "QUEUED"}]
@@ -409,7 +409,7 @@ class TestComputeGhCiStatus:
 
     def test_neutral_counts_as_success(self):
         rollup = [{"__typename": "CheckRun", "conclusion": "NEUTRAL", "status": "COMPLETED"}]
-        assert _compute_gh_ci_status(rollup) == "success"
+        assert _compute_gh_ci_status(rollup) == "pass"
 
 
 # ---------------------------------------------------------------------------

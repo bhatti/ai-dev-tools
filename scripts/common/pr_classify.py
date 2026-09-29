@@ -722,8 +722,8 @@ def build_pr_metrics_table(prs: list[dict]) -> list[str]:
         pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
 
         title = (p.get("title") or "").replace("|", "\\|").replace("\n", " ")
-        if len(title) > 50:
-            title = title[:47] + "..."
+        if len(title) > 80:
+            title = title[:77] + "..."
 
         cat = p.get("category", "—")
         hotspot_prefix = "🔥 " if p.get("is_hotspot") else ""
