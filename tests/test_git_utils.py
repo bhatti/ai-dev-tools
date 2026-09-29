@@ -4,6 +4,9 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import subprocess
+import time
+
 from scripts.common.git_utils import (
     _git_env,
     _run_git,
@@ -13,6 +16,7 @@ from scripts.common.git_utils import (
     get_commit_count,
     make_branch_name,
     normalize_repo_web_url,
+    push_branch,
     resolve_clone_auth,
     sparse_clone_repo,
 )
@@ -405,3 +409,93 @@ class TestSparseCloneRepo:
             mock_run.return_value = MagicMock(returncode=128, stderr="fatal: not found")
             with pytest.raises(subprocess.CalledProcessError):
                 sparse_clone_repo("https://example.com/repo.git", dest)
+
+
+# ── push_branch ───────────────────────────────────────────────────────────────
+
+class TestPushBranch:
+    """push_branch: retry on transient errors, fail-fast on auth errors."""
+
+    def _make_run_result(self, returncode: int, stderr: str = "", stdout: str = ""):
+        return MagicMock(returncode=returncode, stderr=stderr, stdout=stdout)
+
+    def test_success_on_first_attempt(self, tmp_path):
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"):
+            mock_run.return_value = self._make_run_result(0)
+            push_branch(tmp_path, "ai/my-branch", force_with_lease=False)
+        assert mock_run.call_count == 1
+
+    def test_raises_immediately_on_auth_error(self, tmp_path):
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"), \
+             patch("scripts.common.git_utils.time") as mock_time:
+            mock_run.return_value = self._make_run_result(
+                128, stderr="remote: Invalid username or password"
+            )
+            with pytest.raises(subprocess.CalledProcessError):
+                push_branch(tmp_path, "ai/my-branch", force_with_lease=False, max_retries=3)
+        # auth error — should not sleep/retry
+        mock_time.sleep.assert_not_called()
+        assert mock_run.call_count == 1
+
+    def test_retries_on_gnutls_error_then_succeeds(self, tmp_path):
+        transient_result = self._make_run_result(
+            1, stderr="GnuTLS recv error (-9): Error decoding the received TLS packet"
+        )
+        success_result = self._make_run_result(0)
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"), \
+             patch("scripts.common.git_utils.time") as mock_time:
+            mock_run.side_effect = [transient_result, success_result]
+            push_branch(tmp_path, "ai/my-branch", force_with_lease=False, max_retries=3)
+        assert mock_run.call_count == 2
+        mock_time.sleep.assert_called_once_with(5)  # 5 * 3^0
+
+    def test_exhausts_retries_and_raises(self, tmp_path):
+        transient_result = self._make_run_result(1, stderr="GnuTLS recv error (-9): TLS packet")
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"), \
+             patch("scripts.common.git_utils.time") as mock_time:
+            mock_run.return_value = transient_result
+            with pytest.raises(subprocess.CalledProcessError):
+                push_branch(tmp_path, "ai/my-branch", force_with_lease=False, max_retries=2)
+        # max_retries=2 → 3 total attempts (0,1,2)
+        assert mock_run.call_count == 3
+        assert mock_time.sleep.call_count == 2
+        mock_time.sleep.assert_any_call(5)   # attempt 0 → 5*3^0
+        mock_time.sleep.assert_any_call(15)  # attempt 1 → 5*3^1
+
+    def test_set_upstream_on_no_upstream_error(self, tmp_path):
+        no_upstream = self._make_run_result(
+            128, stderr="The current branch ai/my-branch has no upstream branch"
+        )
+        success = self._make_run_result(0)
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"):
+            mock_run.side_effect = [no_upstream, success]
+            push_branch(tmp_path, "ai/my-branch", force_with_lease=False)
+        # second call must be the --set-upstream push
+        set_up_call = mock_run.call_args_list[1][0][0]
+        assert "--set-upstream" in set_up_call
+
+    def test_curl_timeout_is_transient(self, tmp_path):
+        """curl 28 (timeout) should trigger retry, not immediate failure."""
+        transient = self._make_run_result(1, stderr="curl 28 Operation timed out")
+        success = self._make_run_result(0)
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"), \
+             patch("scripts.common.git_utils.time"):
+            mock_run.side_effect = [transient, success]
+            push_branch(tmp_path, "ai/my-branch", force_with_lease=False, max_retries=1)
+        assert mock_run.call_count == 2
+
+    def test_rpc_failed_is_transient(self, tmp_path):
+        transient = self._make_run_result(1, stderr="error: RPC failed; curl 56 Recv failure")
+        success = self._make_run_result(0)
+        with patch("scripts.common.git_utils._run") as mock_run, \
+             patch("scripts.common.git_utils._run_git"), \
+             patch("scripts.common.git_utils.time"):
+            mock_run.side_effect = [transient, success]
+            push_branch(tmp_path, "ai/my-branch", force_with_lease=False, max_retries=1)
+        assert mock_run.call_count == 2

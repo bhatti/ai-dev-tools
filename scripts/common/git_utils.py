@@ -7,7 +7,25 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+_TRANSIENT_PUSH_ERRORS = (
+    "GnuTLS recv error",
+    "GnuTLS send error",
+    "TLS packet",
+    "SSL_read",
+    "SSL_connect",
+    "Connection reset by peer",
+    "Connection timed out",
+    "Could not resolve host",
+    "recv error",
+    "send error",
+    "error: RPC failed",
+    "curl 56",  # curl receive error
+    "curl 35",  # curl SSL error
+    "curl 28",  # curl timeout
+)
 
 
 def _run(cmd: list[str], cwd: Path | None = None, check: bool = True, env=None) -> subprocess.CompletedProcess:
@@ -240,11 +258,15 @@ def push_branch(
     http_token: str = "",
     http_username: str = "x-token-auth",
     url: str = "",
+    max_retries: int = 3,
 ) -> None:
-    """Push branch to origin.
+    """Push branch to origin with automatic retry on transient network errors.
 
     http_token/http_username/url: when provided, refreshes the stored remote URL
     before pushing so a rotated token is always current.
+    max_retries: number of additional attempts after the first failure (default 3).
+    Retries use exponential backoff: 5s, 15s, 45s.
+    Only retries on known transient network/TLS errors; auth failures raise immediately.
     """
     env = _git_env()
     if http_token and url:
@@ -256,14 +278,29 @@ def push_branch(
         # Shallow clones mark tracking refs stale even after explicit refspec fetches.
         # These branches are AI-owned (no human pushes), so --force is safe.
         cmd.append("--force")
-    result = _run(cmd, cwd=repo_path, check=False, env=env)
-    if result.returncode != 0:
+
+    for attempt in range(max_retries + 1):
+        result = _run(cmd, cwd=repo_path, check=False, env=env)
+        if result.returncode == 0:
+            return
         stderr = result.stderr + result.stdout
-        # Only fall back to set-upstream on first push (no tracking branch yet)
+        # Fall back to set-upstream on first push (no tracking branch yet)
         if "has no upstream branch" in stderr or "no upstream configured" in stderr:
             _run(["git", "push", "--set-upstream", "origin", branch], cwd=repo_path, env=env)
-        else:
-            raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+            return
+        exc = subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+        # Only retry on transient network/TLS errors; auth/permission errors fail fast
+        is_transient = any(pat in stderr for pat in _TRANSIENT_PUSH_ERRORS)
+        if not is_transient or attempt >= max_retries:
+            raise exc
+        delay = 5 * (3 ** attempt)  # 5s, 15s, 45s
+        print(
+            f"[git] push attempt {attempt + 1}/{max_retries} failed (transient): "
+            f"{stderr.strip()[:120]} — retrying in {delay}s",
+            file=sys.stderr, flush=True,
+        )
+        time.sleep(delay)
+
 
 
 def get_commit_count(repo_path: Path, base_branch: str = "main") -> int:

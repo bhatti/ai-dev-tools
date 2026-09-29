@@ -56,7 +56,7 @@ The following files are in /workspace — read them directly:
   pr_number, repo, title, scope, blast_radius (pre-computed from diffstat),
   category (pre-computed: security/authn_authz/sre/data/api/ui/config/backend/unknown),
   category_confidence (file_path|label|title|unknown),
-  pr_type (bug/feature/unknown), author, age_hours, branch, target_branch,
+  pr_type (bug/feature/refactor/chore/security/test/docs — "feature" is the fallback), author, age_hours, branch, target_branch,
   ci_status (pass|fail|pending|unknown — NOTE: BB API returns 'unknown' for all PRs;
              do NOT compute CI failure rates from BB data),
   has_approval, approval_count, reviewer_count,

@@ -507,15 +507,17 @@ def post_message(config: dict, text: str, channel: str | None = None,
 
 def upload_html_report(config: dict, html_content: str, filename: str,
                        thread_ts: str | None, task_type: str = "run",
-                       channel: str | None = None) -> bool:
-    """Upload HTML to Slack as a file; post an artifact fallback link on failure.
+                       channel: str | None = None,
+                       post_fallback: bool = True) -> bool:
+    """Upload HTML to Slack as a file; optionally post an artifact fallback link on failure.
 
     Called after the main Slack message is already posted.  `thread_ts` is the
     ts to reply to (the original thread or the new message's ts).
 
     Primary path: upload `html_content` as a Slack file (requires files:write scope).
-    Fallback when upload fails: post a direct formicary download link, or a by-job
-    artifact endpoint link as last resort.
+    Fallback when upload fails and `post_fallback=True`: post a by-job artifact link.
+    Set `post_fallback=False` when a downstream post task will post the link itself
+    (avoids duplicate links in the thread).
 
     Returns True if the HTML was uploaded or a fallback link was posted.
     """
@@ -545,7 +547,7 @@ def upload_html_report(config: dict, html_content: str, filename: str,
             except OSError:
                 pass
 
-    if not upload_ok:
+    if not upload_ok and post_fallback:
         # Always use the by-job URL — it extracts the HTML from the job's artifact zip.
         # The direct SHA256 upload path creates an orphaned artifact unrelated to the job.
         by_job_url, job_link = build_artifact_links(config, task_type, filename)
@@ -557,7 +559,7 @@ def upload_html_report(config: dict, html_content: str, filename: str,
             _post_message_ts(config, fallback_text, channel=channel, thread_ts=thread_ts)
         return bool(fallback_text)
 
-    return True
+    return upload_ok
 
 
 def post_report(config: dict, slack_text: str, md_text: str,

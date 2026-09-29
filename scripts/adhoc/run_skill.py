@@ -225,7 +225,7 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
             days = pr.get("age_days", 0)
             approved_by = pr.get("approved_by") or []
             pending_reviewers = pr.get("reviewers") or []
-            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "none"), "")
+            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "unknown"), "")
             priority = (pr.get("priority") or "").strip()
             priority_badge = PR_PRIORITY_EMOJI.get(priority.lower(), "")
 
@@ -617,13 +617,15 @@ def main(skill: str, prompt_text: str) -> None:
     logs_dir = workspace / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Override skill based on prompt intent before loading skill metadata.
+    # Install skills first so _KNOWN_SKILLS is populated before intent detection.
+    # _detect_intent checks _KNOWN_SKILLS to route "deep review <URL>" → ygs-review-deep;
+    # if skills aren't installed yet, the set is empty and it falls back to ygs-ask.
+    ensure_ygs_skills()
+
+    # Override skill based on prompt intent (e.g. "deep review <URL>" → ygs-review-deep).
     skill = _detect_intent(prompt_text, skill)
 
     print(f"[adhoc] skill={skill} prompt={prompt_text[:80]}...", flush=True)
-
-    # Ensure YGS skills are installed before attempting to load SKILL.md
-    ensure_ygs_skills()
     skill_md = _load_skill_md(skill)
     if skill_md:
         print(f"[adhoc] loaded SKILL.md for {skill} ({len(skill_md)} chars)", flush=True)
@@ -808,15 +810,19 @@ def main(skill: str, prompt_text: str) -> None:
     except Exception as _se:
         print(f"[adhoc] WARNING: Slack post failed (non-fatal): {_se}", flush=True)
 
-    # Upload HTML report (if written) as a Slack file and/or artifact link.
+    # Upload HTML report (if written) as a Slack file for inline preview.
+    # post_fallback=False because the ai-adhoc post task always adds the download link;
+    # posting the fallback here would create a duplicate link in the thread.
+    # The filename must match the actual file on disk ("report.html") so the artifact
+    # by-job URL resolves correctly if the post task ever uses this path.
     _html_report_path = workspace / "reports" / "report.html"
     if _html_report_path.exists():
         try:
             _thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
-            _report_filename = f"{skill.replace('ygs-', '')}_report.html"
             _html_content = _html_report_path.read_text(encoding="utf-8")
-            upload_html_report(config, _html_content, _report_filename,
-                               thread_ts=_thread_ts, task_type="run")
+            upload_html_report(config, _html_content, "report.html",
+                               thread_ts=_thread_ts, task_type="run",
+                               post_fallback=False)
         except Exception as _ue:
             print(f"[adhoc] WARNING: HTML report upload failed (non-fatal): {_ue}", flush=True)
 

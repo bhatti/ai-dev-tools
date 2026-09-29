@@ -5,7 +5,7 @@ pipelines all use the same taxonomy, formulas, and emoji constants.
 
 Public API
 ----------
-classify_pr_type        — bug / feature / refactor / chore / security / test / docs / unknown
+classify_pr_type        — bug / feature / refactor / chore / security / test / docs ("feature" is the fallback; "unknown" no longer emitted)
 classify_pr_category    — domain bucket (security, api, ui, …) with confidence level
 classify_pr_flags       — boolean flags: is_test_pr, is_wip_pr, is_docs_pr
 compute_risk_score      — multi-dimension risk model → score + tier
@@ -388,13 +388,16 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
     # Compound/specific test labels are definitive (e.g. "flaky-test", "qa", "e2e").
     if any(lbl.lower() in _TEST_EXACT_LABELS for lbl in labels):
         return "test"
+
+    # Compute once; reused for bare-"test" corroboration and title-keyword checks below.
+    search_text = f"{title} {jira_summary}".strip()
+
     # Bare "test" label requires title corroboration: Jira uses "test" as an issue type
     # for exploratory testing tasks unrelated to writing tests. Only classify as "test" when
     # the title/jira_summary also signals test work (e.g. "fix flaky assertion" → test, but
     # "Consider how... might be made fast" with Jira type "Test" → stays feature/bug).
     if any(lbl.lower() == "test" for lbl in labels):
-        search_text_corr = f"{title} {jira_summary}".strip()
-        if _TEST_TITLE_KEYWORDS.search(search_text_corr):
+        if _TEST_TITLE_KEYWORDS.search(search_text):
             return "test"
 
     cc_match = _CONVENTIONAL_COMMIT_RE.match(title)
@@ -402,7 +405,6 @@ def classify_pr_type(pr: dict, flags: dict[str, bool] | None = None) -> str:
         return _CONVENTIONAL_TYPE_MAP.get(cc_match.group(1).lower(), "feature")
 
     # Classify from combined title+jira_summary; test before bug so "[Flaky Test]" → test
-    search_text = f"{title} {jira_summary}".strip()
     if _DOCS_TITLE_KEYWORDS.search(search_text):
         return "docs"
     if _TEST_TITLE_KEYWORDS.search(search_text):
@@ -850,7 +852,7 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
     lines.append(f"| Blast Radius Distribution | {blast_val} | high≤10% | {blast_signal} | How broadly each PR affects the codebase |")
 
     # CI Pass Rate
-    ci_known = [p for p in prs if p.get("ci_status") not in ("unknown", None, "", "none")]
+    ci_known = [p for p in prs if p.get("ci_status") not in ("unknown", None, "")]
     if ci_known:
         ci_pass = sum(1 for p in ci_known if p.get("ci_status") == "pass")
         ci_pct = round(ci_pass / len(ci_known) * 100, 1)

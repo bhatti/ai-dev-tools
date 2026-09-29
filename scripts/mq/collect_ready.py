@@ -177,7 +177,7 @@ def _normalize_pr(pr: dict, default_repo: str) -> dict:
         author_login = str(author) or "unknown"
 
     # ci_status: gather_gh computes it; bb_helpers doesn't (no BB CI status API used)
-    ci_status = pr.get("ci_status", "none")
+    ci_status = pr.get("ci_status", "unknown")
 
     # approval: gather_gh has has_approval + approval_count; bb_helpers extracts from participants
     approval_count = pr.get("approval_count", 0)

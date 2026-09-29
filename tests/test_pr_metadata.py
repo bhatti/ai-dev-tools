@@ -190,6 +190,18 @@ class TestNormalizePr:
         pr = normalize_pr(_bb_raw(build_status="INPROGRESS"))
         assert pr["ci_status"] == "pending"
 
+    def test_bb_build_status_error_to_ci_fail(self):
+        pr = normalize_pr(_bb_raw(build_status="ERROR"))
+        assert pr["ci_status"] == "fail"
+
+    def test_bb_build_status_stopped_to_ci_unknown(self):
+        pr = normalize_pr(_bb_raw(build_status="STOPPED"))
+        assert pr["ci_status"] == "unknown"
+
+    def test_bb_build_status_none_to_ci_unknown(self):
+        pr = normalize_pr(_bb_raw(build_status="NONE"))
+        assert pr["ci_status"] == "unknown"
+
     def test_gh_check_state_success(self):
         pr = normalize_pr(_gh_raw(check_state="SUCCESS"))
         assert pr["ci_status"] == "pass"

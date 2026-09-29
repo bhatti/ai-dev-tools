@@ -73,7 +73,7 @@ class TestNormalizePr:
         result = _normalize_pr(pr, "ws/repo")
         assert result["pr_number"] == 99
         assert result["author"] == "bob"
-        assert result["ci_status"] == "none"
+        assert result["ci_status"] == "unknown"
         assert result["has_approval"] is False
         assert result["labels"] == []
 

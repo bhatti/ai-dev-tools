@@ -73,9 +73,9 @@ def format_pr_status(pr: dict) -> str:
 
 _BB_CI_MAP = {
     "successful": "pass", "success": "pass",
-    "failed": "fail", "failure": "fail",
+    "failed": "fail", "failure": "fail", "error": "fail",
     "inprogress": "pending", "pending": "pending",
-    "none": "unknown",
+    "stopped": "unknown", "none": "unknown",
 }
 _GH_CI_MAP = {
     "success": "pass",
@@ -195,7 +195,7 @@ def normalize_pr(raw_pr: dict, tracker: str = "github") -> dict:
     pr.setdefault("risk_tier", "low")
     pr.setdefault("complexity", "low")
     pr.setdefault("is_hotspot", False)
-    pr.setdefault("pr_type", "unknown")
+    pr.setdefault("pr_type", "feature")
 
     # --- Derived fields ---
     pr["age_days"] = compute_pr_age(pr)
