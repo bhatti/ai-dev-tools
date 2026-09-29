@@ -511,11 +511,11 @@ class TestDeploymentRiskSection:
         assert "Plateau of Misery" not in result
         assert "Degraded" not in result
 
-    def test_stale_pr_table_has_cat_column(self):
+    def test_stale_pr_table_has_status_column(self):
         prs = _make_prs(5, age_hours=400, is_hotspot=True)
         result = _valley_of_calm_section(prs)
-        assert "| PR | Title | Age | Cat | Risk | Author |" in result
-        assert "🔥" in result
+        # Stale PR table now uses canonical columns from build_stale_pr_table()
+        assert "| PR | Title | Author | Age | Status | Risk |" in result
 
 
 class TestRiskHeatmapHtml:

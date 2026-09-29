@@ -183,7 +183,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         return []
 
     fields = (
-        "number,title,body,author,mergedAt,url,headRefName,"
+        "number,title,body,author,createdAt,mergedAt,url,headRefName,"
         "comments,reviews,reviewDecision,labels,files"
     )
     has_jira_filter = any([
@@ -302,6 +302,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "title": rp.get("title", ""),
             "author": author,
             "state": "merged",  # bulk fetch always uses --state merged
+            "created_at": rp.get("createdAt", ""),
             "merged_at": rp.get("mergedAt", ""),
             "url": rp.get("url", ""),
             "branch": rp.get("headRefName", ""),
@@ -418,7 +419,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         print("[pr-fetch] GH_ORG/GH_REPO not set — cannot fetch single GH PR", file=sys.stderr, flush=True)
         return None
 
-    fields = "number,title,body,author,mergedAt,state,url,headRefName,comments,reviews,reviewDecision,labels,files"
+    fields = "number,title,body,author,createdAt,mergedAt,state,url,headRefName,comments,reviews,reviewDecision,labels,files"
     cmd = ["gh", "pr", "view", str(pr_number), "-R", f"{org}/{repo}", "--json", fields]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -478,6 +479,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         "title": rp.get("title", ""),
         "author": author,
         "state": state,
+        "created_at": rp.get("createdAt", ""),
         "merged_at": rp.get("mergedAt", ""),
         "url": rp.get("url", ""),
         "branch": rp.get("headRefName", ""),
@@ -618,6 +620,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
             "title": rp.get("title", ""),
             "author": author,
             "state": "merged",
+            "created_at": rp.get("created_on", ""),
             "merged_at": rp.get("updated_on", ""),
             "url": rp.get("links", {}).get("html", {}).get("href", ""),
             "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
@@ -769,6 +772,7 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
         "title": rp.get("title", ""),
         "author": author,
         "state": state,
+        "created_at": rp.get("created_on", ""),
         "merged_at": rp.get("updated_on", "") if is_merged else "",
         "url": rp.get("links", {}).get("html", {}).get("href", ""),
         "branch": rp.get("source", {}).get("branch", {}).get("name", ""),

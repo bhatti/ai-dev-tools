@@ -38,7 +38,7 @@ import click
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
-from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution, build_pr_metrics_table
+from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution, build_pr_metrics_table, build_metrics_dashboard, build_stale_pr_table
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.skills import apply_project_skills, inline_shared_refs
 from scripts.analyze.pr_fetcher import (
@@ -55,6 +55,10 @@ def _build_metrics_summary(prs: list[dict]) -> str:
     lines += build_category_breakdown(prs)
     lines += build_work_type_distribution(prs)
     lines += build_pr_metrics_table(prs)
+    lines += build_stale_pr_table(prs, threshold_days=7)
+    dashboard = build_metrics_dashboard(prs)
+    if dashboard:
+        lines.append(dashboard)
     return "\n".join(lines) if len(lines) > 2 else ""
 
 

@@ -174,6 +174,9 @@ _SCRIPTS_TO_COPY = [
     "scripts/common/setup_tracker.py",
     "scripts/common/text_utils.py",
     "scripts/common/pr_classify.py",
+    "scripts/common/pr_metadata.py",
+    "scripts/analyze/run_open_prs.py",
+    "scripts/analyze/post_open_prs.py",
     "scripts/mq/__init__.py",
     "scripts/mq/_shared.py",
     "scripts/mq/clone_pr.py",
@@ -4918,6 +4921,96 @@ def test_41_contract_artifact_handoff(base_env: dict[str, str]) -> TestResult:
 
 # ── test registry ──────────────────────────────────────────────────────────────
 
+def test_44_open_prs_gh(base_env: dict[str, str]) -> TestResult:
+    """Run open-prs pipeline against a public GitHub repo (no Claude).
+
+    Validates:
+      1. run_open_prs.py fetches open PRs and writes open_prs_report.md + open_prs_summary.json
+      2. Report contains the canonical PR table headers (Status | Category | Type | ...)
+      3. Metrics Dashboard section is present
+      4. post_open_prs.py runs without crashing (Slack not sent — no token in pod env)
+    """
+    result = TestResult("open-prs-gh")
+
+    env = dict(base_env)
+    ws = "/workspace/open_prs_gh"
+    env["WORKSPACE_DIR"] = ws
+    env["DEFAULT_TRACKER"] = "github"
+
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "formicary")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+    env.pop("SLACK_BOT_TOKEN", None)
+    env["TASK_TYPE"] = "open-prs"
+
+    with pod_fixture("open-prs-gh") as pod:
+        # 1. Run run_open_prs.py
+        run_step = exec_step(pod, "run-open-prs",
+                             "python3 -m scripts.analyze.run_open_prs",
+                             env, timeout=120)
+        result.steps.append(run_step)
+        if not run_step.ok:
+            # empty repo or no open PRs is acceptable — check stdout
+            if "0 open PR" in run_step.stdout or "No open PRs" in run_step.stdout:
+                return _pass(result, "no open PRs in repo — script exited cleanly")
+            return _fail(result, run_step,
+                         f"run_open_prs.py failed: {run_step.stderr[-400:]}")
+
+        # 2. Verify report files written
+        verify_files = exec_step(
+            pod, "verify-files",
+            f"python3 -c \""
+            f"import os, sys\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"md = os.path.join(ws, 'reports', 'open_prs_report.md')\n"
+            f"html = os.path.join(ws, 'reports', 'open_prs_report.html')\n"
+            f"summary = os.path.join(ws, 'reports', 'open_prs_summary.json')\n"
+            f"if not os.path.exists(md): issues.append('open_prs_report.md missing')\n"
+            f"if not os.path.exists(html): issues.append('open_prs_report.html missing')\n"
+            f"if not os.path.exists(summary): issues.append('open_prs_summary.json missing')\n"
+            f"if issues: print('FAIL: ' + ', '.join(issues)); sys.exit(1)\n"
+            f"print('OK: all report files written')\n\"",
+            env, timeout=15)
+        result.steps.append(verify_files)
+        if not verify_files.ok:
+            return _fail(result, verify_files, verify_files.stderr[-300:])
+
+        # 3. Verify report content — canonical headers and Metrics Dashboard
+        verify_content = exec_step(
+            pod, "verify-content",
+            f"python3 -c \""
+            f"import sys\n"
+            f"md = open('{ws}/reports/open_prs_report.md').read()\n"
+            f"issues = []\n"
+            f"if 'Open PR Dashboard' not in md: issues.append('missing dashboard heading')\n"
+            f"# Canonical columns present in header row\n"
+            f"for col in ['Category', 'Type', 'Blast', 'Risk', 'LOC', 'Files', 'CI', 'Age']:\n"
+            f"    if col not in md: issues.append(f'missing column: {{col}}')\n"
+            f"if 'Metrics Dashboard' not in md: issues.append('missing Metrics Dashboard section')\n"
+            f"if issues: print('FAIL: ' + ', '.join(issues)); sys.exit(1)\n"
+            f"print(f'OK: report has {{len(md)}} bytes, all required sections present')\n\"",
+            env, timeout=15)
+        result.steps.append(verify_content)
+        if not verify_content.ok:
+            return _fail(result, verify_content, verify_content.stderr[-300:])
+
+        # 4. Run post_open_prs.py (no Slack token — just verify it doesn't crash)
+        post_step = exec_step(pod, "post-open-prs",
+                              "python3 -m scripts.analyze.post_open_prs",
+                              env, timeout=30)
+        result.steps.append(post_step)
+        # Allow exit code 1 when Slack post fails (no token) but not import/crash errors
+        if not post_step.ok and "ImportError" in (post_step.stderr or ""):
+            return _fail(result, post_step, f"post_open_prs import error: {post_step.stderr[-300:]}")
+
+    content_info = verify_content.stdout.strip()
+    return _pass(result, f"open-prs pipeline OK — {content_info}")
+
+
 ALL_TESTS: dict[str, callable] = {
     "jira-query":            test_01_jira_query,
     "jira-analyze":          test_02_jira_analyze,
@@ -4962,6 +5055,7 @@ ALL_TESTS: dict[str, callable] = {
     "fuzz-sqli-detection":    test_39_fuzz_sqli_detection,
     "contract-volume-isolation": test_40_contract_volume_isolation,
     "contract-artifact-handoff": test_41_contract_artifact_handoff,
+    "open-prs-gh":               test_44_open_prs_gh,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

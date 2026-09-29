@@ -370,7 +370,9 @@ The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that list
 | `@bot standup` | Compact daily brief: board status, per-person status, risks, discussion | `ai-standup-jira` / `ai-standup-gh` |
 | `@bot risk` / `@bot risks` | Ranked sprint risks: stale work, PR bottlenecks, dependency chains | `ai-adhoc` (ygs-risk-scan) |
 | `@bot prs` | Open PRs grouped by reviewer status, sorted by age | `ai-adhoc` |
-| `@bot open prs` | Same as prs | `ai-adhoc` |
+| `@bot open-prs` | Full open-PR dashboard: per-PR metrics (Status/Category/Type/Blast/Risk/CI/Age), grouped by risk tier, stale PRs, category/type breakdown, metrics dashboard | `ai-open-prs` |
+| `@bot open prs` | Same as open-prs | `ai-open-prs` |
+| `@bot pr dashboard` | Same as open-prs | `ai-open-prs` |
 | `@bot review queue` | Same as prs | `ai-adhoc` |
 | `@bot pr comments <url>` | All comments, inline feedback, and open tasks for a PR | `ai-adhoc` |
 | `@bot pr feedback <url>` | Same as pr comments | `ai-adhoc` |
@@ -454,7 +456,24 @@ All scripts follow the standard pattern: Click CLI, `load_config(required=[...])
 
 ### Shared Classification (`scripts/common/pr_classify.py`)
 
-PR classification and risk scoring shared across MQ, PR-queue, and PR-audit pipelines. Provides a single taxonomy for PR type (feature/bug/security/...), category, blast radius, risk score/tier, complexity, and hotspot detection. All three pipelines call `enrich_pr_with_metrics(pr, files)` for consistent classification. Summary table builders (`build_category_breakdown`, `build_work_type_distribution`, `build_pr_metrics_table`) produce identical Markdown tables across reports.
+PR classification and risk scoring shared across MQ, PR-queue, PR-audit, open-prs, and all reporting pipelines. Provides a single taxonomy for PR type (feature/bug/security/...), category, blast radius, risk score/tier, complexity, and hotspot detection. All pipelines call `enrich_pr_with_metrics(pr, files)` for consistent classification.
+
+**Canonical report builders** produce identical Markdown tables across all workflows:
+- `build_pr_metrics_table(prs)` — columns: `Status | # | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues`
+- `build_metrics_dashboard(prs, extra_rows)` — portable Metrics Dashboard (CI pass rate, review coverage, rubber-stamp rate, stale PRs, hotspot count, avg age, + workflow-specific extra rows)
+- `build_stale_pr_table(prs, threshold_days)` — PRs older than N days, sorted by age
+- `build_category_breakdown(prs)`, `build_work_type_distribution(prs)` — category/type summaries
+- `build_open_pr_dashboard(prs)` — full open-PR dashboard grouped by risk tier
+
+### Canonical PR Normalization (`scripts/common/pr_metadata.py`)
+
+Single source of truth for PR object normalization. All workflows import from here to guarantee consistent field names and safe defaults regardless of tracker (GitHub or Bitbucket).
+
+- `normalize_pr(raw_pr, tracker)` — guarantees all fields with safe defaults
+- `enrich_pr_fast(pr, files)` — classification-only enrichment (no extra API calls; for gate-review/parallel-test where speed matters)
+- `enrich_pr_full(pr, files, config)` — full enrichment + CI status from Bitbucket API (for pr-audit and mq)
+- `compute_pr_age(pr)` — days since `created_at`; 0 if field missing
+- `format_pr_status(pr)` — `🟣 MERGED` / `🟢 OPEN` / `🟡 PENDING` / `🔵 WIP` / `🔴 DECLINED`
 
 ---
 

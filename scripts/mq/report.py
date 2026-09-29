@@ -257,8 +257,12 @@ from scripts.common.pr_classify import (
     HIGH_BLAST_CATEGORIES as _HIGH_BLAST_CATEGORIES,
     PR_TYPE_EMOJI as _PR_TYPE_EMOJI,
     RISK_EMOJI as _RISK_EMOJI,
+    _compute_pr_age_inline,
     build_category_breakdown as _build_category_breakdown_shared,
     build_work_type_distribution as _build_work_type_distribution_shared,
+    build_metrics_dashboard as _build_metrics_dashboard,
+    build_stale_pr_table as _build_stale_pr_table,
+    format_pr_status as _format_pr_status,
 )
 
 _RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]
@@ -419,38 +423,28 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
                          f"| ready to merge |")
         lines.append("")
 
-    # Stale / obsolete PR flagging — PRs older than 14 days pose decay risk
-    stale_14d = [p for p in prs if p.get("age_hours", 0) > 336]  # 14 days
-    stale_30d = [p for p in prs if p.get("age_hours", 0) > 720]  # 30 days
-    stale_60d = [p for p in prs if p.get("age_hours", 0) > 1440]  # 60 days
-    if stale_14d:
-        lines.append("### Stale PRs — Decay Risk")
-        lines.append("")
-        lines.append(f"**{len(stale_14d)}** PRs older than 14 days "
-                     f"({len(stale_30d)} >30d, {len(stale_60d)} >60d)")
-        lines.append("")
+    # Metrics Dashboard — consistent with pr-audit format
+    mq_extra_rows = [
+        ("Queue Depth", str(total), "≤20", "🟢" if total <= 20 else "🔴", "Total PRs in the merge queue"),
+    ]
+    if lanes:
+        mq_extra_rows.append(("Lane Count", str(len(lanes)), "—", "—", "Active merge queue lanes"))
+    lines.append(_build_metrics_dashboard(prs, extra_rows=mq_extra_rows))
+
+    # Stale / obsolete PR flagging — use shared builder (>14 days)
+    stale_lines = _build_stale_pr_table(prs, threshold_days=14)
+    if stale_lines:
+        stale_14d = [p for p in prs if _compute_pr_age_inline(p) > 14]
+        stale_30d = [p for p in prs if _compute_pr_age_inline(p) > 30]
+        stale_60d = [p for p in prs if _compute_pr_age_inline(p) > 60]
+        # Prepend count header with 30d/60d breakdown
         if stale_60d:
             lines.append("> 🔴 PRs open >60 days are likely obsolete — consider closing or rebasing.")
         elif stale_30d:
             lines.append("> 🟡 PRs open >30 days accumulate merge conflicts and may need rebase.")
-        else:
-            lines.append("> ℹ️ PRs open >14 days — verify they haven't gone stale.")
-        lines.append("")
-        lines.append("| PR | Title | Age | Cat | Risk | Author |")
-        lines.append("|-----|-------|-----|-----|------|--------|")
-        for p in sorted(stale_14d, key=lambda x: -x.get("age_hours", 0))[:15]:
-            pr_link = _pr_link(p)
-            title = p.get("title", "")[:50]
-            days = round(p.get("age_hours", 0) / 24)
-            risk_tier = p.get("risk_tier", "low")
-            risk_emoji = _RISK_EMOJI.get(risk_tier, "⚪")
-            author = p.get("author", "unknown")
-            cat = p.get("category", "—")
-            hotspot_prefix = "🔥 " if p.get("is_hotspot") else ""
-            lines.append(f"| {pr_link} | {title} | {days}d | {hotspot_prefix}{cat} | {risk_emoji} {risk_tier} | {author} |")
-        if len(stale_14d) > 15:
-            lines.append(f"| | _+{len(stale_14d) - 15} more stale PRs_ | | | |")
-        lines.append("")
+        if stale_30d or stale_60d:
+            lines.append("")
+        lines.extend(stale_lines)
 
     # Default to weekly-train when no profile explicitly configured
     profile_name = os.environ.get("DEPLOYMENT_PROFILE", "").strip() or "weekly-train"
@@ -1096,8 +1090,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
         def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
             """Emit per-PR detail table + summary list for one risk tier."""
-            sec.append("| PR | Title | Category | Type | Blast | Risk | LOC | Files | Cx | CI | Age | Reviewers | Issues |")
-            sec.append("|----|-------|----------|------|-------|------|-----|-------|----|-----|-----|-----------|--------|")
+            sec.append("| Status | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |")
+            sec.append("|--------|-----|-------|----------|------|-------|------|-----|-------|----|-----|-----------|--------|")
             for p in prs_in_tier:
                 pr_link = _pr_link(p)
                 title = (p.get("title") or "")[:50]
@@ -1131,8 +1125,9 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 reviewers = p.get("reviewer_count", 0)
                 rev_cell = _rev_cell(approvals, reviewers)
                 issue_cell = _issue_cell(p.get("issue_ref"))
+                status = _format_pr_status(p).split(" ", 1)[1] if " " in _format_pr_status(p) else _format_pr_status(p)
                 sec.append(
-                    f"| {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
+                    f"| {status} | {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
                     f"| {risk_cell} | {loc_cell} | {files_cell} | {cx_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
                 )
             sec.append("")

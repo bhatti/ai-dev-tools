@@ -38,6 +38,7 @@ WORKFLOW_YAMLS = [
     "ai-jira-review.yaml",
     "ai-standup-gh.yaml",
     "ai-codebase-audit.yaml",
+    "ai-open-prs.yaml",
 ]
 
 

@@ -22,6 +22,16 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter
+from datetime import datetime, timezone
+
+# Shared helpers re-exported from pr_metadata (single source of truth).
+# Import here at module level — no circular risk since pr_metadata imports
+# pr_classify only lazily inside function bodies (enrich_pr_fast, enrich_pr_full).
+from scripts.common.pr_metadata import (
+    compute_pr_age as _compute_pr_age_base,
+    format_pr_status,  # noqa: F401 — re-exported; callers import from pr_classify
+    _size_bucket as _size_bucket_fn,
+)
 
 # ---------------------------------------------------------------------------
 # Sensitive-path detection (moved from _shared.py — generic, not MQ-specific)
@@ -674,10 +684,26 @@ def build_work_type_distribution(prs: list[dict]) -> list[str]:
     return lines
 
 
+def _compute_pr_age_inline(pr: dict) -> int:
+    """Days since created_at; falls back to age_hours for MQ PRs that lack created_at."""
+    age = _compute_pr_age_base(pr)
+    if age == 0:
+        age_hours = pr.get("age_hours", 0)
+        return int(age_hours / 24) if age_hours else 0
+    return age
+
+
+def _ci_emoji(ci_status: str) -> str:
+    return {"pass": "✅", "fail": "❌", "pending": "⏳"}.get(ci_status, "-")
+
+
 def build_pr_metrics_table(prs: list[dict]) -> list[str]:
-    """Build per-PR metrics table with link, issue, title, and risk columns.
+    """Build per-PR metrics table with canonical column set.
+
+    Columns: Status | # | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues
 
     Sorted by risk_score descending so highest-risk PRs appear first.
+    Backward-compatible: missing fields (ci_status, age_days, reviewer_count) use safe defaults.
     """
     if not prs:
         return []
@@ -687,20 +713,14 @@ def build_pr_metrics_table(prs: list[dict]) -> list[str]:
     lines: list[str] = [
         "### Per-PR Metrics",
         "",
-        "| # | PR | Issue | Author | Title | Cat | Type | Blast | Risk | LOC | Files | Cx |",
-        "|---|-----|-------|--------|-------|-----|------|-------|------|-----|-------|-----|",
+        "| Status | # | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |",
+        "|--------|---|-----|-------|----------|------|-------|------|-----|-------|-----|-----|-----------|--------|",
     ]
     for idx, p in enumerate(sorted_prs, 1):
         pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
         pr_url = p.get("url", "")
         pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
 
-        linked = p.get("linked_issue") or {}
-        issue_key = linked.get("key", "")
-        issue_url = linked.get("url", "")
-        issue_cell = f"[{issue_key}]({issue_url})" if issue_url and issue_key else (issue_key or "—")
-
-        author = p.get("author", "—")
         title = (p.get("title") or "").replace("|", "\\|").replace("\n", " ")
         if len(title) > 50:
             title = title[:47] + "..."
@@ -716,16 +736,224 @@ def build_pr_metrics_table(prs: list[dict]) -> list[str]:
         risk_emoji = RISK_EMOJI.get(risk_tier, "")
         loc = p.get("total_loc", 0)
         files = p.get("file_count", 0)
-        cx = p.get("complexity", "—")
-        cx_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(cx, "")
+
+        # New columns — safe defaults for backward compatibility
+        ci_status = p.get("ci_status", "unknown")
+        ci_cell = _ci_emoji(ci_status)
+        age_days = p.get("age_days") if p.get("age_days") is not None else _compute_pr_age_inline(p)
+        age_cell = f"{age_days}d" if age_days else "—"
+        reviewer_count = p.get("reviewer_count", len(p.get("reviewers") or []))
+        rev_cell = str(reviewer_count) if reviewer_count else "—"
+        linked = p.get("linked_issue") or {}
+        issue_key = linked.get("key", "") if isinstance(linked, dict) else str(linked)
+        issue_url = linked.get("url", "") if isinstance(linked, dict) else ""
+        issue_cell = f"[{issue_key}]({issue_url})" if issue_url and issue_key else (issue_key or "—")
+
+        status = format_pr_status(p)
+        # Short form for table (strip emoji but keep text)
+        status_short = status.split(" ", 1)[1] if " " in status else status
+
         lines.append(
-            f"| {idx} | {pr_cell} | {issue_cell} | {author} | {title} "
+            f"| {status_short} | {idx} | {pr_cell} | {title} "
             f"| {cat_cell} | {type_emoji} {pr_type} "
             f"| {blast} | {risk_emoji} {risk_score:.0f} | {loc:,} | {files} "
-            f"| {cx_emoji} {cx} |"
+            f"| {ci_cell} | {age_cell} | {rev_cell} | {issue_cell} |"
         )
     lines.append("")
     return lines
+
+
+def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> str:
+    """Build a portable Metrics Dashboard markdown table.
+
+    Standard rows are computed from the PR list. Workflow-specific rows
+    can be appended via extra_rows: list of (metric, value, benchmark, signal, description) tuples.
+
+    Returns an empty string when prs is empty.
+    """
+    if not prs:
+        return ""
+
+    total = len(prs)
+    lines: list[str] = [
+        "### Metrics Dashboard",
+        "",
+        "| Metric | Value | Benchmark | Signal | Description |",
+        "|--------|-------|-----------|--------|-------------|",
+    ]
+
+    # PR State Breakdown
+    merged = sum(1 for p in prs if p.get("merged_at") or p.get("state", "").lower() == "merged")
+    open_count = sum(1 for p in prs if p.get("state", "").lower() in ("open", "") and not p.get("merged_at"))
+    pending = sum(1 for p in prs if not p.get("has_substantive_review") and p.get("state", "").lower() == "open")
+    wip = sum(1 for p in prs if p.get("is_wip_pr"))
+    declined = sum(1 for p in prs if p.get("state", "").lower() in ("declined", "closed") and not p.get("merged_at"))
+    state_val = f"merged={merged} open={open_count} pending={pending} wip={wip} declined={declined} total={total}"
+    lines.append(f"| PR State Breakdown | {state_val} | — | — | State distribution across the batch. Declined PRs excluded from gap-rate denominators. |")
+
+    # Avg PR Size
+    locs = [p.get("total_loc", p.get("additions", 0) + p.get("deletions", 0)) for p in prs]
+    avg_loc = round(sum(locs) / total) if total else 0
+    loc_signal = "🟢" if avg_loc < 300 else ("🟡" if avg_loc < 700 else "🔴")
+    lines.append(f"| Avg PR Size | {avg_loc} LOC | <300 | {loc_signal} | Mean additions+deletions per PR |")
+
+    # Size Distribution
+    size_counts: dict[str, int] = {"xs": 0, "s": 0, "m": 0, "l": 0, "xl": 0}
+    for p in prs:
+        bucket = p.get("size_bucket", "")
+        if not bucket:
+            loc = p.get("total_loc", p.get("additions", 0) + p.get("deletions", 0))
+            bucket = _size_bucket_fn(loc)
+        size_counts[bucket] = size_counts.get(bucket, 0) + 1
+    size_val = " ".join(f"{k}={v}" for k, v in size_counts.items() if v > 0)
+    lines.append(f"| Size Distribution | {size_val} | — | — | PR size buckets: xs<50 s<200 m<500 l<1000 xl≥1000 LOC |")
+
+    # Blast Radius Distribution
+    blast_counts: dict[str, int] = Counter(p.get("blast_radius", "low") for p in prs)
+    blast_val = f"low={blast_counts.get('low', 0)} medium={blast_counts.get('medium', 0)} high={blast_counts.get('high', 0)}"
+    critical_count = blast_counts.get("critical", 0)
+    if critical_count:
+        blast_val += f" critical={critical_count}"
+    blast_signal = "🟢" if blast_counts.get("high", 0) + critical_count <= total * 0.1 else "🟡" if blast_counts.get("high", 0) + critical_count <= total * 0.3 else "🔴"
+    lines.append(f"| Blast Radius Distribution | {blast_val} | high≤10% | {blast_signal} | How broadly each PR affects the codebase |")
+
+    # CI Pass Rate
+    ci_known = [p for p in prs if p.get("ci_status") not in ("unknown", None, "", "none")]
+    if ci_known:
+        ci_pass = sum(1 for p in ci_known if p.get("ci_status") == "pass")
+        ci_pct = round(ci_pass / len(ci_known) * 100, 1)
+        ci_signal = "🟢" if ci_pct >= 90 else ("🟡" if ci_pct >= 75 else "🔴")
+        lines.append(f"| CI Pass Rate | {ci_pass}/{len(ci_known)} ({ci_pct}%) | ≥90% | {ci_signal} | Fraction of PRs where all CI checks passed |")
+    else:
+        lines.append(f"| CI Pass Rate | N/A | ≥90% | — | CI status not available from bulk API |")
+
+    # Review Coverage
+    reviewable = [p for p in prs if not p.get("is_bot_authored") and p.get("state", "").lower() != "declined"]
+    if reviewable:
+        substantive = sum(1 for p in reviewable if p.get("has_substantive_review"))
+        cov_pct = round(substantive / len(reviewable) * 100, 1)
+        cov_signal = "🟢" if cov_pct >= 80 else ("🟡" if cov_pct >= 60 else "🔴")
+        lines.append(f"| Review Coverage | {substantive}/{len(reviewable)} ({cov_pct}%) | ≥80% | {cov_signal} | PRs with at least one substantive human review |")
+
+    # Rubber-Stamp Rate
+    approved_prs = [p for p in prs if p.get("approvers") or p.get("review_decision") == "APPROVED"]
+    if approved_prs:
+        rubber_stamp = sum(1 for p in approved_prs if p.get("rubber_stamp_approvers"))
+        rs_pct = round(rubber_stamp / len(approved_prs) * 100, 1)
+        rs_signal = "🟢" if rs_pct <= 10 else ("🟡" if rs_pct <= 30 else "🔴")
+        lines.append(f"| Rubber-Stamp Rate | {rubber_stamp}/{len(approved_prs)} ({rs_pct}%) | ≤10% | {rs_signal} | Approvals with zero substantive review comments |")
+
+    # Stale PRs
+    stale = sum(1 for p in prs if _compute_pr_age_inline(p) > 7)
+    stale_signal = "🟢" if stale == 0 else ("🟡" if stale <= total * 0.2 else "🔴")
+    lines.append(f"| Stale PRs (>7d) | {stale}/{total} | 0 | {stale_signal} | PRs open longer than 7 days |")
+
+    # Hotspot Count
+    hotspots = sum(1 for p in prs if p.get("is_hotspot"))
+    hotspot_signal = "🟢" if hotspots == 0 else ("🟡" if hotspots <= 2 else "🔴")
+    lines.append(f"| Hotspot Count | {hotspots}/{total} | 0 | {hotspot_signal} | PRs touching sensitive paths (auth/billing/crypto) |")
+
+    # Avg Age
+    ages = [_compute_pr_age_inline(p) for p in prs]
+    avg_age = round(sum(ages) / total) if total else 0
+    age_signal = "🟢" if avg_age <= 3 else ("🟡" if avg_age <= 7 else "🔴")
+    lines.append(f"| Avg Age | {avg_age}d | ≤3d | {age_signal} | Mean days since PR was opened |")
+
+    # Workflow-specific extra rows
+    if extra_rows:
+        for row in extra_rows:
+            if len(row) >= 5:
+                metric, value, benchmark, signal, description = row[0], row[1], row[2], row[3], row[4]
+                lines.append(f"| {metric} | {value} | {benchmark} | {signal} | {description} |")
+            elif len(row) == 4:
+                lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | |")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:
+    """Build a markdown table of PRs older than threshold_days.
+
+    Columns: PR | Title | Author | Age | Status | Risk
+    Sorted by age descending (oldest first).
+    """
+    stale = [p for p in prs if _compute_pr_age_inline(p) > threshold_days]
+    if not stale:
+        return []
+
+    stale_sorted = sorted(stale, key=lambda p: -_compute_pr_age_inline(p))
+
+    lines: list[str] = [
+        f"### Stale PRs (>{threshold_days}d)",
+        "",
+        f"**{len(stale)}** PR{'s' if len(stale) != 1 else ''} older than {threshold_days} days",
+        "",
+        "| PR | Title | Author | Age | Status | Risk |",
+        "|----|-------|--------|-----|--------|------|",
+    ]
+    for p in stale_sorted[:20]:
+        pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
+        pr_url = p.get("url", "")
+        pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
+        title = (p.get("title") or "")[:50]
+        author = p.get("author", "—")
+        age_days = _compute_pr_age_inline(p)
+        age_emoji = "⛔ " if age_days >= 60 else ("🔴 " if age_days >= 30 else ("🟡 " if age_days >= 14 else ""))
+        age_cell = f"{age_emoji}{age_days}d"
+        _status_full = format_pr_status(p)
+        status = _status_full.split(" ", 1)[1] if " " in _status_full else _status_full
+        risk_tier = p.get("risk_tier", "low")
+        risk_emoji = RISK_EMOJI.get(risk_tier, "")
+        lines.append(f"| {pr_cell} | {title} | {author} | {age_cell} | {status} | {risk_emoji} {risk_tier} |")
+
+    if len(stale) > 20:
+        lines.append(f"| | _+{len(stale) - 20} more stale PRs_ | | | | |")
+    lines.append("")
+    return lines
+
+
+def build_open_pr_dashboard(prs: list[dict]) -> str:
+    """Full open-PR dashboard grouped by risk tier.
+
+    Sections:
+    - HIGH risk group (pr_metrics_table)
+    - MEDIUM risk group
+    - LOW risk group
+    - Stale PRs (>7d)
+    - Category Breakdown
+    - Work Type Distribution
+    - Metrics Dashboard
+    """
+    if not prs:
+        return "_No open PRs found._\n"
+
+    lines: list[str] = []
+
+    # Group by risk tier
+    high = [p for p in prs if p.get("risk_tier") == "high"]
+    medium = [p for p in prs if p.get("risk_tier") == "medium"]
+    low = [p for p in prs if p.get("risk_tier") not in ("high", "medium")]
+
+    if high:
+        lines.append(f"## 🔴 High Risk ({len(high)} PRs)")
+        lines.append("")
+        lines.extend(build_pr_metrics_table(high))
+    if medium:
+        lines.append(f"## 🟡 Medium Risk ({len(medium)} PRs)")
+        lines.append("")
+        lines.extend(build_pr_metrics_table(medium))
+    if low:
+        lines.append(f"## 🟢 Low Risk ({len(low)} PRs)")
+        lines.append("")
+        lines.extend(build_pr_metrics_table(low))
+
+    lines.extend(build_stale_pr_table(prs, threshold_days=7))
+    lines.extend(build_category_breakdown(prs))
+    lines.extend(build_work_type_distribution(prs))
+    lines.append(build_metrics_dashboard(prs))
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

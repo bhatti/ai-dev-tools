@@ -12,7 +12,10 @@ from scripts.common.pr_classify import (
     RISK_EMOJI,
     apply_blast_cap,
     build_category_breakdown,
+    build_metrics_dashboard,
+    build_open_pr_dashboard,
     build_pr_metrics_table,
+    build_stale_pr_table,
     build_work_type_distribution,
     classify_pr_category,
     classify_pr_flags,
@@ -22,6 +25,7 @@ from scripts.common.pr_classify import (
     compute_risk_score,
     enrich_pr_with_metrics,
     extract_issue_ref,
+    format_pr_status,
     is_test_file,
 )
 
@@ -632,9 +636,9 @@ class TestBuildPrMetricsTable:
                 "complexity": "low", "is_hotspot": False}]
         lines = build_pr_metrics_table(prs)
         header = lines[2]
-        for col in ["PR", "Issue", "Author", "Title", "Cat", "Type", "Blast", "Risk", "LOC", "Files", "Cx"]:
+        for col in ["Status", "PR", "Title", "Category", "Type", "Blast", "Risk", "LOC", "Files", "CI", "Age", "Reviewers", "Issues"]:
             assert col in header, f"Missing column: {col}"
-        assert "Hotspot" not in header, "Hotspot is shown as 🔥 prefix on Cat, not a separate column"
+        assert "Hotspot" not in header, "Hotspot is shown as 🔥 prefix on Category, not a separate column"
 
     def test_missing_fields_graceful(self):
         prs = [{"pr_number": 99}]
@@ -664,3 +668,265 @@ class TestAnnotateEmoji:
         html = render_simple_html("Test", "| Risk |\n|------|\n| 🔴 high |")
         assert 'title="High"' in html
         assert "🔴" in html
+
+
+# ---------------------------------------------------------------------------
+# format_pr_status — status label derivation
+# ---------------------------------------------------------------------------
+
+class TestFormatPrStatus:
+    def test_merged(self):
+        pr = {"merged_at": "2026-01-01T00:00:00Z", "state": "merged"}
+        assert format_pr_status(pr) == "🟣 MERGED"
+
+    def test_merged_via_state_only(self):
+        pr = {"state": "merged", "merged_at": None}
+        assert format_pr_status(pr) == "🟣 MERGED"
+
+    def test_declined(self):
+        pr = {"state": "declined", "merged_at": None}
+        assert format_pr_status(pr) == "🔴 DECLINED"
+
+    def test_closed_without_merge_is_declined(self):
+        pr = {"state": "closed", "merged_at": None}
+        assert format_pr_status(pr) == "🔴 DECLINED"
+
+    def test_wip(self):
+        pr = {"state": "open", "is_wip_pr": True, "merged_at": None}
+        assert format_pr_status(pr) == "🔵 WIP"
+
+    def test_pending_no_substantive_review(self):
+        pr = {"state": "open", "has_substantive_review": False, "merged_at": None}
+        assert format_pr_status(pr) == "🟡 PENDING"
+
+    def test_open_with_substantive_review(self):
+        pr = {"state": "open", "has_substantive_review": True, "merged_at": None}
+        assert format_pr_status(pr) == "🟢 OPEN"
+
+    def test_empty_dict_defaults_to_pending(self):
+        assert format_pr_status({}) == "🟡 PENDING"
+
+
+# ---------------------------------------------------------------------------
+# build_metrics_dashboard — portable metrics table
+# ---------------------------------------------------------------------------
+
+class TestBuildMetricsDashboard:
+    def _pr(self, **kw):
+        defaults = {
+            "state": "open", "merged_at": None,
+            "total_loc": 100, "additions": 60, "deletions": 40,
+            "size_bucket": "s", "blast_radius": "low",
+            "ci_status": "pass", "has_substantive_review": True,
+            "is_bot_authored": False, "rubber_stamp_approvers": [],
+            "approvers": ["alice"], "is_hotspot": False,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        defaults.update(kw)
+        return defaults
+
+    def test_empty_returns_empty_string(self):
+        assert build_metrics_dashboard([]) == ""
+
+    def test_returns_markdown_table(self):
+        prs = [self._pr()]
+        result = build_metrics_dashboard(prs)
+        assert "### Metrics Dashboard" in result
+        assert "| Metric | Value |" in result
+        assert "PR State Breakdown" in result
+
+    def test_standard_rows_present(self):
+        prs = [self._pr(), self._pr(state="open", merged_at="2026-02-01T00:00:00Z")]
+        result = build_metrics_dashboard(prs)
+        for row in ["PR State Breakdown", "Avg PR Size", "Size Distribution",
+                    "Blast Radius Distribution", "Review Coverage", "Stale PRs", "Hotspot Count", "Avg Age"]:
+            assert row in result, f"Missing row: {row}"
+
+    def test_ci_pass_rate_shown_when_known(self):
+        prs = [self._pr(ci_status="pass"), self._pr(ci_status="fail")]
+        result = build_metrics_dashboard(prs)
+        assert "CI Pass Rate" in result
+        assert "50.0%" in result
+
+    def test_ci_pass_rate_na_when_all_unknown(self):
+        prs = [self._pr(ci_status="unknown"), self._pr(ci_status="")]
+        result = build_metrics_dashboard(prs)
+        assert "N/A" in result
+
+    def test_extra_rows_appended(self):
+        prs = [self._pr()]
+        extra = [("Queue Depth", "5", "≤20", "🟢", "Total PRs waiting")]
+        result = build_metrics_dashboard(prs, extra_rows=extra)
+        assert "Queue Depth" in result
+        assert "Total PRs waiting" in result
+
+    def test_merged_counted_correctly(self):
+        prs = [
+            self._pr(merged_at="2026-01-01T00:00:00Z"),
+            self._pr(merged_at=None, state="open"),
+            self._pr(merged_at=None, state="declined"),
+        ]
+        result = build_metrics_dashboard(prs)
+        assert "merged=1" in result
+        assert "declined=1" in result
+
+
+# ---------------------------------------------------------------------------
+# build_stale_pr_table — stale PR detection
+# ---------------------------------------------------------------------------
+
+class TestBuildStalePrTable:
+    def _pr(self, age_hours=0, **kw):
+        pr = {"pr_number": 1, "title": "some pr", "author": "alice",
+              "risk_tier": "low", "state": "open", "merged_at": None,
+              "age_hours": age_hours}
+        pr.update(kw)
+        return pr
+
+    def test_empty_when_no_stale_prs(self):
+        prs = [self._pr(age_hours=24)]  # 1 day — not stale
+        result = build_stale_pr_table(prs, threshold_days=7)
+        assert result == []
+
+    def test_stale_prs_shown(self):
+        prs = [self._pr(age_hours=8 * 24)]  # 8 days — stale
+        lines = build_stale_pr_table(prs, threshold_days=7)
+        text = "\n".join(lines)
+        assert "Stale PRs" in text
+        assert "8d" in text
+
+    def test_sorted_oldest_first(self):
+        prs = [
+            self._pr(age_hours=10 * 24, pr_number=10),  # 10 days
+            self._pr(age_hours=20 * 24, pr_number=20),  # 20 days
+        ]
+        lines = build_stale_pr_table(prs, threshold_days=7)
+        text = "\n".join(lines)
+        assert text.index("#20") < text.index("#10"), "Oldest PR should appear first"
+
+    def test_custom_threshold(self):
+        prs = [self._pr(age_hours=3 * 24)]  # 3 days
+        assert build_stale_pr_table(prs, threshold_days=2) != []  # stale at 2d threshold
+        assert build_stale_pr_table(prs, threshold_days=4) == []  # not stale at 4d threshold
+
+
+# ---------------------------------------------------------------------------
+# build_open_pr_dashboard — full open PR dashboard
+# ---------------------------------------------------------------------------
+
+class TestBuildOpenPrDashboard:
+    def _enriched_pr(self, risk_tier="low", **kw):
+        pr = {"pr_number": 1, "title": "test pr", "author": "alice",
+              "state": "open", "merged_at": None,
+              "risk_tier": risk_tier, "risk_score": 10.0,
+              "blast_radius": "low", "category": "backend", "pr_type": "feature",
+              "total_loc": 100, "file_count": 3, "is_hotspot": False,
+              "ci_status": "pass", "has_substantive_review": True,
+              "reviewer_count": 1, "linked_issue": None,
+              "is_bot_authored": False, "rubber_stamp_approvers": [],
+              "approvers": ["alice"], "age_hours": 0}
+        pr.update(kw)
+        return pr
+
+    def test_no_prs_returns_placeholder(self):
+        result = build_open_pr_dashboard([])
+        assert "No open PRs" in result
+
+    def test_groups_by_risk_tier(self):
+        prs = [
+            self._enriched_pr(risk_tier="high", pr_number=1),
+            self._enriched_pr(risk_tier="medium", pr_number=2),
+            self._enriched_pr(risk_tier="low", pr_number=3),
+        ]
+        result = build_open_pr_dashboard(prs)
+        assert "High Risk" in result
+        assert "Medium Risk" in result
+        assert "Low Risk" in result
+        assert result.index("High Risk") < result.index("Medium Risk") < result.index("Low Risk")
+
+    def test_includes_metrics_dashboard(self):
+        prs = [self._enriched_pr()]
+        result = build_open_pr_dashboard(prs)
+        assert "Metrics Dashboard" in result
+
+    def test_high_risk_section_only_when_present(self):
+        prs = [self._enriched_pr(risk_tier="low")]
+        result = build_open_pr_dashboard(prs)
+        assert "High Risk" not in result
+        assert "Low Risk" in result
+
+
+# ---------------------------------------------------------------------------
+# New columns in build_pr_metrics_table — CI / Age / Reviewers / Issues
+# ---------------------------------------------------------------------------
+
+class TestPrMetricsTableNewColumns:
+    def _pr(self, **kw):
+        defaults = {
+            "pr_number": 7, "title": "Add feature", "author": "carol",
+            "category": "api", "pr_type": "feature",
+            "blast_radius": "medium", "risk_score": 20.0, "risk_tier": "medium",
+            "total_loc": 200, "file_count": 8, "is_hotspot": False,
+            "url": "https://github.com/org/repo/pull/7",
+        }
+        defaults.update(kw)
+        return defaults
+
+    def test_ci_pass_emoji(self):
+        lines = build_pr_metrics_table([self._pr(ci_status="pass")])
+        text = "\n".join(lines)
+        assert "✅" in text
+
+    def test_ci_fail_emoji(self):
+        lines = build_pr_metrics_table([self._pr(ci_status="fail")])
+        text = "\n".join(lines)
+        assert "❌" in text
+
+    def test_ci_pending_emoji(self):
+        lines = build_pr_metrics_table([self._pr(ci_status="pending")])
+        text = "\n".join(lines)
+        assert "⏳" in text
+
+    def test_ci_unknown_dash(self):
+        lines = build_pr_metrics_table([self._pr(ci_status="unknown")])
+        text = "\n".join(lines)
+        # "-" as fallback for unknown CI
+        assert "-" in text
+
+    def test_age_shown(self):
+        lines = build_pr_metrics_table([self._pr(age_days=5)])
+        text = "\n".join(lines)
+        assert "5d" in text
+
+    def test_age_computed_from_age_hours_fallback(self):
+        lines = build_pr_metrics_table([self._pr(age_hours=48)])  # 2 days
+        text = "\n".join(lines)
+        assert "2d" in text
+
+    def test_reviewer_count_shown(self):
+        lines = build_pr_metrics_table([self._pr(reviewer_count=3)])
+        text = "\n".join(lines)
+        assert "3" in text
+
+    def test_reviewer_count_from_list(self):
+        lines = build_pr_metrics_table([self._pr(reviewers=["a", "b"])])
+        text = "\n".join(lines)
+        assert "2" in text
+
+    def test_issue_cell_linked(self):
+        linked = {"key": "CRIBL-1234", "url": "https://jira.example.com/browse/CRIBL-1234"}
+        lines = build_pr_metrics_table([self._pr(linked_issue=linked)])
+        text = "\n".join(lines)
+        assert "CRIBL-1234" in text
+
+    def test_status_column_merged(self):
+        pr = self._pr(merged_at="2026-01-15T12:00:00Z", state="merged")
+        lines = build_pr_metrics_table([pr])
+        text = "\n".join(lines)
+        assert "MERGED" in text
+
+    def test_status_column_pending(self):
+        pr = self._pr(state="open", has_substantive_review=False, merged_at=None)
+        lines = build_pr_metrics_table([pr])
+        text = "\n".join(lines)
+        assert "PENDING" in text
