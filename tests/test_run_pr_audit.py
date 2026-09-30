@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from scripts.analyze.run_pr_audit import (
+    _filter_prs_by_state,
     _parse_slack_flags,
     _PR_AUDIT_PROMPT_TEMPLATE,
     _resolve_effective_tracker,
@@ -465,3 +466,96 @@ class TestAppendMetricsSections:
         assert "Pre-Computed PR Metrics Summary" in result
         assert "Per-PR Metrics" in result or "PR #" in result or "alice" in result
         assert "Metrics Dashboard" in result
+
+
+# ---------------------------------------------------------------------------
+# --state flag parsing
+# ---------------------------------------------------------------------------
+
+class TestParseSlackFlagsState:
+    """--state flag is parsed from Slack message and stored as pr_state."""
+
+    def test_state_merged_only(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --state merged"})
+        assert result["pr_state"] == "merged"
+
+    def test_state_declined_only(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --state declined"})
+        assert result["pr_state"] == "declined"
+
+    def test_state_open(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --state open"})
+        assert result["pr_state"] == "open"
+
+    def test_state_all(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --state all"})
+        assert result["pr_state"] == "all"
+
+    def test_state_absent_returns_none(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "pr-audit last 20 prs"})
+        assert result.get("pr_state") is None
+
+    def test_empty_message_pr_state_absent_or_none(self):
+        result = _parse_slack_flags({})
+        assert result.get("pr_state") is None
+
+
+# ---------------------------------------------------------------------------
+# PR state post-filter — _filter_prs_by_state
+# ---------------------------------------------------------------------------
+
+_MIXED_PRS = [
+    {"id": "1", "state": "merged",   "title": "Merged"},
+    {"id": "2", "state": "open",     "title": "Still open"},
+    {"id": "3", "state": "declined", "title": "Declined"},
+]
+
+
+class TestFilterPrsByState:
+    """Tests for _filter_prs_by_state — the real production function."""
+
+    def test_default_excludes_open(self):
+        result = _filter_prs_by_state(_MIXED_PRS, ["merged", "declined"])
+        assert {p["id"] for p in result} == {"1", "3"}
+
+    def test_state_all_passthrough(self):
+        result = _filter_prs_by_state(_MIXED_PRS, ["merged", "declined", "open"])
+        assert result is _MIXED_PRS  # pass-through, not a copy
+
+    def test_state_all_order_independent(self):
+        """Set semantics: any ordering of the three states must pass through."""
+        result = _filter_prs_by_state(_MIXED_PRS, ["open", "merged", "declined"])
+        assert result is _MIXED_PRS
+
+    def test_state_open_only(self):
+        result = _filter_prs_by_state(_MIXED_PRS, ["open"])
+        assert [p["id"] for p in result] == ["2"]
+
+    def test_state_merged_only(self):
+        result = _filter_prs_by_state(_MIXED_PRS, ["merged"])
+        assert [p["id"] for p in result] == ["1"]
+
+    def test_missing_state_defaults_to_merged(self):
+        """PRs without a state field default to 'merged' and survive merged+declined filter."""
+        prs = [{"id": "9", "title": "no state field"}]
+        result = _filter_prs_by_state(prs, ["merged", "declined"])
+        assert len(result) == 1
+
+    def test_open_pr_url_dropped_by_default(self):
+        prs = [
+            {"id": "10", "state": "merged", "title": "Shipped"},
+            {"id": "11", "state": "open",   "title": "Draft"},
+        ]
+        result = _filter_prs_by_state(prs, ["merged", "declined"])
+        assert [p["id"] for p in result] == ["10"]
+
+    def test_open_pr_url_kept_with_state_all(self):
+        prs = [
+            {"id": "10", "state": "merged", "title": "Shipped"},
+            {"id": "11", "state": "open",   "title": "Draft"},
+        ]
+        result = _filter_prs_by_state(prs, ["merged", "declined", "open"])
+        assert len(result) == 2
+
+    def test_empty_prs_returns_empty(self):
+        assert _filter_prs_by_state([], ["merged", "declined"]) == []

@@ -49,6 +49,16 @@ from scripts.analyze.pr_fetcher import (
 )
 
 
+_ALL_STATES: frozenset[str] = frozenset({"merged", "declined", "open"})
+
+
+def _filter_prs_by_state(prs: list[dict], pr_states: list[str]) -> list[dict]:
+    """Return only PRs whose state is in pr_states. Pass-through when all states are requested."""
+    if _ALL_STATES.issubset(pr_states):
+        return prs
+    return [p for p in prs if p.get("state", "merged").lower() in pr_states]
+
+
 def _build_metrics_summary(prs: list[dict]) -> str:
     """Build pre-computed PR metrics summary markdown for prompt and report appendix."""
     lines = ["## Pre-Computed PR Metrics Summary", ""]
@@ -938,11 +948,10 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 pr_numbers = [num for _, num in parsed_urls]
                 prs = fetch_prs_by_numbers(config, pr_numbers)
                 # Post-filter by state: fetch_prs_by_numbers fetches any state; apply the requested filter
-                if pr_states != ["merged", "declined", "open"]:
-                    original_count = len(prs)
-                    prs = [p for p in prs if p.get("state", "merged").lower() in pr_states]
-                    if len(prs) < original_count:
-                        print(f"[pr-audit] state filter: kept {len(prs)}/{original_count} PRs matching states {pr_states}", flush=True)
+                original_count = len(prs)
+                prs = _filter_prs_by_state(prs, pr_states)
+                if len(prs) < original_count:
+                    print(f"[pr-audit] state filter: kept {len(prs)}/{original_count} PRs matching states {pr_states}", flush=True)
                 print(f"[pr-audit] fetched {len(prs)} specific PRs from URLs", flush=True)
             else:
                 prs = []

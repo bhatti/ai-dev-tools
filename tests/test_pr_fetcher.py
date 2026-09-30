@@ -596,6 +596,24 @@ class TestFetchPrsByNumbers:
             result = fetch_single_pr(config, 99)
         assert result is None
 
+    @pytest.mark.parametrize("state", ["open", "merged", "declined"])
+    def test_gh_preserves_state(self, state):
+        """fetch_prs_by_numbers must pass through all PR states unchanged (GitHub)."""
+        config = {"DEFAULT_TRACKER": "github", "GH_ORG": "org", "GH_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_gh_pr") as mock:
+            mock.return_value = {"number": 1, "state": state, "title": "PR"}
+            prs = fetch_prs_by_numbers(config, [1])
+        assert prs[0]["state"] == state
+
+    @pytest.mark.parametrize("state", ["open", "merged", "declined"])
+    def test_bb_preserves_state(self, state):
+        """fetch_prs_by_numbers must pass through all PR states unchanged (Bitbucket)."""
+        config = {"DEFAULT_TRACKER": "jira", "BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "repo"}
+        with patch("scripts.analyze.pr_fetcher._fetch_single_bb_pr") as mock:
+            mock.return_value = {"number": 1, "state": state, "title": "PR"}
+            prs = fetch_prs_by_numbers(config, [1])
+        assert prs[0]["state"] == state
+
 
 # ---------------------------------------------------------------------------
 # Enrichment — verify enrich_pr_with_metrics adds classification fields
