@@ -57,4 +57,16 @@ class TestParseSlackFlags:
     def test_returns_dict_not_tuple(self):
         result = _parse_slack_flags({"SLACK_MESSAGE": "audit"})
         assert isinstance(result, dict)
-        assert set(result.keys()) == {"n_commits", "max_size", "full_report"}
+        assert set(result.keys()) == {"n_commits", "max_size", "full_report", "branch_override"}
+
+    def test_target_flag(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "code-audit --target feature/my-branch"})
+        assert result["branch_override"] == "feature/my-branch"
+
+    def test_branch_flag_alias(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "audit --branch main"})
+        assert result["branch_override"] == "main"
+
+    def test_no_branch_override_returns_none(self):
+        result = _parse_slack_flags({"SLACK_MESSAGE": "audit last 50 commits"})
+        assert result["branch_override"] is None

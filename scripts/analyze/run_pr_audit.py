@@ -224,6 +224,12 @@ def _parse_slack_flags(config: dict) -> dict:
     if m:
         pr_filter = f"{m.group(1).strip()}={m.group(2).strip().strip(chr(34))}"
 
+    # State filter: --state merged|declined|open|all
+    pr_state: str | None = None
+    m = re.search(r"--state\s+(merged|declined|open|all)", msg, re.IGNORECASE)
+    if m:
+        pr_state = m.group(1).lower()
+
     # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
     for token in re.findall(r"https?://\S+", msg):
         token = token.rstrip(".,;)")
@@ -237,7 +243,7 @@ def _parse_slack_flags(config: dict) -> dict:
         "n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
         "team_members": team_members, "jira_boards": jira_boards,
         "gh_milestone": gh_milestone, "tracker": tracker, "full_report": full_report,
-        "jira_team": jira_team, "pr_filter": pr_filter,
+        "jira_team": jira_team, "pr_filter": pr_filter, "pr_state": pr_state,
     }
 
 
@@ -627,7 +633,8 @@ Or on failure:
 @click.option("--focus", default=None, help="Audit focus: all|spec|design|skills|practices")
 @click.option("--skill", default="ygs-pr-audit", show_default=True, help="Skill name override")
 @click.option("--pr-urls", multiple=True, default=(), help="Specific PR URLs to audit (overrides --n-prs)")
-def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str | None, skill: str, pr_urls: tuple) -> None:
+@click.option("--state", "pr_state", default=None, help="PR states to include: merged|declined|open|all (default: merged+declined)")
+def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str | None, skill: str, pr_urls: tuple, pr_state: str | None) -> None:
     config = load_config()
     validate_claude_config(config)
 
@@ -702,6 +709,22 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         os.environ["PR_AUDIT_FILTER"] = slack_flags["pr_filter"]
         config["PR_AUDIT_FILTER"] = slack_flags["pr_filter"]
         print(f"[pr-audit] Slack override: filter={slack_flags['pr_filter']}", flush=True)
+
+    # Resolve PR states: CLI --state > Slack --state > default (merged+declined)
+    _state_override = pr_state or slack_flags.get("pr_state")
+    if _state_override == "all":
+        pr_states: list[str] = ["merged", "declined", "open"]
+    elif _state_override == "open":
+        pr_states = ["open"]
+    elif _state_override == "merged":
+        pr_states = ["merged"]
+    elif _state_override == "declined":
+        pr_states = ["declined"]
+    else:
+        pr_states = ["merged", "declined"]
+    if _state_override:
+        print(f"[pr-audit] PR state filter: {pr_states}", flush=True)
+
     # Combine PR URLs: CLI flag + Slack message + PR_URLS env var (space/comma separated)
     pr_urls_env = [u.strip() for u in re.split(r"[\s,]+", os.environ.get("PR_URLS", "")) if u.strip()]
     all_pr_urls = list(pr_urls) + slack_flags["pr_urls"] + pr_urls_env
@@ -801,7 +824,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             else:
                 prs = []
         else:
-            prs = fetch_prs(config, n_prs)
+            prs = fetch_prs(config, n_prs, states=pr_states)
 
         # Enrich with issue linking and details
         for pr in prs:
@@ -931,8 +954,9 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                               if not (ln.strip().startswith('{"status"') and "DONE" in ln)]
             analysis_text = "\n".join(analysis_lines).strip()
             if len(analysis_text) >= 50:
+                _date_range_str = f" — {date_from} → {date_to}" if date_from and date_to else ""
                 report_md_path.write_text(
-                    f"# PR Audit -- {label} @ {branch}\n\n{analysis_text}\n",
+                    f"# PR Audit -- {label} @ {branch}{_date_range_str}\n\n{analysis_text}\n",
                     encoding="utf-8",
                 )
                 print(f"[pr-audit] saved fallback pr_audit_report.md ({len(analysis_text)} chars)", flush=True)
@@ -981,12 +1005,13 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         report_md_path = reports_dir / "pr_audit_report.md"
         if report_md_path.exists() and prs:
             md_content = report_md_path.read_text(encoding="utf-8")
-            if "Per-PR Metrics" not in md_content:
+            # Only append pre-computed summary if Claude did not already write a Metrics Dashboard
+            if "Pre-Computed PR Metrics" not in md_content and "Metrics Dashboard" not in md_content:
                 _append_text = _build_metrics_summary(prs)
                 if len(_append_text.strip()) > 10:
                     md_content += f"\n\n{_append_text}\n"
                     report_md_path.write_text(md_content, encoding="utf-8")
-                    print("[pr-audit] appended per-PR metrics table to report", flush=True)
+                    print("[pr-audit] appended pre-computed metrics summary to report", flush=True)
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "pr_audit_report.html"

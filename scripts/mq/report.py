@@ -32,6 +32,7 @@ import glob
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -611,6 +612,17 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sensitive = scope.get("touches", []) or scope.get("sensitive_touched", [])
         if sensitive:
             sections.append(f"| Sensitive paths | {', '.join(f'`{p}`' for p in sensitive[:5])} | Files matching auth/security/billing/infra patterns |")
+        additions = scope.get("additions", 0)
+        deletions = scope.get("deletions", 0)
+        if additions or deletions:
+            sections.append(f"| LOC added | {additions} | Lines added in this PR |")
+            sections.append(f"| LOC deleted | {deletions} | Lines deleted |")
+        pr_author = scope.get("author", "")
+        if pr_author:
+            sections.append(f"| PR author | {pr_author} | |")
+        pr_created = (scope.get("created_at") or scope.get("created_on") or "")[:10]
+        if pr_created:
+            sections.append(f"| PR date | {pr_created} | When PR was opened |")
         sections.append("")
         ctx["SCOPE"] = s
         ctx["BLAST_RADIUS"] = blast
@@ -975,6 +987,9 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["CONTRACT_FINDINGS"] = str(c_findings)
         ctx["CONTRACT_CRITICAL"] = str(c_critical)
 
+    # Read lane_groups.json once — used for both date range in Queue Status and lane processing below.
+    lanes_data = _read_json(workspace / "lane_groups.json")
+
     sections = lane_sections  # merge queue analysis summary (read-only, no merges)
     queue_summary = _read_json(workspace / "queue_summary.json")
     if queue_summary:
@@ -998,6 +1013,18 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sections.append(f"| High-risk PRs | {q_high} |")
         sections.append(f"| Needs human review | {q_needs_review} |")
         sections.append(f"| Conflict risk lanes | {q_conflicts} |")
+        # Use already-loaded lanes data for date range (avoids double file read)
+        if lanes_data:
+            _early_prs = [p for l in lanes_data.get("lanes", []) for p in l.get("prs", [])]
+            _dates = sorted(
+                d[:10] for p in _early_prs
+                for d in [(p.get("created_at") or p.get("created_on") or "")]
+                if d
+            )
+            if len(_dates) >= 2:
+                sections.append(f"| Date range | {_dates[0]} → {_dates[-1]} |")
+            elif len(_dates) == 1:
+                sections.append(f"| Date range | {_dates[0]} |")
         sections.append("")
         if q_needs_review:
             sections.append(f"> ⚠️ {q_needs_review} PR(s) flagged for human review before merge "
@@ -1012,7 +1039,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         ctx["MQ_NEEDS_REVIEW"] = str(q_needs_review)
 
     sections = lane_sections  # lanes block (grouping detail from group task)
-    lanes = _read_json(workspace / "lane_groups.json")
+    lanes = lanes_data
     ready = _read_json(workspace / "ready_prs.json")
     if lanes:
         lane_list = lanes.get("lanes", [])
@@ -1420,6 +1447,59 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
     print("[mq-report] reports/risk_heatmap.html written", flush=True)
 
 
+def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -> str:
+    """Build a condensed Slack summary for the merge queue report (~600 chars)."""
+    total = int(ctx.get("MQ_TOTAL", len(all_prs)))
+    high_risk = int(ctx.get("MQ_HIGH_RISK", 0))
+    needs_review = int(ctx.get("MQ_NEEDS_REVIEW", 0))
+
+    dates: list[str] = []
+    for p in all_prs:
+        d = p.get("created_at") or p.get("created_on") or ""
+        if d:
+            dates.append(d[:10])
+    if dates:
+        dates.sort()
+        date_range = f"{dates[0]} → {dates[-1]}"
+    else:
+        date_range = ""
+
+    conflict_lanes = int(ctx.get("MQ_CONFLICT_LANES", 0))
+    if not conflict_lanes and lanes:
+        conflict_lanes = sum(1 for ln in lanes if ln.get("conflict_risk"))
+
+    if high_risk == 0:
+        risk_signal = "✅ low risk"
+    elif high_risk <= 2:
+        risk_signal = f"⚠️ {high_risk} high-risk PRs"
+    else:
+        risk_signal = f"🔴 {high_risk} high-risk PRs"
+
+    lines_out: list[str] = []
+    if date_range:
+        lines_out.append(f"*Merge Queue* — {date_range}")
+    else:
+        lines_out.append("*Merge Queue*")
+
+    lines_out.append(f"{total} open PRs · {risk_signal} · {conflict_lanes} conflict lane(s)")
+
+    if needs_review:
+        lines_out.append(f"⚠️ {needs_review} PR(s) need human review before merge")
+
+    stale = [p for p in all_prs if _compute_pr_age_inline(p) > 14]
+    if stale:
+        lines_out.append(f"🕐 {len(stale)} PR(s) stale (>14d)")
+
+    types = Counter(p.get("pr_type", "unknown") for p in all_prs)
+    if types:
+        top = types.most_common(3)
+        type_str = " · ".join(f"{t}:{n}" for t, n in top)
+        lines_out.append(f"Types: {type_str}")
+
+    lines_out.append("Full report in thread ↑")
+    return "\n".join(lines_out)
+
+
 def main() -> None:
     config = load_config(required=[])
     workspace = get_workspace_dir(config)
@@ -1458,7 +1538,14 @@ def main() -> None:
     except Exception as e:
         print(f"[mq-report] risk heatmap generation failed (non-fatal): {e}", flush=True)
 
-    slack_text = format_for_slack(report_text)
+    _slack_lanes_raw = _read_json(workspace / "lane_groups.json")
+    _slack_all_prs: list[dict] = []
+    if _slack_lanes_raw:
+        _slack_all_prs = [p for ln in _slack_lanes_raw.get("lanes", []) for p in ln.get("prs", [])]
+    if _slack_all_prs:
+        slack_text = _build_mq_slack_summary(ctx, _slack_all_prs, _slack_lanes_raw.get("lanes", []))
+    else:
+        slack_text = format_for_slack(report_text)
 
     thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
     slack_ok = post_report(config, slack_text, report_text,

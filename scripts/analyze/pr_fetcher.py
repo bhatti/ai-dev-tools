@@ -106,12 +106,16 @@ def compute_pr_state_summary(prs: list[dict]) -> dict:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
-def fetch_prs(config: dict, n_prs: int = 50, max_bytes: int = 10_000_000) -> list[dict]:
-    """Dispatch to GitHub or Bitbucket based on DEFAULT_TRACKER."""
+def fetch_prs(config: dict, n_prs: int = 50, max_bytes: int = 10_000_000, states: list[str] | None = None) -> list[dict]:
+    """Dispatch to GitHub or Bitbucket based on DEFAULT_TRACKER.
+
+    states: list of PR states to include. Default None → ["merged", "declined"].
+    Pass ["merged", "open", "declined"] for --state all.
+    """
     tracker = (config.get("DEFAULT_TRACKER") or "").lower().strip()
     if tracker in ("jira", "jira/bitbucket", "bitbucket"):
-        return fetch_bitbucket_prs(config, n_prs)
-    return fetch_github_prs(config, n_prs)
+        return fetch_bitbucket_prs(config, n_prs, states=states)
+    return fetch_github_prs(config, n_prs, states=states)
 
 
 def fetch_single_pr(config: dict, pr_number: int) -> dict | None:
@@ -160,14 +164,21 @@ def fetch_prs_by_numbers(config: dict, pr_numbers: list[int]) -> list[dict]:
 # GitHub
 # ---------------------------------------------------------------------------
 
-def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
-    """Fetch last N merged PRs via ``gh pr list --state merged``.
+def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = None) -> list[dict]:
+    """Fetch last N PRs via ``gh pr list``.
+
+    states: list of PR states to include. Default None → ["merged", "declined"].
+    Pass ["merged", "open", "declined"] for --state all.
 
     Enriches each PR with inline review comments via the GitHub API.
     Supports optional filtering:
       PR_AUDIT_GH_MILESTONE — scope to a GitHub milestone (sprint equivalent)
       PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep logins
     """
+    if states is None:
+        states = ["merged", "declined"]
+    states_set = set(states)
+
     org = config.get("GH_ORG", "").strip()
     repo = config.get("GH_REPO", "").strip()
     if not org or not repo:
@@ -184,32 +195,56 @@ def fetch_github_prs(config: dict, n_prs: int = 50) -> list[dict]:
         config.get("PR_AUDIT_FILTER", ""),
     ])
     fetch_limit = n_prs * 10 if has_jira_filter else n_prs
-    cmd = [
-        "gh", "pr", "list",
-        "-R", f"{org}/{repo}",
-        "--state", "merged",
-        "--limit", str(fetch_limit),
-        "--json", fields,
-    ]
     milestone = config.get("PR_AUDIT_GH_MILESTONE", "").strip()
+
+    def _gh_list(gh_state: str) -> list[dict]:
+        cmd = [
+            "gh", "pr", "list",
+            "-R", f"{org}/{repo}",
+            "--state", gh_state,
+            "--limit", str(fetch_limit),
+            "--json", fields,
+        ]
+        if milestone:
+            cmd += ["--milestone", milestone]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"[pr-fetch] gh pr list --state {gh_state} failed: {e}", file=sys.stderr, flush=True)
+            return []
+        if result.returncode != 0:
+            print(f"[pr-fetch] gh pr list --state {gh_state} error: {result.stderr.strip()[:300]}", file=sys.stderr, flush=True)
+            return []
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            print(f"[pr-fetch] could not parse gh output: {e}", file=sys.stderr, flush=True)
+            return []
+
     if milestone:
-        cmd += ["--milestone", milestone]
         print(f"[pr-fetch] filtering by milestone: {milestone}", flush=True)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[pr-fetch] gh pr list failed: {e}", file=sys.stderr, flush=True)
-        return []
+    print(f"[pr-fetch] fetching GH PRs states={states}", flush=True)
 
-    if result.returncode != 0:
-        print(f"[pr-fetch] gh pr list error: {result.stderr.strip()[:300]}", file=sys.stderr, flush=True)
-        return []
+    # Fetch merged PRs when "merged" or "declined" in states
+    raw_by_num: dict[int, dict] = {}
+    if states_set & {"merged", "declined"}:
+        for rp in _gh_list("merged"):
+            num = rp.get("number") or 0
+            if num:
+                raw_by_num[num] = rp
+        # gh --state closed gives CLOSED PRs; declined = closed without mergedAt
+        if "declined" in states_set:
+            for rp in _gh_list("closed"):
+                num = rp.get("number") or 0
+                if num and not rp.get("mergedAt") and num not in raw_by_num:
+                    raw_by_num[num] = rp
+    if "open" in states_set:
+        for rp in _gh_list("open"):
+            num = rp.get("number") or 0
+            if num:
+                raw_by_num[num] = rp
 
-    try:
-        raw_prs = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        print(f"[pr-fetch] could not parse gh output: {e}", file=sys.stderr, flush=True)
-        return []
+    raw_prs = list(raw_by_num.values())
 
     # A.1: save raw PR list to artifact
     _write_raw("pr_data_raw.json", raw_prs)
@@ -499,8 +534,11 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
 # Bitbucket
 # ---------------------------------------------------------------------------
 
-def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
-    """Fetch last N merged PRs via Bitbucket REST API.
+def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None = None) -> list[dict]:
+    """Fetch last N PRs via Bitbucket REST API.
+
+    states: list of PR states to include. Default None → ["merged", "declined"].
+    Pass ["merged", "open", "declined"] for --state all.
 
     Supports optional filtering:
       JIRA_BOARDS     — filter to PRs referencing issues from these board(s) (Jira-issue-first)
@@ -509,6 +547,13 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
       PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep display names
     """
     import requests as _requests
+
+    if states is None:
+        states = ["merged", "declined"]
+    _bb_state_map = {"merged": "MERGED", "open": "OPEN", "declined": "DECLINED"}
+    bb_states = [_bb_state_map[s] for s in states if s in _bb_state_map]
+    if not bb_states:
+        bb_states = ["MERGED"]
 
     workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
     repo = config.get("BITBUCKET_REPO", "").strip()
@@ -521,8 +566,10 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
     auth = (username, token) if username and token else None
 
     base = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
+    state_params = "&".join(f"state={s}" for s in bb_states)
     # +values.participants adds approval data without removing any default fields
-    url = f"{base}/pullrequests?state=MERGED&sort=-updated_on&pagelen=50&fields=%2Bvalues.participants"
+    url = f"{base}/pullrequests?{state_params}&sort=-updated_on&pagelen=50&fields=%2Bvalues.participants"
+    print(f"[pr-fetch] fetching BB PRs states={bb_states}", flush=True)
 
     # Over-fetch when any Jira filter is active so there are enough PRs after filtering.
     has_filter = any([
@@ -578,6 +625,8 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
 
     print(f"[pr-fetch] parallel fetch complete: {len(fetched)} PRs in {_time.monotonic() - t0:.1f}s", flush=True)
 
+    _bb_state_to_str = {"MERGED": "merged", "OPEN": "open", "DECLINED": "declined", "SUPERSEDED": "declined"}
+
     for rp, all_comments, diffstat in fetched:
         pr_id = rp.get("id", 0)
         if all_comments:
@@ -607,13 +656,15 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50) -> list[dict]:
         author = rp.get("author", {}).get("display_name", rp.get("author", {}).get("nickname", ""))
         depth = _compute_review_depth(classified["human_comments"], approvers)
 
+        bb_state_raw = (rp.get("state", "MERGED")).upper()
+        pr_state_str = _bb_state_to_str.get(bb_state_raw, "merged")
         pr = {
             "number": pr_id,
             "title": rp.get("title", ""),
             "author": author,
-            "state": "merged",
+            "state": pr_state_str,
             "created_at": rp.get("created_on", ""),
-            "merged_at": rp.get("updated_on", ""),
+            "merged_at": rp.get("updated_on", "") if pr_state_str == "merged" else "",
             "url": rp.get("links", {}).get("html", {}).get("href", ""),
             "branch": rp.get("source", {}).get("branch", {}).get("name", ""),
             "body": rp.get("description", ""),

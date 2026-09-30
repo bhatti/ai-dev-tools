@@ -91,23 +91,25 @@ def _parse_slack_flags(config: dict) -> dict:
       --commits 200
       --max-size 2097152
       --full
+      --target feature/xyz  (or --branch feature/xyz)
 
-    Returns dict with keys: n_commits, max_size, full_report.
+    Returns dict with keys: n_commits, max_size, full_report, branch_override.
     """
-    msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", "")).lower()
+    msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
     if not msg:
-        return {"n_commits": None, "max_size": None, "full_report": False}
+        return {"n_commits": None, "max_size": None, "full_report": False, "branch_override": None}
+    msg_lower = msg.lower()
 
     n_commits: int | None = None
     max_size: int | None = None
 
-    m = re.search(r"(?:last\s+)?(\d+)\s+commits?|--commits\s+(\d+)", msg)
+    m = re.search(r"(?:last\s+)?(\d+)\s+commits?|--commits\s+(\d+)", msg_lower)
     if m:
         val = m.group(1) or m.group(2)
         if val:
             n_commits = int(val)
 
-    m = re.search(r"max\s*size\s+(\d+(?:\.\d+)?)\s*(mb|kb|gb|b)?|--max-size\s+(\d+)", msg)
+    m = re.search(r"max\s*size\s+(\d+(?:\.\d+)?)\s*(mb|kb|gb|b)?|--max-size\s+(\d+)", msg_lower)
     if m:
         if m.group(3):
             max_size = int(m.group(3))
@@ -126,7 +128,13 @@ def _parse_slack_flags(config: dict) -> dict:
     # Full report flag: --full posts the complete report to Slack instead of the digest.
     full_report = bool(re.search(r"--full\b", msg, re.IGNORECASE))
 
-    return {"n_commits": n_commits, "max_size": max_size, "full_report": full_report}
+    # Branch/target override: --target <branch> or --branch <branch>
+    branch_override: str | None = None
+    m = re.search(r"--(?:target|branch)\s+(\S+)", msg, re.IGNORECASE)
+    if m:
+        branch_override = m.group(1)
+
+    return {"n_commits": n_commits, "max_size": max_size, "full_report": full_report, "branch_override": branch_override}
 
 
 
@@ -328,6 +336,9 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
         os.environ["AUDIT_FULL_REPORT"] = "1"
         config["AUDIT_FULL_REPORT"] = "1"
         print("[audit] Slack override: full_report=1 (posting complete report to Slack)", flush=True)
+    if slack_flags.get("branch_override"):
+        branch = slack_flags["branch_override"]
+        print(f"[audit] Slack override: branch={branch}", flush=True)
 
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
