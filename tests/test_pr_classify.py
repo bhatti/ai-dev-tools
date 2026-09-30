@@ -798,6 +798,37 @@ class TestBuildMetricsDashboard:
         assert "merged=1" in result
         assert "declined=1" in result
 
+    def test_dora_rows_present_with_merged_data(self):
+        # 5 merged PRs spanning >0.5 weeks → DORA rows must appear
+        prs = [
+            self._pr(state="merged", merged_at="2026-09-01T10:00:00Z", created_at="2026-08-28T10:00:00Z"),
+            self._pr(state="merged", merged_at="2026-09-05T10:00:00Z", created_at="2026-09-02T10:00:00Z"),
+            self._pr(state="merged", merged_at="2026-09-10T10:00:00Z", created_at="2026-09-07T10:00:00Z"),
+            self._pr(state="merged", merged_at="2026-09-15T10:00:00Z", created_at="2026-09-12T10:00:00Z"),
+            self._pr(state="merged", merged_at="2026-09-20T10:00:00Z", created_at="2026-09-17T10:00:00Z"),
+        ]
+        result = build_metrics_dashboard(prs)
+        assert "Deployment Frequency" in result
+        assert "Lead Time (P50)" in result
+        assert "PR Survival Rate" in result
+        assert "Change Failure Rate" in result
+
+    def test_dora_lead_time_row_has_correct_benchmark(self):
+        prs = [
+            self._pr(state="merged", merged_at="2026-09-01T10:00:00Z", created_at="2026-08-28T10:00:00Z"),
+            self._pr(state="merged", merged_at="2026-09-05T10:00:00Z", created_at="2026-09-02T10:00:00Z"),
+            self._pr(state="merged", merged_at="2026-09-10T10:00:00Z", created_at="2026-09-07T10:00:00Z"),
+        ]
+        result = build_metrics_dashboard(prs)
+        assert "≤1d elite" in result
+
+    def test_dora_rows_absent_without_merged_data(self):
+        # Open PRs with no merged_at → compute_throughput_metrics returns {} → no DORA rows
+        prs = [self._pr(), self._pr(), self._pr()]
+        result = build_metrics_dashboard(prs)
+        assert "Deployment Frequency" not in result
+        assert "Lead Time (P50)" not in result
+
 
 # ---------------------------------------------------------------------------
 # build_stale_pr_table — stale PR detection

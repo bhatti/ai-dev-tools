@@ -172,10 +172,28 @@ class TestScopeJsonOutput:
         assert isinstance(data["categories"], list)
 
     def test_pr_metadata_populated_when_available(self, tmp_path):
-        meta = {"author": "alice", "created_at": "2026-09-01T00:00:00Z"}
+        meta = {
+            "author": "alice",
+            "created_at": "2026-09-01T00:00:00Z",
+            "title": "Fix payment null-pointer",
+            "body": "## Problem\nCrashes on null user.\n## Solution\nAdd guard.",
+        }
         _, data = self._run(tmp_path, pr_meta=meta)
         assert data["author"] == "alice"
         assert data["created_at"] == "2026-09-01T00:00:00Z"
+        assert data["title"] == "Fix payment null-pointer"
+        assert "Problem" in data["body"]
+
+    def test_title_body_absent_without_pr_meta(self, tmp_path):
+        _, data = self._run(tmp_path, pr_meta={})
+        assert data["title"] == ""
+        assert data["body"] == ""
+        assert data["issue_ref"] is None
+
+    def test_body_truncated_to_600_chars(self, tmp_path):
+        meta = {"title": "long PR", "body": "x" * 1000}
+        _, data = self._run(tmp_path, pr_meta=meta)
+        assert len(data["body"]) == 600
 
     def test_pr_metadata_empty_on_fetch_failure(self, tmp_path):
         runner = CliRunner()
@@ -190,3 +208,4 @@ class TestScopeJsonOutput:
         data = json.loads((tmp_path / "scope.json").read_text())
         assert data["author"] == ""
         assert data["created_at"] == ""
+        assert data["title"] == ""

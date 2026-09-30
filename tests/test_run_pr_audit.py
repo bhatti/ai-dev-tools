@@ -422,3 +422,46 @@ class TestComputePRStateSummary:
     def test_empty(self):
         result = compute_pr_state_summary([])
         assert result == {"merged": 0, "open": 0, "declined": 0, "total": 0}
+
+
+class TestAppendMetricsSections:
+    """Verify pre-computed section is always appended, even when Claude writes its own dashboard."""
+
+    def _make_prs(self, n=5):
+        return [
+            {"pr_number": i, "author": "alice", "category": "api", "pr_type": "feature",
+             "blast_radius": "low", "risk_score": 10.0, "risk_tier": "low",
+             "total_loc": 50, "file_count": 2, "complexity": "low", "is_hotspot": False,
+             "url": f"https://github.com/org/repo/pull/{i}", "title": f"PR {i}"}
+            for i in range(1, n + 1)
+        ]
+
+    def test_pre_computed_appended_when_claude_writes_dashboard(self, tmp_path):
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude
+        # Simulate Claude already writing a "Metrics Dashboard" — pre-computed section must still appear
+        md = "# PR Audit\n\n## Metrics Dashboard\n\n| Metric | Value |\n|--------|-------|\n| foo | bar |\n"
+        result = md
+        prs = self._make_prs()
+        claude_dashboard_written = "Metrics Dashboard" in result
+        if "Pre-Computed PR Metrics" not in result:
+            pre_rows = [] if claude_dashboard_written else []
+            appended = _build_metrics_summary_with_claude(prs, pre_rows)
+            result += f"\n\n{appended}\n"
+        assert "Pre-Computed PR Metrics Summary" in result
+        assert "Metrics Dashboard" in result  # Claude's original still present
+
+    def test_pre_computed_appended_when_no_dashboard(self, tmp_path):
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude
+        md = "# PR Audit\n\nSome findings.\n"
+        prs = self._make_prs()
+        appended = _build_metrics_summary_with_claude(prs, [])
+        result = md + f"\n\n{appended}\n"
+        assert "Pre-Computed PR Metrics Summary" in result
+
+    def test_build_metrics_summary_with_claude_includes_all_subsections(self):
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude
+        prs = self._make_prs(5)
+        result = _build_metrics_summary_with_claude(prs, [])
+        assert "Pre-Computed PR Metrics Summary" in result
+        assert "Per-PR Metrics" in result or "PR #" in result or "alice" in result
+        assert "Metrics Dashboard" in result

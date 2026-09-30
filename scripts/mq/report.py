@@ -263,6 +263,7 @@ from scripts.common.pr_classify import (
     build_work_type_distribution as _build_work_type_distribution_shared,
     build_metrics_dashboard as _build_metrics_dashboard,
     build_stale_pr_table as _build_stale_pr_table,
+    compute_throughput_metrics as _compute_throughput_metrics,
     format_pr_status as _format_pr_status,
 )
 
@@ -361,10 +362,11 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     lines += _build_category_breakdown_shared(prs, lanes=lanes)
     lines += _build_work_type_distribution_shared(prs)
 
+    type_counts = Counter(p.get("pr_type", "unknown") for p in prs)
+    n_bugs = type_counts.get("bug", 0) + type_counts.get("security", 0)
+
     if total > 0:
         # Defect rate proxy — maps to Joe's model
-        type_counts = Counter(p.get("pr_type", "unknown") for p in prs)
-        n_bugs = type_counts.get("bug", 0) + type_counts.get("security", 0)
         defect_pct = round(n_bugs / total * 100, 1)
         if n_bugs > 0:
             defect_ratio = round(total / n_bugs)
@@ -425,11 +427,32 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
         lines.append("")
 
     # Metrics Dashboard — consistent with pr-audit format
+    defect_pct_for_dash = round(n_bugs / total * 100, 1) if total else 0.0
+    cfr_signal = "🟢" if defect_pct_for_dash <= 10 else ("🟡" if defect_pct_for_dash <= 25 else "🔴")
+
+    feature_count_for_dash = type_counts.get("feature", 0)
+    fb_ratio = round(feature_count_for_dash / n_bugs, 1) if n_bugs else None
+    fb_signal = "🟢" if (fb_ratio is not None and fb_ratio >= 3) else ("🟡" if fb_ratio is not None else "—")
+    fb_value = f"{fb_ratio}:1" if fb_ratio is not None else "N/A"
+
     mq_extra_rows = [
         ("Queue Depth", str(total), "≤20", "🟢" if total <= 20 else "🔴", "Total PRs in the merge queue"),
+        ("CFR Proxy", f"{defect_pct_for_dash}%", "≤10% healthy", cfr_signal,
+         "Bug+security PRs as % of queue — proxy for change failure rate"),
+        ("Feature:Bug Ratio", fb_value, "≥3:1 healthy", fb_signal,
+         "Feature PRs / bug+security PRs — healthy teams ship more value than fixes"),
     ]
     if lanes:
         mq_extra_rows.append(("Lane Count", str(len(lanes)), "—", "—", "Active merge queue lanes"))
+    # DORA rows: computed from merged PRs; if queue has only open PRs, show N/A so the
+    # dashboard remains structurally consistent with pr-audit reports.
+    if not _compute_throughput_metrics(prs):
+        mq_extra_rows.extend([
+            ("Deployment Frequency", "N/A", "≥5/wk", "—", "Requires merged PR history (queue shows open PRs only)"),
+            ("Change Failure Rate", "N/A", "≤10%", "—", "Requires merged PR history (queue shows open PRs only)"),
+            ("Lead Time (P50)", "N/A", "≤1d elite", "—", "Requires merged PR history (queue shows open PRs only)"),
+            ("PR Survival Rate", "N/A", "≥80%", "—", "Requires merged PR history (queue shows open PRs only)"),
+        ])
     lines.append(_build_metrics_dashboard(prs, extra_rows=mq_extra_rows))
 
     # Stale / obsolete PR flagging — use shared builder (>14 days)
@@ -569,11 +592,12 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     """Build markdown report from available MQ result files.
 
     Returns (markdown_text, context_vars_for_task_context).
-    Section order: header → Review Findings → Gate Decision → Risk Score → Scope → Test Impact → Test Results → Lanes
+    Section order: header → PR Overview → Review Findings → Gate Decision → Risk Score → Scope → Test Impact → Test Results → Lanes
     """
     ctx: dict[str, str] = {}
     # Named buckets assembled in desired display order at the end.
     header_sections: list[str] = []
+    pr_overview_sections: list[str] = []  # PR title, issue, description (gate-review only)
     findings_sections: list[str] = []
     gate_sections: list[str] = []
     risk_sections: list[str] = []
@@ -590,8 +614,33 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     header_sections.append(heading)
     header_sections.append("")
 
-    sections = scope_sections  # scope block
+    # PR Overview — title, linked issue, description (problem/solution context).
+    # Shown at top when scope.json has PR metadata (gate-review / scope-router mode).
+    sections = pr_overview_sections
     scope = _read_json(workspace / "scope.json")
+    if scope:
+        pr_title = (scope.get("title") or "").strip()
+        pr_body = (scope.get("body") or "").strip()
+        issue_ref = scope.get("issue_ref") or {}
+        if pr_title or pr_body or issue_ref:
+            sections.append("## PR Overview")
+            sections.append("")
+            if pr_title:
+                sections.append(f"**{pr_title}**")
+                sections.append("")
+            if issue_ref:
+                key = issue_ref.get("key", "")
+                url = issue_ref.get("url", "")
+                issue_link = f"[{key}]({url})" if url else key
+                if issue_link:
+                    sections.append(f"**Linked Issue:** {issue_link}")
+                    sections.append("")
+            if pr_body:
+                # Show full description (already truncated to 600 chars in scope_router)
+                sections.append(pr_body)
+                sections.append("")
+
+    sections = scope_sections  # scope block
     if scope:
         s = scope.get("scope", "unknown")
         blast = scope.get("blast_radius", "unknown")
@@ -1310,6 +1359,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
     ordered = (
         header_sections
+        + pr_overview_sections
         + findings_sections
         + gate_sections
         + risk_sections

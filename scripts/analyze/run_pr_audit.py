@@ -62,16 +62,22 @@ def _build_metrics_summary(prs: list[dict]) -> str:
     return "\n".join(lines) if len(lines) > 2 else ""
 
 
-def _build_metrics_summary_with_claude(prs: list[dict], claude_extra_rows: list[tuple]) -> str:
-    """Build pre-computed PR metrics + Claude-assessed rows in one dashboard."""
+def _build_metrics_summary_with_claude(prs: list[dict], claude_extra_rows: list[tuple], *,
+                                        include_dashboard: bool = True) -> str:
+    """Build pre-computed PR metrics + optional Claude-assessed rows in one dashboard.
+
+    When include_dashboard=False, omits the inner ### Metrics Dashboard sub-section
+    (used when Claude already wrote its own dashboard to avoid DORA duplication).
+    """
     lines = ["## Pre-Computed PR Metrics Summary", ""]
     lines += build_category_breakdown(prs)
     lines += build_work_type_distribution(prs)
     lines += build_pr_metrics_table(prs)
     lines += build_stale_pr_table(prs, threshold_days=7)
-    dashboard = build_metrics_dashboard(prs, extra_rows=claude_extra_rows)
-    if dashboard:
-        lines.append(dashboard)
+    if include_dashboard:
+        dashboard = build_metrics_dashboard(prs, extra_rows=claude_extra_rows)
+        if dashboard:
+            lines.append(dashboard)
     return "\n".join(lines) if len(lines) > 2 else ""
 
 
@@ -1118,12 +1124,18 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             print(f"::add-task-context PR_AUDIT_SKILL_GAPS::{status_data.get('skill_gap_count', 0)}", flush=True)
             print(f"::add-task-context PR_AUDIT_PRACTICE_GAPS::{status_data.get('practice_gap_count', 0)}", flush=True)
 
-        # Append combined metrics dashboard (pre-computed + Claude-assessed) to report
+        # Append metrics sections to report:
+        # 1. If Claude wrote a Metrics Dashboard, supplement it with Claude-assessed rows.
+        # 2. Always append the Pre-Computed PR Metrics Summary (category breakdown, per-PR
+        #    table, stale PRs, 5-col dashboard with DORA) — this was present in old reports
+        #    and must not be skipped when Claude already wrote its own dashboard.
         report_md_path = reports_dir / "pr_audit_report.md"
         if report_md_path.exists() and prs:
             md_content = report_md_path.read_text(encoding="utf-8")
             claude_extra_rows = _read_all_claude_metrics(reports_dir)
-            if "Metrics Dashboard" in md_content and claude_extra_rows:
+            claude_dashboard_written = "Metrics Dashboard" in md_content
+
+            if claude_dashboard_written and claude_extra_rows:
                 # Claude already wrote a dashboard — append Claude-assessed rows as a supplement
                 supplement_lines = ["\n\n### Claude-Assessed Process Metrics\n",
                                     "| Metric | Value | Benchmark | Signal | Description |",
@@ -1134,13 +1146,21 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 md_content += "\n".join(supplement_lines) + "\n"
                 report_md_path.write_text(md_content, encoding="utf-8")
                 print(f"[pr-audit] appended {len(claude_extra_rows)} Claude-assessed metric rows", flush=True)
-            elif "Pre-Computed PR Metrics" not in md_content and "Metrics Dashboard" not in md_content:
-                # Neither dashboard exists — build combined one
-                _append_text = _build_metrics_summary_with_claude(prs, claude_extra_rows)
+
+            # Always append the pre-computed section (category breakdown, per-PR table,
+            # stale PRs, and 5-col metrics dashboard including DORA rows).
+            # When Claude wrote its own dashboard, skip the inner ### Metrics Dashboard
+            # sub-section to avoid duplicating DORA rows; include it only when Claude
+            # did not write one so we get the full table.
+            if "Pre-Computed PR Metrics" not in md_content:
+                pre_rows = [] if claude_dashboard_written else claude_extra_rows
+                _append_text = _build_metrics_summary_with_claude(
+                    prs, pre_rows, include_dashboard=not claude_dashboard_written
+                )
                 if len(_append_text.strip()) > 10:
                     md_content += f"\n\n{_append_text}\n"
                     report_md_path.write_text(md_content, encoding="utf-8")
-                    print(f"[pr-audit] appended combined metrics dashboard ({len(claude_extra_rows)} Claude rows)", flush=True)
+                    print(f"[pr-audit] appended pre-computed metrics summary ({len(pre_rows)} Claude rows)", flush=True)
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "pr_audit_report.html"

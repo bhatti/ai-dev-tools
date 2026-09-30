@@ -19,7 +19,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.pr_classify import classify_pr_category
+from scripts.common.pr_classify import classify_pr_category, extract_issue_ref as _extract_issue_ref
 from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, parse_pr_ref, repo_slug, top_level_module
 
 _CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
@@ -158,6 +158,9 @@ def main(pr_number: str) -> None:
     except Exception as e:
         print(f"[scope_router] PR metadata fetch skipped: {e}", flush=True)
 
+    # Extract issue reference — pr_meta already has title/body from fetch_single_pr
+    issue_ref = _extract_issue_ref(pr_meta) if pr_meta else None
+
     result = {
         "scope": scope,
         "blast_radius": blast_radius,
@@ -170,6 +173,9 @@ def main(pr_number: str) -> None:
         "author": pr_meta.get("author", ""),
         "created_at": pr_meta.get("created_at", ""),
         "categories": sorted(categories_set),
+        "title": pr_meta.get("title", ""),
+        "body": (pr_meta.get("body", "") or "")[:600],
+        "issue_ref": issue_ref,
     }
 
     out_path = workspace / "scope.json"

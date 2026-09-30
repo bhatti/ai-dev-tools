@@ -249,3 +249,65 @@ class TestMQSlackSummary:
         result = _build_mq_slack_summary(ctx, [], [])
         assert "Merge Queue" in result
         assert "Full report" in result
+
+
+# ---------------------------------------------------------------------------
+# Cross-report DORA consistency
+# ---------------------------------------------------------------------------
+
+class TestCrossReportDORAConsistency:
+    """Verify DORA rows appear consistently across pr-audit and mq reports."""
+
+    def _merged_pr(self, n, days_offset=0):
+        now = datetime.now(tz=timezone.utc)
+        return {
+            "number": n, "pr_number": n, "state": "merged", "pr_type": "feature",
+            "merged_at": (now - timedelta(days=days_offset)).isoformat(),
+            "created_at": (now - timedelta(days=days_offset + 3)).isoformat(),
+            "total_loc": 100, "additions": 60, "deletions": 40,
+            "size_bucket": "s", "blast_radius": "low",
+            "ci_status": "pass", "has_substantive_review": True,
+            "is_bot_authored": False, "rubber_stamp_approvers": [],
+            "approvers": ["alice"], "is_hotspot": False, "is_wip_pr": False,
+        }
+
+    def test_pr_audit_dashboard_has_dora_with_merged_history(self):
+        # pr-audit receives merged PRs → build_metrics_dashboard emits DORA rows
+        prs = [self._merged_pr(i, days_offset=i * 4) for i in range(5)]
+        result = build_metrics_dashboard(prs)
+        assert "Deployment Frequency" in result
+        assert "Lead Time (P50)" in result
+        assert "PR Survival Rate" in result
+        assert "Change Failure Rate" in result
+
+    def test_mq_dashboard_has_na_dora_with_open_only_queue(self):
+        # mq open-PR queue → valley_of_calm adds N/A DORA rows for structural consistency
+        from scripts.mq.report import _valley_of_calm_section
+        prs = [
+            {"number": i, "pr_number": i, "state": "open", "pr_type": "feature",
+             "blast_radius": "low", "risk_tier": "LOW", "merged_at": None,
+             "age_hours": 24, "ci_status": "unknown", "is_wip_pr": False,
+             "reviewer_count": 1, "approval_count": 0}
+            for i in range(5)
+        ]
+        result = _valley_of_calm_section(prs)
+        assert "Deployment Frequency" in result
+        assert "N/A" in result
+        assert "Lead Time (P50)" in result
+
+    def test_dora_benchmarks_consistent_across_reports(self):
+        # Same benchmark strings must appear in both pr-audit and mq N/A rows
+        from scripts.mq.report import _valley_of_calm_section
+        prs = [
+            {"number": i, "pr_number": i, "state": "open", "pr_type": "feature",
+             "blast_radius": "low", "risk_tier": "LOW", "merged_at": None,
+             "age_hours": 24, "ci_status": "unknown", "is_wip_pr": False,
+             "reviewer_count": 1, "approval_count": 0}
+            for i in range(3)
+        ]
+        mq_result = _valley_of_calm_section(prs)
+        merged_prs = [self._merged_pr(i, days_offset=i * 5) for i in range(5)]
+        pr_audit_result = build_metrics_dashboard(merged_prs)
+        # Both reports use the same ≥5/wk and ≤1d elite benchmarks
+        assert "≥5/wk" in mq_result
+        assert "≤1d elite" in pr_audit_result

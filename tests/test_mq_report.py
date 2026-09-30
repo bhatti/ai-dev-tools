@@ -517,6 +517,45 @@ class TestDeploymentRiskSection:
         # Stale PR table now uses canonical columns from build_stale_pr_table()
         assert "| PR | Title | Author | Age | Status | Risk |" in result
 
+    def test_cfr_proxy_in_metrics_dashboard(self):
+        # 4 bug PRs out of 10 total → 40% CFR proxy should appear in Metrics Dashboard
+        prs = _make_prs(6, pr_type="feature") + _make_prs(4, pr_type="bug")
+        result = _valley_of_calm_section(prs)
+        assert "CFR Proxy" in result
+        assert "40.0%" in result
+
+    def test_feature_bug_ratio_in_metrics_dashboard(self):
+        prs = _make_prs(9, pr_type="feature") + _make_prs(1, pr_type="bug")
+        result = _valley_of_calm_section(prs)
+        assert "Feature:Bug Ratio" in result
+        assert "9.0:1" in result
+
+    def test_cfr_proxy_zero_when_no_bugs(self):
+        prs = _make_prs(5, pr_type="feature")
+        result = _valley_of_calm_section(prs)
+        assert "CFR Proxy" in result
+        assert "0.0%" in result
+
+    def test_dora_na_rows_present_for_open_only_queue(self):
+        # Open PRs have no merged_at → DORA cannot be computed; N/A rows must appear
+        prs = _make_prs(10, pr_type="feature")
+        result = _valley_of_calm_section(prs)
+        assert "Deployment Frequency" in result
+        assert "N/A" in result
+        assert "Change Failure Rate" in result
+        assert "Lead Time (P50)" in result
+        assert "PR Survival Rate" in result
+
+    def test_dora_na_rows_absent_when_merged_prs_present(self):
+        # When PRs have merged_at, compute_throughput_metrics returns data → N/A rows NOT added
+        prs = _make_prs(5, pr_type="feature")
+        for p in prs:
+            p["merged_at"] = "2026-09-01T10:00:00Z"
+            p["state"] = "merged"
+        result = _valley_of_calm_section(prs)
+        # Real DORA values should appear instead of N/A placeholders
+        assert "Requires merged PR history" not in result
+
 
 class TestRiskHeatmapHtml:
     def _write_prs(self, tmp_path, n=20, bug_count=2):
@@ -582,3 +621,97 @@ class TestRiskHeatmapHtml:
         html = (reports / "risk_heatmap.html").read_text()
         assert "Queue size: 30" in html
         assert "Defect-proxy rate: 10.0%" in html
+
+
+class TestPROverviewSection:
+    """PR Overview section appears in gate-review (single-PR) mode only."""
+
+    def test_shows_title_and_description_when_present(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps({
+            "scope": "billing",
+            "blast_radius": "low",
+            "changed_files": 3,
+            "lines_changed": 50,
+            "title": "Fix null pointer in payment processor",
+            "body": "## Problem\nPayment processor crashes on null user.\n\n## Solution\nAdd null guard.",
+            "issue_ref": {"key": "PROJ-123", "url": "https://jira.example.com/browse/PROJ-123", "source": "jira"},
+        }))
+        md, _ = _build_report(tmp_path, "77", "Scope & Blast Radius")
+        assert "## PR Overview" in md
+        assert "Fix null pointer in payment processor" in md
+        assert "Problem" in md
+        assert "[PROJ-123](https://jira.example.com/browse/PROJ-123)" in md
+
+    def test_shows_issue_link_without_url(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps({
+            "scope": "api",
+            "blast_radius": "low",
+            "changed_files": 2,
+            "lines_changed": 30,
+            "title": "Add rate limiting",
+            "body": "",
+            "issue_ref": {"key": "PROJ-456", "url": "", "source": "github"},
+        }))
+        md, _ = _build_report(tmp_path, "99", "Scope & Blast Radius")
+        assert "## PR Overview" in md
+        assert "PROJ-456" in md
+
+    def test_no_overview_section_when_no_pr_metadata(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps({
+            "scope": "billing",
+            "blast_radius": "low",
+            "changed_files": 3,
+            "lines_changed": 50,
+        }))
+        md, _ = _build_report(tmp_path, "1", "Scope")
+        assert "## PR Overview" not in md
+
+    def test_overview_absent_in_aggregate_mode(self, tmp_path):
+        # Aggregate MQ reports have no scope.json — PR Overview must not appear
+        md, _ = _build_report(tmp_path, "", "Merge Queue")
+        assert "## PR Overview" not in md
+
+
+class TestGateReviewMetricsDashboard:
+    """Gate-review single-PR report shows 5-column Metrics Dashboard."""
+
+    def _scope(self, **kw):
+        base = {
+            "scope": "billing", "blast_radius": "medium",
+            "changed_files": 8, "lines_changed": 250,
+            "additions": 200, "deletions": 50,
+            "created_at": "2026-09-25T10:00:00Z",
+            "categories": ["backend"],
+        }
+        base.update(kw)
+        return base
+
+    def test_metrics_dashboard_present_with_scope(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        (tmp_path / "risk_score.json").write_text(json.dumps({"tier": "MEDIUM", "score": 30, "requires_human_approval": False}))
+        md, _ = _build_report(tmp_path, "42", "Scope & Blast Radius")
+        assert "## Metrics Dashboard" in md
+        assert "| Metric | Value | Benchmark | Signal | Description |" in md
+
+    def test_loc_changed_row_present(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        md, _ = _build_report(tmp_path, "10", "Scope & Blast Radius")
+        assert "LOC Changed" in md
+        assert "250" in md
+
+    def test_blast_radius_row_present(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        md, _ = _build_report(tmp_path, "10", "Scope & Blast Radius")
+        assert "Blast Radius" in md
+        assert "medium" in md
+
+    def test_pr_age_row_present(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        md, _ = _build_report(tmp_path, "10", "Scope & Blast Radius")
+        assert "PR Age" in md
+
+    def test_dashboard_absent_without_pr_number(self, tmp_path):
+        # Aggregate mode (no PR number) → no single-PR metrics dashboard
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        md, _ = _build_report(tmp_path, "", "Merge Queue")
+        assert "LOC Changed" not in md
