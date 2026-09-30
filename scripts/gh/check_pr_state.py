@@ -10,7 +10,7 @@ Reads:  /workspace/{issue_id}/pr.json
 Writes: /workspace/{issue_id}/monitor_result.json  (only if terminal)
         /workspace/{issue_id}/poll_state.json
 
-Exit codes: 0=ok, 1=error
+Exit codes: 0=ok (open or terminal handled), 3=transient error (retry/pause), 1=hard error
 """
 
 import json
@@ -68,9 +68,10 @@ def main(issue_id: str) -> None:
     print(f"[check-pr-state] PR #{pr_number} state={state}", flush=True)
 
     if state == "ERROR":
-        print("ERROR: could not determine PR state", file=sys.stderr)
-        write_json(config, issue_id, "poll_state.json", {"terminal": False, "state": "ERROR", "error": True})
-        sys.exit(1)
+        # Transient gh CLI failure (network timeout, rate-limit) — pause so formicary retries
+        print("WARNING: could not determine PR state (will retry)", file=sys.stderr)
+        write_json(config, issue_id, "poll_state.json", {"terminal": False, "state": "ERROR", "retrying": True})
+        sys.exit(3)
 
     if state in ("MERGED", "CLOSED"):
         write_json(config, issue_id, "monitor_result.json", {"status": state, "pr_number": pr_number})

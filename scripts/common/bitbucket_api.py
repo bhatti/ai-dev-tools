@@ -52,17 +52,30 @@ def create_pr(
     return resp.json()
 
 
+class BitbucketNetworkError(IOError):
+    """Transient network failure — caller should retry rather than hard-fail."""
+
+
 def get_pr(config: dict, workspace: str, repo: str, pr_id: int | str) -> dict | None:
-    """Fetch a single PR by ID."""
+    """Fetch a single PR by ID. Raises BitbucketNetworkError on timeout/connection failure."""
     url = f"{_repo(workspace, repo)}/pullrequests/{pr_id}"
-    resp = requests.get(url, auth=_auth(config), timeout=30)
+    try:
+        resp = requests.get(url, auth=_auth(config), timeout=30)
+    except requests.exceptions.Timeout as exc:
+        raise BitbucketNetworkError(f"Bitbucket API timed out fetching PR {pr_id}") from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise BitbucketNetworkError(f"Bitbucket API connection failed for PR {pr_id}") from exc
     if not resp.ok:
         return None
     return resp.json()
 
 
 def get_pr_state(config: dict, workspace: str, repo: str, pr_id: int | str) -> str:
-    """Return PR state string: OPEN, MERGED, DECLINED, SUPERSEDED, or UNKNOWN."""
+    """Return PR state string: OPEN, MERGED, DECLINED, SUPERSEDED, or UNKNOWN.
+
+    Propagates BitbucketNetworkError so callers can distinguish transient failures
+    (retry/pause) from permanent errors (token expired, PR not found).
+    """
     pr = get_pr(config, workspace, repo, pr_id)
     if not pr:
         return "UNKNOWN"

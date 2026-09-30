@@ -225,11 +225,27 @@ def _audit_metric_signal(key: str, val: float) -> str:
     return "—"
 
 
+def _fetch_prs_for_metrics(config: dict, n_prs: int = 50) -> list[dict]:
+    """Fetch recent PRs best-effort for the shared Metrics Dashboard.
+
+    Returns [] on any failure so the dashboard falls back to audit-only rows.
+    Uses merged+open states to populate DORA and review-coverage rows.
+    """
+    try:
+        from scripts.analyze.pr_fetcher import fetch_prs
+        prs = fetch_prs(config, n_prs, states=["merged", "open", "declined"])
+        print(f"[audit] fetched {len(prs)} PRs for metrics dashboard", flush=True)
+        return prs
+    except Exception as e:
+        print(f"[audit] PR fetch for metrics skipped: {e}", flush=True)
+        return []
+
+
 def _read_all_audit_metrics(reports_dir: Path) -> list[tuple]:
     """Read all Claude-computed metrics from audit_findings.json.
 
     Returns a list of (metric, value, benchmark, signal, description) tuples
-    suitable for build_metrics_dashboard([], extra_rows=...).
+    suitable for build_metrics_dashboard(prs, extra_rows=...).
     """
     findings_path = reports_dir / "audit_findings.json"
     if not findings_path.exists():
@@ -724,19 +740,27 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
             print(f"::add-task-context AUDIT_CRITICAL_COUNT::{crit}", flush=True)
             print(f"::add-task-context AUDIT_HIGH_COUNT::{high}", flush=True)
 
-        # Append metrics dashboard with all Claude-assessed audit metrics
+        # Append metrics dashboard — union of PR-level metrics (DORA, review coverage,
+        # blast radius, CI pass rate, stale, etc.) + Claude-assessed audit metrics
+        # (verbosity, erosion, fix ratio, hotspots, etc.).
+        # Fetch PRs best-effort; fall back to [] so audit-only rows still appear.
         report_md_path = reports_dir / "audit_report.md"
         if report_md_path.exists():
             md_content = report_md_path.read_text(encoding="utf-8")
             if "Metrics Dashboard" not in md_content:
                 audit_extra_rows = _read_all_audit_metrics(reports_dir)
-                if audit_extra_rows:
-                    from scripts.common.pr_classify import build_metrics_dashboard
-                    dashboard = build_metrics_dashboard([], extra_rows=audit_extra_rows)
-                    if dashboard:
-                        md_content += f"\n\n## Codebase Health Metrics\n\n{dashboard}\n"
-                        report_md_path.write_text(md_content, encoding="utf-8")
-                        print(f"[audit] appended {len(audit_extra_rows)}-row metrics dashboard to report", flush=True)
+                from scripts.common.pr_classify import build_metrics_dashboard
+                try:
+                    n_prs_for_metrics = int(config.get("N_PRS", "50"))
+                except (ValueError, TypeError):
+                    n_prs_for_metrics = 50
+                prs_for_metrics = _fetch_prs_for_metrics(config, n_prs=n_prs_for_metrics)
+                dashboard = build_metrics_dashboard(prs_for_metrics, extra_rows=audit_extra_rows)
+                if dashboard:
+                    md_content += f"\n\n## Codebase Health Metrics\n\n{dashboard}\n"
+                    report_md_path.write_text(md_content, encoding="utf-8")
+                    print(f"[audit] appended metrics dashboard ({len(prs_for_metrics)} PRs, "
+                          f"{len(audit_extra_rows)} audit rows)", flush=True)
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "audit_report.html"

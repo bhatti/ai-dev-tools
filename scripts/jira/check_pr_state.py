@@ -10,7 +10,7 @@ Reads:  /workspace/{issue_id}/pr.json
 Writes: /workspace/{issue_id}/monitor_result.json  (only if terminal)
         /workspace/{issue_id}/poll_state.json
 
-Exit codes: 0=ok (open or terminal handled), 1=error
+Exit codes: 0=ok (open or terminal handled), 3=transient error (retry/pause), 1=hard error
 """
 
 import subprocess
@@ -19,7 +19,7 @@ import sys
 import click
 
 from scripts.common.artifacts import read_json, write_json
-from scripts.common.bitbucket_api import get_pr_state
+from scripts.common.bitbucket_api import get_pr_state, BitbucketNetworkError
 from scripts.common.config import load_config
 from scripts.standup.slack_client import notify
 
@@ -48,7 +48,14 @@ def main(issue_id: str) -> None:
     repo_name = pr.get("repo") or config.get("BITBUCKET_REPO", "")
     pr_id = (pr.get("number") or pr.get("id") or pr.get("url", "").rstrip("/").split("/")[-1])
 
-    state = get_pr_state(config, workspace, repo_name, pr_id)
+    try:
+        state = get_pr_state(config, workspace, repo_name, pr_id)
+    except BitbucketNetworkError as exc:
+        # Transient network failure — pause the job so formicary retries after delay
+        print(f"[check-pr-state] network error (will retry): {exc}", file=sys.stderr)
+        write_json(config, issue_id, "poll_state.json", {"terminal": False, "state": "OPEN", "retrying": True})
+        sys.exit(3)
+
     print(f"[check-pr-state] PR {pr_id} state={state}", flush=True)
 
     if state == "UNKNOWN":
