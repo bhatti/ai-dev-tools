@@ -19,6 +19,7 @@ from pathlib import Path
 import click
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.pr_classify import classify_pr_category
 from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, parse_pr_ref, repo_slug, top_level_module
 
 _CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
@@ -139,7 +140,24 @@ def main(pr_number: str) -> None:
 
     scope, blast_radius, sensitive_touched, owners = _compute_scope(files, codeowners)
 
-    total_lines = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+    total_additions = sum(f.get("additions", 0) for f in files)
+    total_deletions = sum(f.get("deletions", 0) for f in files)
+    total_lines = total_additions + total_deletions
+
+    # Derive file categories from changed file paths (best-effort, no API call).
+    category, _ = classify_pr_category({}, files)
+    categories_set: set[str] = {category} if category and category != "unknown" else set()
+
+    # Fetch PR metadata for author/created_at — best-effort, falls back to empty dict.
+    pr_meta: dict = {}
+    try:
+        from scripts.analyze.pr_fetcher import fetch_single_pr as _fetch_single_pr
+        pr_num_int = int(pr_number) if str(pr_number).isdigit() else None
+        if pr_num_int:
+            pr_meta = _fetch_single_pr(config, pr_num_int) or {}
+    except Exception as e:
+        print(f"[scope_router] PR metadata fetch skipped: {e}", flush=True)
+
     result = {
         "scope": scope,
         "blast_radius": blast_radius,
@@ -147,11 +165,17 @@ def main(pr_number: str) -> None:
         "owners": sorted(owners),
         "changed_files": len(files),
         "lines_changed": total_lines,
+        "additions": total_additions,
+        "deletions": total_deletions,
+        "author": pr_meta.get("author", ""),
+        "created_at": pr_meta.get("created_at", ""),
+        "categories": sorted(categories_set),
     }
 
     out_path = workspace / "scope.json"
     out_path.write_text(json.dumps(result, indent=2))
     print(f"[scope_router] scope={scope} blast_radius={blast_radius} files={len(files)} lines={total_lines}", flush=True)
+    print(f"[scope_router] additions={total_additions} deletions={total_deletions} categories={sorted(categories_set)}", flush=True)
     print(f"::add-task-context SCOPE_KEY::{scope}", flush=True)
     print(f"::add-task-context BLAST_RADIUS::{blast_radius}", flush=True)
     print(f"::add-task-context CHANGED_FILES::{len(files)}", flush=True)

@@ -5,12 +5,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 
 from scripts.mq._shared import top_level_module
 from scripts.mq.scope_router import (
     _compute_scope,
     _match_codeowner,
     _parse_codeowners,
+    main as _scope_router_main,
 )
 
 
@@ -136,3 +138,55 @@ class TestComputeScope:
         assert scope == "cross-scope"
         assert "@pay" in owners
         assert "@sec" in owners
+
+
+class TestScopeJsonOutput:
+    """Verify scope.json written by main() contains all required fields."""
+
+    _FILES = [
+        {"path": "billing/charge.py", "additions": 30, "deletions": 10},
+        {"path": "billing/invoice.py", "additions": 20, "deletions": 5},
+    ]
+
+    def _run(self, tmp_path, pr_meta=None):
+        runner = CliRunner()
+        with (
+            patch("scripts.mq.scope_router.load_config", return_value={"WORKSPACE_DIR": str(tmp_path)}),
+            patch("scripts.mq.scope_router.apply_repo_override"),
+            patch("scripts.mq.scope_router.repo_slug", return_value="org/repo"),
+            patch("scripts.mq.scope_router.fetch_pr_files", return_value=self._FILES),
+            patch("scripts.analyze.pr_fetcher.fetch_single_pr", return_value=pr_meta or {}),
+        ):
+            result = runner.invoke(_scope_router_main, ["--pr-number", "42"])
+        return result, json.loads((tmp_path / "scope.json").read_text())
+
+    def test_separate_additions_deletions(self, tmp_path):
+        _, data = self._run(tmp_path)
+        assert data["additions"] == 50   # 30+20
+        assert data["deletions"] == 15   # 10+5
+        assert data["lines_changed"] == 65
+
+    def test_categories_derived_from_paths(self, tmp_path):
+        _, data = self._run(tmp_path)
+        # billing/ paths → not empty; category derived from file paths
+        assert isinstance(data["categories"], list)
+
+    def test_pr_metadata_populated_when_available(self, tmp_path):
+        meta = {"author": "alice", "created_at": "2026-09-01T00:00:00Z"}
+        _, data = self._run(tmp_path, pr_meta=meta)
+        assert data["author"] == "alice"
+        assert data["created_at"] == "2026-09-01T00:00:00Z"
+
+    def test_pr_metadata_empty_on_fetch_failure(self, tmp_path):
+        runner = CliRunner()
+        with (
+            patch("scripts.mq.scope_router.load_config", return_value={"WORKSPACE_DIR": str(tmp_path)}),
+            patch("scripts.mq.scope_router.apply_repo_override"),
+            patch("scripts.mq.scope_router.repo_slug", return_value="org/repo"),
+            patch("scripts.mq.scope_router.fetch_pr_files", return_value=self._FILES),
+            patch("scripts.analyze.pr_fetcher.fetch_single_pr", side_effect=RuntimeError("api down")),
+        ):
+            runner.invoke(_scope_router_main, ["--pr-number", "42"])
+        data = json.loads((tmp_path / "scope.json").read_text())
+        assert data["author"] == ""
+        assert data["created_at"] == ""

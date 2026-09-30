@@ -23,6 +23,7 @@ import os
 import re
 from collections import Counter
 from datetime import datetime, timezone
+from statistics import median
 
 # Shared helpers re-exported from pr_metadata (single source of truth).
 # Import here at module level — no circular risk since pr_metadata imports
@@ -803,9 +804,10 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
     Standard rows are computed from the PR list. Workflow-specific rows
     can be appended via extra_rows: list of (metric, value, benchmark, signal, description) tuples.
 
-    Returns an empty string when prs is empty.
+    Returns an empty string when both prs and extra_rows are empty.
+    Accepts empty prs with extra_rows to build an audit-only dashboard.
     """
-    if not prs:
+    if not prs and not extra_rows:
         return ""
 
     total = len(prs)
@@ -816,84 +818,105 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
         "|--------|-------|-----------|--------|-------------|",
     ]
 
-    # PR State Breakdown
-    merged = sum(1 for p in prs if p.get("merged_at") or p.get("state", "").lower() == "merged")
-    open_count = sum(1 for p in prs if p.get("state", "").lower() in ("open", "") and not p.get("merged_at"))
-    pending = sum(1 for p in prs if not p.get("has_substantive_review") and p.get("state", "").lower() == "open")
-    wip = sum(1 for p in prs if p.get("is_wip_pr"))
-    declined = sum(1 for p in prs if p.get("state", "").lower() in ("declined", "closed") and not p.get("merged_at"))
-    state_val = f"merged={merged} open={open_count} pending={pending} wip={wip} declined={declined} total={total}"
-    lines.append(f"| PR State Breakdown | {state_val} | — | — | State distribution across the batch. Declined PRs excluded from gap-rate denominators. |")
+    if prs:
+        # PR State Breakdown
+        merged = sum(1 for p in prs if p.get("merged_at") or p.get("state", "").lower() == "merged")
+        open_count = sum(1 for p in prs if p.get("state", "").lower() in ("open", "") and not p.get("merged_at"))
+        pending = sum(1 for p in prs if not p.get("has_substantive_review") and p.get("state", "").lower() == "open")
+        wip = sum(1 for p in prs if p.get("is_wip_pr"))
+        declined = sum(1 for p in prs if p.get("state", "").lower() in ("declined", "closed") and not p.get("merged_at"))
+        state_val = f"merged={merged} open={open_count} pending={pending} wip={wip} declined={declined} total={total}"
+        lines.append(f"| PR State Breakdown | {state_val} | — | — | State distribution across the batch. Declined PRs excluded from gap-rate denominators. |")
 
-    # Avg PR Size
-    locs = [p.get("total_loc", p.get("additions", 0) + p.get("deletions", 0)) for p in prs]
-    avg_loc = round(sum(locs) / total) if total else 0
-    loc_signal = "🟢" if avg_loc < 300 else ("🟡" if avg_loc < 700 else "🔴")
-    lines.append(f"| Avg PR Size | {avg_loc} LOC | <300 | {loc_signal} | Mean additions+deletions per PR |")
+        # Avg PR Size
+        locs = [p.get("total_loc", p.get("additions", 0) + p.get("deletions", 0)) for p in prs]
+        avg_loc = round(sum(locs) / total) if total else 0
+        loc_signal = "🟢" if avg_loc < 300 else ("🟡" if avg_loc < 700 else "🔴")
+        lines.append(f"| Avg PR Size | {avg_loc} LOC | <300 | {loc_signal} | Mean additions+deletions per PR |")
 
-    # Size Distribution
-    size_counts: dict[str, int] = {"xs": 0, "s": 0, "m": 0, "l": 0, "xl": 0}
-    for p in prs:
-        bucket = p.get("size_bucket", "")
-        if not bucket:
-            loc = p.get("total_loc", p.get("additions", 0) + p.get("deletions", 0))
-            bucket = _size_bucket_fn(loc)
-        size_counts[bucket] = size_counts.get(bucket, 0) + 1
-    size_val = " ".join(f"{k}={v}" for k, v in size_counts.items() if v > 0)
-    lines.append(f"| Size Distribution | {size_val} | — | — | PR size buckets: xs<50 s<200 m<500 l<1000 xl≥1000 LOC |")
+        # Size Distribution
+        size_counts: dict[str, int] = {"xs": 0, "s": 0, "m": 0, "l": 0, "xl": 0}
+        for p in prs:
+            bucket = p.get("size_bucket", "")
+            if not bucket:
+                loc = p.get("total_loc", p.get("additions", 0) + p.get("deletions", 0))
+                bucket = _size_bucket_fn(loc)
+            size_counts[bucket] = size_counts.get(bucket, 0) + 1
+        size_val = " ".join(f"{k}={v}" for k, v in size_counts.items() if v > 0)
+        lines.append(f"| Size Distribution | {size_val} | — | — | PR size buckets: xs<50 s<200 m<500 l<1000 xl≥1000 LOC |")
 
-    # Blast Radius Distribution
-    blast_counts: dict[str, int] = Counter(p.get("blast_radius", "low") for p in prs)
-    blast_val = f"low={blast_counts.get('low', 0)} medium={blast_counts.get('medium', 0)} high={blast_counts.get('high', 0)}"
-    critical_count = blast_counts.get("critical", 0)
-    if critical_count:
-        blast_val += f" critical={critical_count}"
-    blast_signal = "🟢" if blast_counts.get("high", 0) + critical_count <= total * 0.1 else "🟡" if blast_counts.get("high", 0) + critical_count <= total * 0.3 else "🔴"
-    lines.append(f"| Blast Radius Distribution | {blast_val} | high≤10% | {blast_signal} | How broadly each PR affects the codebase |")
+        # Blast Radius Distribution
+        blast_counts: dict[str, int] = Counter(p.get("blast_radius", "low") for p in prs)
+        blast_val = f"low={blast_counts.get('low', 0)} medium={blast_counts.get('medium', 0)} high={blast_counts.get('high', 0)}"
+        critical_count = blast_counts.get("critical", 0)
+        if critical_count:
+            blast_val += f" critical={critical_count}"
+        blast_signal = "🟢" if blast_counts.get("high", 0) + critical_count <= total * 0.1 else "🟡" if blast_counts.get("high", 0) + critical_count <= total * 0.3 else "🔴"
+        lines.append(f"| Blast Radius Distribution | {blast_val} | high≤10% | {blast_signal} | How broadly each PR affects the codebase |")
 
-    # CI Pass Rate
-    ci_known = [p for p in prs if p.get("ci_status") not in ("unknown", None, "")]
-    if ci_known:
-        ci_pass = sum(1 for p in ci_known if p.get("ci_status") == "pass")
-        ci_pct = round(ci_pass / len(ci_known) * 100, 1)
-        ci_signal = "🟢" if ci_pct >= 90 else ("🟡" if ci_pct >= 75 else "🔴")
-        lines.append(f"| CI Pass Rate | {ci_pass}/{len(ci_known)} ({ci_pct}%) | ≥90% | {ci_signal} | Fraction of PRs where all CI checks passed |")
-    else:
-        lines.append(f"| CI Pass Rate | N/A | ≥90% | — | CI status not available from bulk API |")
+        # CI Pass Rate
+        ci_known = [p for p in prs if p.get("ci_status") not in ("unknown", None, "")]
+        if ci_known:
+            ci_pass = sum(1 for p in ci_known if p.get("ci_status") == "pass")
+            ci_pct = round(ci_pass / len(ci_known) * 100, 1)
+            ci_signal = "🟢" if ci_pct >= 90 else ("🟡" if ci_pct >= 75 else "🔴")
+            lines.append(f"| CI Pass Rate | {ci_pass}/{len(ci_known)} ({ci_pct}%) | ≥90% | {ci_signal} | Fraction of PRs where all CI checks passed |")
+        else:
+            lines.append(f"| CI Pass Rate | N/A | ≥90% | — | CI status not available from bulk API |")
 
-    # Review Coverage
-    reviewable = [p for p in prs if not p.get("is_bot_authored") and p.get("state", "").lower() != "declined"]
-    if reviewable:
-        substantive = sum(1 for p in reviewable if p.get("has_substantive_review"))
-        cov_pct = round(substantive / len(reviewable) * 100, 1)
-        cov_signal = "🟢" if cov_pct >= 80 else ("🟡" if cov_pct >= 60 else "🔴")
-        lines.append(f"| Review Coverage | {substantive}/{len(reviewable)} ({cov_pct}%) | ≥80% | {cov_signal} | PRs with at least one substantive human review |")
+        # Review Coverage
+        reviewable = [p for p in prs if not p.get("is_bot_authored") and p.get("state", "").lower() != "declined"]
+        if reviewable:
+            substantive = sum(1 for p in reviewable if p.get("has_substantive_review"))
+            cov_pct = round(substantive / len(reviewable) * 100, 1)
+            cov_signal = "🟢" if cov_pct >= 80 else ("🟡" if cov_pct >= 60 else "🔴")
+            lines.append(f"| Review Coverage | {substantive}/{len(reviewable)} ({cov_pct}%) | ≥80% | {cov_signal} | PRs with at least one substantive human review |")
 
-    # Rubber-Stamp Rate
-    approved_prs = [p for p in prs if p.get("approvers") or p.get("review_decision") == "APPROVED"]
-    if approved_prs:
-        rubber_stamp = sum(1 for p in approved_prs if p.get("rubber_stamp_approvers"))
-        rs_pct = round(rubber_stamp / len(approved_prs) * 100, 1)
-        rs_signal = "🟢" if rs_pct <= 10 else ("🟡" if rs_pct <= 30 else "🔴")
-        lines.append(f"| Rubber-Stamp Rate | {rubber_stamp}/{len(approved_prs)} ({rs_pct}%) | ≤10% | {rs_signal} | Approvals with zero substantive review comments |")
+        # Rubber-Stamp Rate
+        approved_prs = [p for p in prs if p.get("approvers") or p.get("review_decision") == "APPROVED"]
+        if approved_prs:
+            rubber_stamp = sum(1 for p in approved_prs if p.get("rubber_stamp_approvers"))
+            rs_pct = round(rubber_stamp / len(approved_prs) * 100, 1)
+            rs_signal = "🟢" if rs_pct <= 10 else ("🟡" if rs_pct <= 30 else "🔴")
+            lines.append(f"| Rubber-Stamp Rate | {rubber_stamp}/{len(approved_prs)} ({rs_pct}%) | ≤10% | {rs_signal} | Approvals with zero substantive review comments |")
 
-    # Stale PRs
-    stale = sum(1 for p in prs if _compute_pr_age_inline(p) > 7)
-    stale_signal = "🟢" if stale == 0 else ("🟡" if stale <= total * 0.2 else "🔴")
-    lines.append(f"| Stale PRs (>7d) | {stale}/{total} | 0 | {stale_signal} | PRs open longer than 7 days |")
+        # Stale PRs
+        stale = sum(1 for p in prs if _compute_pr_age_inline(p) > 7)
+        stale_signal = "🟢" if stale == 0 else ("🟡" if stale <= total * 0.2 else "🔴")
+        lines.append(f"| Stale PRs (>7d) | {stale}/{total} | 0 | {stale_signal} | PRs open longer than 7 days |")
 
-    # Hotspot Count
-    hotspots = sum(1 for p in prs if p.get("is_hotspot"))
-    hotspot_signal = "🟢" if hotspots == 0 else ("🟡" if hotspots <= 2 else "🔴")
-    lines.append(f"| Hotspot Count | {hotspots}/{total} | 0 | {hotspot_signal} | PRs touching sensitive paths (auth/billing/crypto) |")
+        # Hotspot Count
+        hotspots = sum(1 for p in prs if p.get("is_hotspot"))
+        hotspot_signal = "🟢" if hotspots == 0 else ("🟡" if hotspots <= 2 else "🔴")
+        lines.append(f"| Hotspot Count | {hotspots}/{total} | 0 | {hotspot_signal} | PRs touching sensitive paths (auth/billing/crypto) |")
 
-    # Avg Age
-    ages = [_compute_pr_age_inline(p) for p in prs]
-    avg_age = round(sum(ages) / total) if total else 0
-    age_signal = "🟢" if avg_age <= 3 else ("🟡" if avg_age <= 7 else "🔴")
-    lines.append(f"| Avg Age | {avg_age}d | ≤3d | {age_signal} | Mean days since PR was opened |")
+        # Avg Age
+        ages = [_compute_pr_age_inline(p) for p in prs]
+        avg_age = round(sum(ages) / total) if total else 0
+        age_signal = "🟢" if avg_age <= 3 else ("🟡" if avg_age <= 7 else "🔴")
+        lines.append(f"| Avg Age | {avg_age}d | ≤3d | {age_signal} | Mean days since PR was opened |")
 
-    # Workflow-specific extra rows
+        # DORA / Throughput rows
+        throughput = compute_throughput_metrics(prs)
+        if throughput:
+            deploy_freq = throughput.get("deployment_frequency", 0)
+            freq_signal = "🟢" if deploy_freq >= 5 else ("🟡" if deploy_freq >= 2 else "🔴")
+            lines.append(f"| Deployment Frequency | {deploy_freq}/wk | ≥5/wk | {freq_signal} | Merged PRs per week |")
+
+            cfr = throughput.get("change_failure_rate_pct", 0)
+            cfr_signal = "🟢" if cfr <= 10 else ("🟡" if cfr <= 25 else "🔴")
+            lines.append(f"| Change Failure Rate | {cfr}% | ≤10% | {cfr_signal} | Bug+security PRs as % of merged |")
+
+            if "lead_time_p50_days" in throughput:
+                lt = throughput["lead_time_p50_days"]
+                lt_signal = "🟢" if lt <= 1 else ("🟡" if lt <= 7 else "🔴")
+                lines.append(f"| Lead Time (P50) | {lt}d | ≤1d elite | {lt_signal} | Median days from PR opened to merged |")
+
+            survival = throughput.get("pr_survival_rate_pct", 0)
+            surv_signal = "🟢" if survival >= 80 else ("🟡" if survival >= 60 else "🔴")
+            lines.append(f"| PR Survival Rate | {survival}% | ≥80% | {surv_signal} | Merged / (merged+declined) |")
+
+    # Workflow-specific extra rows (appended last regardless of prs)
     if extra_rows:
         for row in extra_rows:
             if len(row) >= 5:
@@ -904,6 +927,68 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
 
     lines.append("")
     return "\n".join(lines)
+
+
+def compute_throughput_metrics(prs: list[dict]) -> dict:
+    """Compute DORA and throughput metrics from a PR list.
+
+    Returns {} when there are fewer than 3 merged PRs — not enough data for
+    meaningful rates. Uses only fields guaranteed by normalize_pr():
+    merged_at, created_at, pr_type, state.
+    """
+    merged = [p for p in prs if p.get("merged_at") or p.get("state", "").lower() == "merged"]
+    if len(merged) < 3:
+        return {}
+
+    def _to_dt(s: str | None):
+        if not s:
+            return None
+        try:
+            s = s.rstrip("Z").replace("+00:00", "")
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    # Lead times (days from created_at to merged_at)
+    lead_times: list[float] = []
+    for p in merged:
+        start = _to_dt(p.get("created_at") or p.get("created_on"))
+        end = _to_dt(p.get("merged_at"))
+        if start and end and end > start:
+            lead_times.append((end - start).total_seconds() / 86400.0)
+
+    # Deployment frequency (merged PRs per week)
+    merged_dts = sorted(dt for p in merged if (dt := _to_dt(p.get("merged_at"))))
+    deployment_freq: float | None = None
+    if len(merged_dts) >= 2:
+        span_weeks = (merged_dts[-1] - merged_dts[0]).total_seconds() / (7 * 86400.0)
+        if span_weeks >= 0.5:
+            deployment_freq = round(len(merged) / span_weeks, 1)
+
+    # CFR proxy: bug + security PRs as % of merged
+    failure_prs = [p for p in merged if p.get("pr_type") in ("bug", "security")]
+    cfr_pct = round(len(failure_prs) / len(merged) * 100, 1) if merged else 0.0
+
+    # Survival rate: merged / (merged + declined)
+    declined_prs = [p for p in prs if p.get("state", "").lower() in ("declined", "closed") and not p.get("merged_at")]
+    total_closed = len(merged) + len(declined_prs)
+    survival_pct = round(len(merged) / total_closed * 100, 1) if total_closed else 0.0
+
+    result: dict = {
+        "change_failure_rate_pct": cfr_pct,
+        "pr_survival_rate_pct": survival_pct,
+    }
+    if deployment_freq is not None:
+        result["deployment_frequency"] = deployment_freq
+    if lead_times:
+        result["avg_lead_time_days"] = round(sum(lead_times) / len(lead_times), 1)
+        result["lead_time_p50_days"] = round(median(lead_times), 1)
+    return result
 
 
 def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:

@@ -81,7 +81,7 @@ class TestBestReviewSkill:
 # _detect_intent
 # ---------------------------------------------------------------------------
 
-BB_PR_URL = "https://bitbucket.org/cribl/cribl/pull-requests/49058/overview"
+BB_PR_URL = "https://bitbucket.org/example-org/example-repo/pull-requests/49058/overview"
 GH_PR_URL = "https://github.com/bhatti/formicary/pull/123"
 
 class TestDetectIntent:

@@ -171,14 +171,95 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
             print(f"::add-task-context AUDIT_HOTSPOT_FILE::{hotspot}", flush=True)
         metrics = data.get("metrics", {})
         if isinstance(metrics, dict):
-            verbosity = metrics.get("verbosity_ratio")
-            erosion = metrics.get("erosion_score")
-            if verbosity is not None:
-                print(f"::add-task-context AUDIT_VERBOSITY_RATIO::{verbosity:.3f}", flush=True)
-            if erosion is not None:
-                print(f"::add-task-context AUDIT_EROSION_SCORE::{erosion:.3f}", flush=True)
+            _AUDIT_METRIC_CTX_KEYS = {
+                "verbosity_ratio": "AUDIT_VERBOSITY_RATIO",
+                "erosion_score": "AUDIT_EROSION_SCORE",
+                "fix_ratio": "AUDIT_FIX_RATIO",
+                "avg_files_per_commit": "AUDIT_AVG_FILES_PER_COMMIT",
+                "single_author_hotspots": "AUDIT_SINGLE_AUTHOR_HOTSPOTS",
+                "temporal_coupling_pairs": "AUDIT_TEMPORAL_COUPLING",
+                "test_gap_files": "AUDIT_TEST_GAP_FILES",
+                "high_mass_functions": "AUDIT_HIGH_MASS_FUNCTIONS",
+                "churn_complexity_hotspots": "AUDIT_CHURN_COMPLEXITY_HOTSPOTS",
+                "disabled_skipped_tests": "AUDIT_DISABLED_SKIPPED_TESTS",
+            }
+            for metric_key, ctx_key in _AUDIT_METRIC_CTX_KEYS.items():
+                val = metrics.get(metric_key)
+                if val is not None:
+                    try:
+                        print(f"::add-task-context {ctx_key}::{float(val):.3f}", flush=True)
+                    except (TypeError, ValueError):
+                        print(f"::add-task-context {ctx_key}::{val}", flush=True)
     except Exception as e:
         print(f"[audit] could not parse findings for markers: {e}", flush=True)
+
+
+# Mapping from audit_findings.json metrics keys to (display_name, benchmark, description)
+_AUDIT_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
+    "fix_ratio": ("Fix:Commit Ratio", "<15% healthy", "fix/bug/hotfix commits ÷ total commits — high ratio means firefighting, not building"),
+    "avg_files_per_commit": ("Avg Files/Commit", "<5 healthy", "mean files changed per commit — large commits are harder to review and revert"),
+    "single_author_hotspots": ("Single-Author Hotspots", "0 ideal", "# hot files changed by only one author (bus factor risk — no shared ownership)"),
+    "temporal_coupling_pairs": ("Temporal Coupling", "0 ideal", "# cross-module file pairs that always change together (hidden coupling, brittle design)"),
+    "test_gap_files": ("Test Gap Files", "0 ideal", "# high-churn production files with no corresponding test file (computed from file paths)"),
+    "verbosity_ratio": ("Verbosity Ratio", "<0.30 healthy", "(comment+blank lines) ÷ total lines — above 0.30 indicates doc debt or dead code accumulation"),
+    "erosion_score": ("Erosion Score", "<0.55 healthy", "composite signal: branch density × churn × size — measures architectural degradation"),
+    "high_mass_functions": ("High-Mass Functions (CC>10)", "0 ideal", "# functions with estimated cyclomatic complexity >10 (>50 branch points) — split them"),
+    "churn_complexity_hotspots": ("Churn×Complexity Hotspots", "0 ideal", "# files in risk quadrant: high commit frequency AND high branch density — highest change-failure risk"),
+    "disabled_skipped_tests": ("Disabled/Skipped Tests", "0 ideal", "# xit/it.skip/describe.skip/@Ignore/@Disabled — each is a hole in the test safety net"),
+}
+
+
+def _audit_metric_signal(key: str, val: float) -> str:
+    """Return 🟢/🟡/🔴 for audit metrics."""
+    if key == "fix_ratio":
+        return "🟢" if val <= 0.15 else ("🟡" if val <= 0.30 else "🔴")
+    if key == "avg_files_per_commit":
+        return "🟢" if val <= 5 else ("🟡" if val <= 10 else "🔴")
+    if key in ("single_author_hotspots", "temporal_coupling_pairs", "test_gap_files",
+               "high_mass_functions", "churn_complexity_hotspots", "disabled_skipped_tests"):
+        return "🟢" if val == 0 else ("🟡" if val <= 3 else "🔴")
+    if key == "verbosity_ratio":
+        return "🟢" if val <= 0.30 else ("🟡" if val <= 0.50 else "🔴")
+    if key == "erosion_score":
+        return "🟢" if val <= 0.35 else ("🟡" if val <= 0.55 else "🔴")
+    return "—"
+
+
+def _read_all_audit_metrics(reports_dir: Path) -> list[tuple]:
+    """Read all Claude-computed metrics from audit_findings.json.
+
+    Returns a list of (metric, value, benchmark, signal, description) tuples
+    suitable for build_metrics_dashboard([], extra_rows=...).
+    """
+    findings_path = reports_dir / "audit_findings.json"
+    if not findings_path.exists():
+        return []
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+        metrics = data.get("metrics", {})
+        if not isinstance(metrics, dict):
+            return []
+        rows: list[tuple] = []
+        for key, (name, benchmark, desc) in _AUDIT_METRIC_ROWS.items():
+            val = metrics.get(key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                fval = 0.0
+            signal = _audit_metric_signal(key, fval)
+            if "ratio" in key or "score" in key:
+                display = f"{fval:.3f}"
+            elif fval == int(fval):
+                display = str(int(fval))
+            else:
+                display = f"{fval:.1f}"
+            rows.append((name, display, benchmark, signal, desc))
+        return rows
+    except Exception as e:
+        print(f"[audit] could not read metrics from findings: {e}", flush=True)
+        return []
 
 
 def _write_audit_reports(workspace: Path, stub: dict) -> None:
@@ -286,7 +367,7 @@ Write these files using relative paths from the repo root (the `reports/` symlin
       "recommendation":"specific action targeting this exact file/module"}}],
     "patterns":[{{"pattern":"description seen in N files/commits","locations":["a","b"],"recommendation":"..."}}],
     "metrics":{{"fix_ratio":0.0,"avg_files_per_commit":0.0,"single_author_hotspots":0,"temporal_coupling_pairs":0,"test_gap_files":0,
-      "verbosity_ratio":0.0,"erosion_score":0.0,"high_mass_functions":0,"churn_complexity_hotspots":0}}}}
+      "verbosity_ratio":0.0,"erosion_score":0.0,"high_mass_functions":0,"churn_complexity_hotspots":0,"disabled_skipped_tests":0}}}}
 
 DO NOT emit any ::add-task-context markers yourself — the orchestrator script reads
 your JSON output and emits them automatically. Focus only on writing the two report files.
@@ -643,8 +724,21 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
             print(f"::add-task-context AUDIT_CRITICAL_COUNT::{crit}", flush=True)
             print(f"::add-task-context AUDIT_HIGH_COUNT::{high}", flush=True)
 
-        # Generate HTML report from Markdown
+        # Append metrics dashboard with all Claude-assessed audit metrics
         report_md_path = reports_dir / "audit_report.md"
+        if report_md_path.exists():
+            md_content = report_md_path.read_text(encoding="utf-8")
+            if "Metrics Dashboard" not in md_content:
+                audit_extra_rows = _read_all_audit_metrics(reports_dir)
+                if audit_extra_rows:
+                    from scripts.common.pr_classify import build_metrics_dashboard
+                    dashboard = build_metrics_dashboard([], extra_rows=audit_extra_rows)
+                    if dashboard:
+                        md_content += f"\n\n## Codebase Health Metrics\n\n{dashboard}\n"
+                        report_md_path.write_text(md_content, encoding="utf-8")
+                        print(f"[audit] appended {len(audit_extra_rows)}-row metrics dashboard to report", flush=True)
+
+        # Generate HTML report from Markdown
         report_html_path = reports_dir / "audit_report.html"
         if report_md_path.exists() and not report_html_path.exists():
             try:

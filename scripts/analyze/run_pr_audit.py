@@ -62,6 +62,116 @@ def _build_metrics_summary(prs: list[dict]) -> str:
     return "\n".join(lines) if len(lines) > 2 else ""
 
 
+def _build_metrics_summary_with_claude(prs: list[dict], claude_extra_rows: list[tuple]) -> str:
+    """Build pre-computed PR metrics + Claude-assessed rows in one dashboard."""
+    lines = ["## Pre-Computed PR Metrics Summary", ""]
+    lines += build_category_breakdown(prs)
+    lines += build_work_type_distribution(prs)
+    lines += build_pr_metrics_table(prs)
+    lines += build_stale_pr_table(prs, threshold_days=7)
+    dashboard = build_metrics_dashboard(prs, extra_rows=claude_extra_rows)
+    if dashboard:
+        lines.append(dashboard)
+    return "\n".join(lines) if len(lines) > 2 else ""
+
+
+# Mapping from pr_audit_findings.json metrics keys to (display_name, benchmark, description)
+_CLAUDE_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
+    "spec_coverage_pct": ("Spec Coverage", "≥80% healthy", "% PRs with linked issue + testable requirements (Jira AC or prose describing expected behavior)"),
+    "ci_catch_rate": ("CI Catch Rate", "pipeline health", "% failures caught by CI bots (build/test/lint) vs total issues found — higher = less manual debugging"),
+    "code_review_skill_catch_rate": ("Review Skill Catch Rate", ">60% healthy", "Bot+Claude code-quality findings ÷ (bot+Claude+human catches) — measures tooling effectiveness"),
+    "bot_finding_follow_through_rate": ("Bot Follow-Through", ">90% healthy", "% MAJOR/CRITICAL bot findings addressed before merge — measures code review discipline"),
+    "human_review_burden": ("Human Review Burden", "<40% healthy", "% code-quality issues caught only by humans (not by any bot in same PR) — lower = better tooling"),
+    "security_review_invocation_rate": ("Security Review Rate", "100% target", "% PRs touching authn/authz/crypto paths that received dedicated security review"),
+    "rubber_stamp_rate": ("Rubber-Stamp Rate", "≤10% healthy", "% approved PRs where ≥1 approver left zero substantive comments (LGTM/emoji only)"),
+    "revert_followup_rate": ("Revert/Follow-up Rate", "<5% healthy", "% PRs that are explicit reverts or immediate follow-up fixes for a prior merge"),
+    "verbosity_accumulation_rate": ("Verbosity Rate", "<10% healthy", "% PRs primarily adding boilerplate, trivial delegation, or dead code without functional value"),
+    "complexity_creep_pr_count": ("Complexity Creep", "0 ideal", "# PRs that increased cyclomatic complexity (new branches/functions) without adding tests"),
+    "large_pr_review_depth": ("Large PR Review Depth", ">5 comments/PR", "Avg substantive human comments on merged PRs >400 LOC — large PRs need deeper scrutiny"),
+    "xl_pr_review_coverage_pct": ("XL PR Review Coverage", "100% target", "% merged PRs ≥1000 LOC that received ≥1 substantive human comment (not just LGTM)"),
+    "large_pr_human_comments_avg": ("Large PR Avg Comments", ">5/PR healthy", "Mean substantive human comments per large PR (>400 LOC merged only)"),
+}
+
+# task-context marker key names for all Claude-computed metrics (derived from _CLAUDE_METRIC_ROWS)
+_METRIC_CONTEXT_KEYS: dict[str, str] = {
+    "verbosity_accumulation_rate": "PR_AUDIT_VERBOSITY_RATE",
+    "complexity_creep_pr_count": "PR_AUDIT_COMPLEXITY_CREEP",
+    "spec_coverage_pct": "PR_AUDIT_SPEC_COVERAGE",
+    "ci_catch_rate": "PR_AUDIT_CI_CATCH_RATE",
+    "code_review_skill_catch_rate": "PR_AUDIT_REVIEW_CATCH_RATE",
+    "bot_finding_follow_through_rate": "PR_AUDIT_BOT_FOLLOWTHROUGH",
+    "human_review_burden": "PR_AUDIT_HUMAN_BURDEN",
+    "security_review_invocation_rate": "PR_AUDIT_SECURITY_REVIEW_RATE",
+    "rubber_stamp_rate": "PR_AUDIT_RUBBER_STAMP_RATE",
+    "revert_followup_rate": "PR_AUDIT_REVERT_RATE",
+    "large_pr_review_depth": "PR_AUDIT_LARGE_PR_DEPTH",
+    "xl_pr_review_coverage_pct": "PR_AUDIT_XL_PR_REVIEW_COVERAGE",
+    "large_pr_human_comments_avg": "PR_AUDIT_LARGE_PR_COMMENTS_AVG",
+}
+assert set(_METRIC_CONTEXT_KEYS) == set(_CLAUDE_METRIC_ROWS), (
+    "METRIC_CONTEXT_KEYS and _CLAUDE_METRIC_ROWS must have identical key sets"
+)
+
+
+def _metric_signal(key: str, val: float) -> str:
+    """Return 🟢/🟡/🔴 signal for a metric value based on its healthy direction."""
+    if key in ("spec_coverage_pct", "ci_catch_rate", "code_review_skill_catch_rate",
+               "bot_finding_follow_through_rate", "security_review_invocation_rate"):
+        return "🟢" if val >= 80 else ("🟡" if val >= 60 else "🔴")
+    if key == "large_pr_review_depth":
+        return "🟢" if val >= 5 else ("🟡" if val >= 2 else "🔴")
+    if key in ("human_review_burden", "rubber_stamp_rate"):
+        return "🟢" if val <= 10 else ("🟡" if val <= 30 else "🔴")
+    if key == "revert_followup_rate":
+        return "🟢" if val <= 5 else ("🟡" if val <= 15 else "🔴")
+    if key == "verbosity_accumulation_rate":
+        return "🟢" if val <= 10 else ("🟡" if val <= 25 else "🔴")
+    if key == "complexity_creep_pr_count":
+        return "🟢" if val == 0 else ("🟡" if val <= 3 else "🔴")
+    if key == "xl_pr_review_coverage_pct":
+        return "🟢" if val >= 100 else ("🟡" if val >= 80 else "🔴")
+    if key == "large_pr_human_comments_avg":
+        return "🟢" if val >= 5 else ("🟡" if val >= 2 else "🔴")
+    return "—"
+
+
+def _read_all_claude_metrics(reports_dir: Path) -> list[tuple]:
+    """Read all Claude-computed metrics from pr_audit_findings.json.
+
+    Returns a list of (metric, value, benchmark, signal, description) tuples
+    suitable for build_metrics_dashboard(extra_rows=...).
+    """
+    findings_path = reports_dir / "pr_audit_findings.json"
+    if not findings_path.exists():
+        return []
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+        metrics = data.get("metrics", {})
+        if not isinstance(metrics, dict):
+            return []
+        rows: list[tuple] = []
+        for key, (name, benchmark, desc) in _CLAUDE_METRIC_ROWS.items():
+            val = metrics.get(key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                fval = 0.0
+            signal = _metric_signal(key, fval)
+            if "pct" in key or "rate" in key:
+                display = f"{fval:.1f}%"
+            elif fval == int(fval):
+                display = f"{int(fval)}"
+            else:
+                display = f"{fval:.2f}"
+            rows.append((name, display, benchmark, signal, desc))
+        return rows
+    except Exception as e:
+        print(f"[pr-audit] could not read Claude metrics from findings: {e}", flush=True)
+        return []
+
+
 # -- Skill discovery (same pattern as run_codebase_audit.py) -------------------
 
 def _skill_search_paths() -> list[Path]:
@@ -285,12 +395,13 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
             print(f"::add-task-context PR_AUDIT_JIRAS_REVIEWED::{jiras_reviewed}", flush=True)
         metrics = data.get("metrics", {})
         if isinstance(metrics, dict):
-            verbosity_rate = metrics.get("verbosity_accumulation_rate", 0)
-            complexity_prs = metrics.get("complexity_creep_pr_count", 0)
-            if verbosity_rate:
-                print(f"::add-task-context PR_AUDIT_VERBOSITY_RATE::{verbosity_rate:.2f}", flush=True)
-            if complexity_prs:
-                print(f"::add-task-context PR_AUDIT_COMPLEXITY_CREEP::{complexity_prs}", flush=True)
+            for metric_key, ctx_key in _METRIC_CONTEXT_KEYS.items():
+                val = metrics.get(metric_key)
+                if val is not None and val != 0:
+                    try:
+                        print(f"::add-task-context {ctx_key}::{float(val):.2f}", flush=True)
+                    except (TypeError, ValueError):
+                        print(f"::add-task-context {ctx_key}::{val}", flush=True)
     except Exception as e:
         print(f"[pr-audit] could not parse findings for markers: {e}", flush=True)
 
@@ -820,6 +931,12 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                     tracker_types.discard(config["DEFAULT_TRACKER"])  # consume without reassigning
                 pr_numbers = [num for _, num in parsed_urls]
                 prs = fetch_prs_by_numbers(config, pr_numbers)
+                # Post-filter by state: fetch_prs_by_numbers fetches any state; apply the requested filter
+                if pr_states != ["merged", "declined", "open"]:
+                    original_count = len(prs)
+                    prs = [p for p in prs if p.get("state", "merged").lower() in pr_states]
+                    if len(prs) < original_count:
+                        print(f"[pr-audit] state filter: kept {len(prs)}/{original_count} PRs matching states {pr_states}", flush=True)
                 print(f"[pr-audit] fetched {len(prs)} specific PRs from URLs", flush=True)
             else:
                 prs = []
@@ -1001,17 +1118,29 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
             print(f"::add-task-context PR_AUDIT_SKILL_GAPS::{status_data.get('skill_gap_count', 0)}", flush=True)
             print(f"::add-task-context PR_AUDIT_PRACTICE_GAPS::{status_data.get('practice_gap_count', 0)}", flush=True)
 
-        # Append per-PR metrics table to report if not already present
+        # Append combined metrics dashboard (pre-computed + Claude-assessed) to report
         report_md_path = reports_dir / "pr_audit_report.md"
         if report_md_path.exists() and prs:
             md_content = report_md_path.read_text(encoding="utf-8")
-            # Only append pre-computed summary if Claude did not already write a Metrics Dashboard
-            if "Pre-Computed PR Metrics" not in md_content and "Metrics Dashboard" not in md_content:
-                _append_text = _build_metrics_summary(prs)
+            claude_extra_rows = _read_all_claude_metrics(reports_dir)
+            if "Metrics Dashboard" in md_content and claude_extra_rows:
+                # Claude already wrote a dashboard — append Claude-assessed rows as a supplement
+                supplement_lines = ["\n\n### Claude-Assessed Process Metrics\n",
+                                    "| Metric | Value | Benchmark | Signal | Description |",
+                                    "|--------|-------|-----------|--------|-------------|"]
+                for row in claude_extra_rows:
+                    supplement_lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} |")
+                supplement_lines.append("")
+                md_content += "\n".join(supplement_lines) + "\n"
+                report_md_path.write_text(md_content, encoding="utf-8")
+                print(f"[pr-audit] appended {len(claude_extra_rows)} Claude-assessed metric rows", flush=True)
+            elif "Pre-Computed PR Metrics" not in md_content and "Metrics Dashboard" not in md_content:
+                # Neither dashboard exists — build combined one
+                _append_text = _build_metrics_summary_with_claude(prs, claude_extra_rows)
                 if len(_append_text.strip()) > 10:
                     md_content += f"\n\n{_append_text}\n"
                     report_md_path.write_text(md_content, encoding="utf-8")
-                    print("[pr-audit] appended pre-computed metrics summary to report", flush=True)
+                    print(f"[pr-audit] appended combined metrics dashboard ({len(claude_extra_rows)} Claude rows)", flush=True)
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "pr_audit_report.html"

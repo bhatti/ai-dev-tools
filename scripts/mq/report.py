@@ -578,6 +578,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     gate_sections: list[str] = []
     risk_sections: list[str] = []
     scope_sections: list[str] = []
+    metrics_sections: list[str] = []  # single-PR 5-column dashboard
     test_sections: list[str] = []
     lane_sections: list[str] = []
     # Alias: most existing code appends to `sections`; we'll route by context below.
@@ -680,6 +681,46 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             sections.append("")
         ctx["RISK_TIER"] = tier
         ctx["RISK_SCORE"] = str(score)
+
+    # Single-PR metrics dashboard — only when scope.json exists (gate-review / scope mode).
+    sections = metrics_sections
+    if pr_number and scope:
+        _add = scope.get("additions", 0)
+        _del = scope.get("deletions", 0)
+        _total_loc = _add + _del
+        _n_files = scope.get("changed_files", 0)
+        _blast = scope.get("blast_radius", "low")
+        _cats = scope.get("categories", [])
+        _pr_created = scope.get("created_at", "")
+
+        _loc_sig = "🟢" if _total_loc <= 300 else ("🟡" if _total_loc <= 800 else "🔴")
+        _files_sig = "🟢" if _n_files <= 5 else ("🟡" if _n_files <= 15 else "🔴")
+        _blast_sig = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(_blast, "🟡")
+
+        _risk_tier_val = risk.get("tier", "LOW") if risk else "—"
+        _risk_score_val = risk.get("score", "—") if risk else "—"
+        _risk_sig = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(_risk_tier_val, "🟡")
+
+        sections.append("## Metrics Dashboard")
+        sections.append("")
+        sections.append("| Metric | Value | Benchmark | Signal | Description |")
+        sections.append("|--------|-------|-----------|--------|-------------|")
+        sections.append(f"| LOC Changed | {_total_loc} (+{_add}/−{_del}) | ≤300 healthy | {_loc_sig} | Total lines added + deleted |")
+        sections.append(f"| Files Changed | {_n_files} | ≤5 healthy | {_files_sig} | Number of files modified |")
+        sections.append(f"| Blast Radius | {_blast} | low ideal | {_blast_sig} | Scope of potential impact |")
+        sections.append(f"| Risk Score | {_risk_score_val}/100 ({_risk_tier_val}) | <16 LOW | {_risk_sig} | Composite risk from 6 dimensions |")
+        if _cats:
+            sections.append(f"| File Categories | {', '.join(_cats[:4])} | — | — | Domain areas touched |")
+        if _pr_created:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                _dt_val = _dt.fromisoformat(_pr_created.replace("Z", "+00:00"))
+                _age_days = (_dt.now(tz=_tz.utc) - _dt_val).days
+                _age_sig = "🟢" if _age_days < 3 else ("🟡" if _age_days < 14 else "🔴")
+                sections.append(f"| PR Age | {_age_days}d | <3d fresh | {_age_sig} | Days since PR was opened |")
+            except Exception:
+                pass
+        sections.append("")
 
     sections = test_sections  # test impact + results block
     impact = _read_json(workspace / "test_impact.json")
@@ -1273,6 +1314,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         + gate_sections
         + risk_sections
         + scope_sections
+        + metrics_sections
         + test_sections
         + lane_sections
     )
@@ -1448,7 +1490,7 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
 
 
 def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -> str:
-    """Build a condensed Slack summary for the merge queue report (~600 chars)."""
+    """Build a condensed Slack summary for the merge queue report (~800 chars)."""
     total = int(ctx.get("MQ_TOTAL", len(all_prs)))
     high_risk = int(ctx.get("MQ_HIGH_RISK", 0))
     needs_review = int(ctx.get("MQ_NEEDS_REVIEW", 0))
@@ -1471,30 +1513,84 @@ def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -
     if high_risk == 0:
         risk_signal = "✅ low risk"
     elif high_risk <= 2:
-        risk_signal = f"⚠️ {high_risk} high-risk PRs"
+        risk_signal = f"⚠️ {high_risk} high-risk"
     else:
-        risk_signal = f"🔴 {high_risk} high-risk PRs"
+        risk_signal = f"🔴 {high_risk} high-risk"
 
     lines_out: list[str] = []
-    if date_range:
-        lines_out.append(f"*Merge Queue* — {date_range}")
+    header = f"*Merge Queue* — {date_range}" if date_range else "*Merge Queue*"
+    lines_out.append(header)
+
+    # Queue health line
+    stale_7d = [p for p in all_prs if _compute_pr_age_inline(p) > 7]
+    stale_14d = [p for p in all_prs if _compute_pr_age_inline(p) > 14]
+    blast_counts: dict = Counter(p.get("blast_radius", "low") for p in all_prs)
+    high_blast = blast_counts.get("high", 0) + blast_counts.get("critical", 0)
+    hotspot_count = sum(1 for p in all_prs if p.get("is_hotspot"))
+
+    queue_parts = [f"{total} open PRs", risk_signal]
+    if high_blast:
+        queue_parts.append(f"🔴 {high_blast} high-blast")
+    if hotspot_count:
+        queue_parts.append(f"🔥 {hotspot_count} hotspot paths")
+    lines_out.append("*Queue Health*: " + " · ".join(queue_parts))
+
+    # Review + stale + CI line
+    ci_known = [p for p in all_prs if p.get("ci_status") not in ("unknown", None, "")]
+    ci_parts: list[str] = []
+    if ci_known:
+        ci_pass = sum(1 for p in ci_known if p.get("ci_status") == "pass")
+        ci_pct = round(ci_pass / len(ci_known) * 100, 1)
+        ci_emoji = "✅" if ci_pct >= 90 else ("⚠️" if ci_pct >= 75 else "🔴")
+        ci_parts.append(f"CI: {ci_pass}/{len(ci_known)} ({ci_pct}%) {ci_emoji}")
     else:
-        lines_out.append("*Merge Queue*")
+        ci_parts.append("CI: N/A")
 
-    lines_out.append(f"{total} open PRs · {risk_signal} · {conflict_lanes} conflict lane(s)")
+    reviewable = [p for p in all_prs if not p.get("is_bot_authored")]
+    if reviewable:
+        with_review = sum(1 for p in reviewable if p.get("has_substantive_review"))
+        rev_pct = round(with_review / len(reviewable) * 100, 1)
+        rev_emoji = "✅" if rev_pct >= 80 else ("⚠️" if rev_pct >= 50 else "🔴")
+        ci_parts.insert(0, f"Review: {rev_pct}% {rev_emoji}")
 
+    if stale_7d:
+        stale_emoji = "🔴" if len(stale_7d) > len(all_prs) * 0.2 else "⚠️"
+        ci_parts.append(f"{stale_emoji} {len(stale_7d)} stale (>7d)")
+
+    lines_out.append("*Review*: " + " · ".join(ci_parts))
+
+    # Risk line
+    risk_parts: list[str] = []
     if needs_review:
-        lines_out.append(f"⚠️ {needs_review} PR(s) need human review before merge")
+        risk_parts.append(f"⚠️ {needs_review} need human review")
+    if conflict_lanes:
+        risk_parts.append(f"🔀 {conflict_lanes} conflict lane(s)")
+    if stale_14d:
+        risk_parts.append(f"🕐 {len(stale_14d)} stale (>14d)")
+    if risk_parts:
+        lines_out.append("*Risk*: " + " · ".join(risk_parts))
 
-    stale = [p for p in all_prs if _compute_pr_age_inline(p) > 14]
-    if stale:
-        lines_out.append(f"🕐 {len(stale)} PR(s) stale (>14d)")
-
+    # Work type distribution
     types = Counter(p.get("pr_type", "unknown") for p in all_prs)
     if types:
-        top = types.most_common(3)
+        top = types.most_common(4)
         type_str = " · ".join(f"{t}:{n}" for t, n in top)
-        lines_out.append(f"Types: {type_str}")
+        lines_out.append(f"*Work*: {type_str}")
+
+    # Throughput: avg age + CFR proxy
+    throughput_parts: list[str] = []
+    if all_prs:
+        ages = [_compute_pr_age_inline(p) for p in all_prs]
+        avg_age = round(sum(ages) / len(ages), 1) if ages else 0
+        throughput_parts.append(f"{avg_age}d avg age")
+
+    bug_sec_prs = [p for p in all_prs if p.get("pr_type") in ("bug", "security")]
+    if all_prs:
+        cfr = round(len(bug_sec_prs) / len(all_prs) * 100, 1)
+        cfr_emoji = "✅" if cfr <= 10 else ("⚠️" if cfr <= 25 else "🔴")
+        throughput_parts.append(f"CFR proxy: {cfr}% {cfr_emoji}")
+    if throughput_parts:
+        lines_out.append("*Throughput*: " + " · ".join(throughput_parts))
 
     lines_out.append("Full report in thread ↑")
     return "\n".join(lines_out)

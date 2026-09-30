@@ -117,7 +117,7 @@ class TestClassifyPrType:
 
     def test_jira_summary_used_when_title_is_bare_key(self):
         # BB PRs from gather_pr_queue store Jira key as title; jira_summary has the real text
-        pr = {"title": "CRIBL-44875", "jira_summary": "[Flaky Test] fix test instability in auth"}
+        pr = {"title": "PROJ-44875", "jira_summary": "[Flaky Test] fix test instability in auth"}
         assert classify_pr_type(pr) == "test"
 
     def test_flaky_test_title_is_test_not_bug(self):
@@ -942,10 +942,10 @@ class TestPrMetricsTableNewColumns:
         assert "2" in text
 
     def test_issue_cell_linked(self):
-        linked = {"key": "CRIBL-1234", "url": "https://jira.example.com/browse/CRIBL-1234"}
+        linked = {"key": "PROJ-1234", "url": "https://jira.example.com/browse/PROJ-1234"}
         lines = build_pr_metrics_table([self._pr(linked_issue=linked)])
         text = "\n".join(lines)
-        assert "CRIBL-1234" in text
+        assert "PROJ-1234" in text
 
     def test_status_column_merged(self):
         pr = self._pr(merged_at="2026-01-15T12:00:00Z", state="merged")
