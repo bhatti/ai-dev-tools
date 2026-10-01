@@ -186,7 +186,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         return []
 
     fields = (
-        "number,title,body,author,createdAt,mergedAt,url,headRefName,"
+        "number,title,state,body,author,createdAt,mergedAt,url,headRefName,"
         "comments,reviews,reviewDecision,labels,files"
     )
     has_jira_filter = any([
@@ -324,11 +324,15 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         } - {author})
         depth = _compute_review_depth(classified["human_comments"], gh_approvers)
 
+        gh_state = (rp.get("state") or "").upper()
+        is_merged = bool(rp.get("mergedAt"))
+        derived_state = "merged" if is_merged else ("declined" if gh_state == "CLOSED" else "open")
+
         pr = {
             "number": pr_number,
             "title": rp.get("title", ""),
             "author": author,
-            "state": "merged",  # bulk fetch always uses --state merged
+            "state": derived_state,
             "created_at": rp.get("createdAt", ""),
             "merged_at": rp.get("mergedAt", ""),
             "url": rp.get("url", ""),

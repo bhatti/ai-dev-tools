@@ -13,6 +13,7 @@ from scripts.analyze.pr_fetcher import (
     _filter_by_team,
     build_pr_context,
     classify_comments,
+    fetch_bitbucket_prs,
     fetch_github_prs,
     fetch_prs_by_numbers,
     fetch_single_pr,
@@ -623,6 +624,25 @@ _ENRICHMENT_FIELDS = ("pr_type", "category", "blast_radius", "risk_score", "risk
                       "complexity", "is_hotspot", "total_loc", "file_count")
 
 
+def _mock_gh_pr(number: int, *, merged_at: str | None, gh_state: str, title: str = "PR") -> dict:
+    """Helper to build a minimal gh pr list JSON record."""
+    return {
+        "number": number,
+        "title": title,
+        "state": gh_state,
+        "body": "",
+        "author": {"login": "alice"},
+        "mergedAt": merged_at,
+        "url": f"https://github.com/org/repo/pull/{number}",
+        "headRefName": "some-branch",
+        "comments": [],
+        "reviews": [],
+        "reviewDecision": "",
+        "labels": [],
+        "files": [],
+    }
+
+
 class TestGHEnrichmentViaFetch:
     """fetch_github_prs enriches each PR with classification fields."""
 
@@ -632,6 +652,7 @@ class TestGHEnrichmentViaFetch:
         gh_output = json.dumps([{
             "number": 77,
             "title": "fix: auth crash on empty token",
+            "state": "MERGED",
             "body": "",
             "author": {"login": "alice"},
             "mergedAt": "2026-09-01T10:00:00Z",
@@ -656,6 +677,59 @@ class TestGHEnrichmentViaFetch:
         assert pr["pr_type"] == "bug"
         assert pr["is_hotspot"] is True
         assert pr["total_loc"] == 55
+        assert pr["state"] == "merged"
+
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_bulk_fetch_derives_merged_state(self, mock_run, mock_review):
+        """Bulk-fetched merged PR must have state='merged', not hardcoded."""
+        pr_json = json.dumps([_mock_gh_pr(1, merged_at="2026-09-01T00:00:00Z", gh_state="MERGED")])
+        mock_run.return_value = MagicMock(returncode=0, stdout=pr_json, stderr="")
+        prs = fetch_github_prs({"GH_ORG": "org", "GH_REPO": "repo"}, n_prs=5)
+        assert prs[0]["state"] == "merged"
+
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_bulk_fetch_derives_declined_state(self, mock_run, mock_review):
+        """A closed PR with no mergedAt must have state='declined', not 'merged'."""
+        # First call (merged list) returns empty; second call (closed list) returns a declined PR
+        merged_empty = json.dumps([])
+        declined_pr = json.dumps([_mock_gh_pr(2, merged_at=None, gh_state="CLOSED")])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=merged_empty, stderr=""),
+            MagicMock(returncode=0, stdout=declined_pr, stderr=""),
+        ]
+        prs = fetch_github_prs({"GH_ORG": "org", "GH_REPO": "repo"}, n_prs=5,
+                               states=["merged", "declined"])
+        assert len(prs) == 1
+        assert prs[0]["state"] == "declined"
+
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_bulk_fetch_derives_open_state_when_state_all(self, mock_run, mock_review):
+        """An open PR fetched via --state all must have state='open', not 'merged'."""
+        merged_empty = json.dumps([])
+        closed_empty = json.dumps([])
+        open_pr = json.dumps([_mock_gh_pr(3, merged_at=None, gh_state="OPEN")])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=merged_empty, stderr=""),
+            MagicMock(returncode=0, stdout=closed_empty, stderr=""),
+            MagicMock(returncode=0, stdout=open_pr, stderr=""),
+        ]
+        prs = fetch_github_prs({"GH_ORG": "org", "GH_REPO": "repo"}, n_prs=5,
+                               states=["merged", "declined", "open"])
+        assert len(prs) == 1
+        assert prs[0]["state"] == "open"
+
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_default_states_never_fetches_open(self, mock_run, mock_review):
+        """With default states (merged+declined), gh pr list --state open must NEVER be called."""
+        empty = json.dumps([])
+        mock_run.return_value = MagicMock(returncode=0, stdout=empty, stderr="")
+        fetch_github_prs({"GH_ORG": "org", "GH_REPO": "repo"}, n_prs=5)
+        calls = [str(c) for c in mock_run.call_args_list]
+        assert not any("open" in c for c in calls), f"unexpected --state open call: {calls}"
 
 
 class TestBuildPrContextMetrics:
@@ -711,3 +785,68 @@ class TestBuildPrContextMetrics:
         result = build_pr_context([pr])
         assert "PR #11" in result
         assert "**PR type**" not in result
+
+
+# ---------------------------------------------------------------------------
+# Bitbucket bulk fetch — state derivation
+# ---------------------------------------------------------------------------
+
+def _mock_bb_response(*prs: dict) -> MagicMock:
+    """Wrap a list of raw BB PR dicts as a requests.Response mock (single page)."""
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"values": list(prs), "next": ""}
+    return resp
+
+
+def _bb_raw_pr(pr_id: int, *, state: str) -> dict:
+    """Minimal Bitbucket PR payload."""
+    return {
+        "id": pr_id,
+        "title": f"PR {pr_id}",
+        "state": state,
+        "author": {"display_name": "alice", "nickname": "alice"},
+        "created_on": "2026-09-01T00:00:00Z",
+        "updated_on": "2026-09-02T00:00:00Z",
+        "description": "",
+        "links": {"html": {"href": f"https://bitbucket.org/ws/repo/pull-requests/{pr_id}"}},
+        "source": {"branch": {"name": "feat/x"}},
+        "participants": [],
+    }
+
+
+class TestBBBulkFetchState:
+    """fetch_bitbucket_prs must derive correct state from the API state field."""
+
+    _CONFIG = {
+        "BITBUCKET_WORKSPACE": "ws",
+        "BITBUCKET_REPO": "repo",
+        "BITBUCKET_USERNAME": "u",
+        "BITBUCKET_TOKEN": "t",
+    }
+
+    @pytest.mark.parametrize("bb_state,expected", [
+        ("MERGED",     "merged"),
+        ("DECLINED",   "declined"),
+        ("SUPERSEDED", "declined"),
+        ("OPEN",       "open"),
+    ])
+    def test_state_mapping(self, bb_state, expected):
+        raw = _bb_raw_pr(1, state=bb_state)
+        with patch("requests.get", return_value=_mock_bb_response(raw)), \
+             patch("scripts.analyze.pr_fetcher._fetch_bb_comments", return_value=[]), \
+             patch("scripts.analyze.pr_fetcher._fetch_bb_diffstat", return_value=[]):
+            prs = fetch_bitbucket_prs(self._CONFIG, n_prs=5,
+                                      states=["merged", "declined", "open"])
+        assert len(prs) == 1
+        assert prs[0]["state"] == expected
+
+    def test_default_states_excludes_open(self):
+        """Default states=[merged,declined] must NOT request OPEN from Bitbucket API."""
+        with patch("requests.get", return_value=_mock_bb_response()) as mock_get, \
+             patch("scripts.analyze.pr_fetcher._fetch_bb_comments", return_value=[]), \
+             patch("scripts.analyze.pr_fetcher._fetch_bb_diffstat", return_value=[]):
+            fetch_bitbucket_prs(self._CONFIG, n_prs=5)
+        call_url = mock_get.call_args[0][0]
+        assert "state=OPEN" not in call_url
+        assert "state=MERGED" in call_url or "state=DECLINED" in call_url
