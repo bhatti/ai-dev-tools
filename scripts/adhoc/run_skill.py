@@ -28,7 +28,6 @@ from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
 from scripts.standup.slack_client import (
     build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
-    upload_html_report,
     PR_GROUP_ORDER, PR_CI_EMOJI, PR_PRIORITY_EMOJI, PR_GROUP_BADGE, pr_group,
 )
 
@@ -810,21 +809,7 @@ def main(skill: str, prompt_text: str) -> None:
     except Exception as _se:
         print(f"[adhoc] WARNING: Slack post failed (non-fatal): {_se}", flush=True)
 
-    # Upload HTML report (if written) as a Slack file for inline preview.
-    # post_fallback=False because the ai-adhoc post task always adds the download link;
-    # posting the fallback here would create a duplicate link in the thread.
-    # The filename must match the actual file on disk ("report.html") so the artifact
-    # by-job URL resolves correctly if the post task ever uses this path.
-    _html_report_path = workspace / "reports" / "report.html"
-    if _html_report_path.exists():
-        try:
-            _thread_ts = config.get("SLACK_THREAD_TS") or config.get("SlackThreadTs") or None
-            _html_content = _html_report_path.read_text(encoding="utf-8")
-            upload_html_report(config, _html_content, "report.html",
-                               thread_ts=_thread_ts, task_type="run",
-                               post_fallback=False)
-        except Exception as _ue:
-            print(f"[adhoc] WARNING: HTML report upload failed (non-fatal): {_ue}", flush=True)
+    # HTML reports are now served inline via the formicary report viewer — no Slack file upload.
 
     print(f"[adhoc] status={status_data.get('status')}", flush=True)
     # Re-emit with final resolved model (may differ from config if AI_MODEL_OVERRIDE was used).

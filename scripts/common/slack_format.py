@@ -97,18 +97,19 @@ def strip_section_heading(text: str) -> str:
     return text
 
 
-def build_artifact_links(config: dict, task_type: str, report_filename: str) -> tuple[str, str]:
-    """Return (html_url, job_url) for Slack artifact links.
+def build_artifact_links(config: dict, report_filename: str = "", task_type: str = "") -> tuple[str, str]:
+    """Return (reports_url, job_url) for Slack artifact links.
 
-    html_url uses the by-job endpoint with task filter to extract the HTML
-    report directly from the correct task's artifact zip.
-    job_url links to the job page which has the full zip download.
+    reports_url links to the job summary page anchored at the #reports card,
+    where users can view all HTML/MD reports inline with full image support.
+    job_url links to the job page (same page, without anchor).
     Returns ("", "") when FORMICARY_PUBLIC_URL or JOB_ID are not set.
+    report_filename and task_type are accepted for backwards-compatibility but unused.
     """
     base = (config.get("FORMICARY_PUBLIC_URL", "") or "").rstrip("/")
     job_id = config.get("JOB_ID", "") or ""
     if not base or not job_id:
         return "", ""
-    html_url = f"{base}/dashboard/artifacts/by-job/{job_id}/download?task={task_type}&file=reports/{report_filename}"
     job_url = f"{base}/dashboard/jobs/requests/{job_id}"
-    return html_url, job_url
+    reports_url = f"{job_url}#reports"
+    return reports_url, job_url

@@ -25,6 +25,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev \
   && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI (client only) — official Docker apt repo for Debian bookworm
+RUN install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+  && chmod a+r /etc/apt/keyrings/docker.asc \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+       https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends docker-ce-cli \
+  && rm -rf /var/lib/apt/lists/*
+
 # Go toolchain — architecture-aware
 ARG GO_VERSION=1.23.4
 RUN ARCH=$(dpkg --print-architecture) \
@@ -74,6 +85,10 @@ RUN npm install -g \
 # Python dependencies
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Playwright + Chromium for browser-driven testing
+RUN playwright install chromium \
+  && playwright install-deps chromium
 
 # Application scripts and project-level skills
 COPY scripts/ /app/scripts/

@@ -86,10 +86,8 @@ def main() -> None:
         print("[post-pr-audit] pr_audit_findings.json not found -- counts will be 0", flush=True)
 
     # --- Build header summary ---
-    html_url, job_url = build_artifact_links(config, "audit-prs", "pr_audit_report.html")
-    artifact_link = ""
-    if html_url:
-        artifact_link = f"\n<{html_url}|View pr_audit_report.html>  |  <{job_url}|All artifacts>"
+    reports_url, _ = build_artifact_links(config)
+    artifact_link = f"\n📎 <{reports_url}|View reports>" if reports_url else ""
 
     date_range = ""
     if date_from and date_to:

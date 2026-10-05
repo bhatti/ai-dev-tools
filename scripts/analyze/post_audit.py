@@ -80,10 +80,8 @@ def main() -> None:
         commits = "?"
 
     # --- Build header summary ---
-    html_url, job_url = build_artifact_links(config, "audit", "audit_report.html")
-    artifact_link = ""
-    if html_url:
-        artifact_link = f"\n<{html_url}|View audit_report.html>  |  <{job_url}|All artifacts>"
+    reports_url, _ = build_artifact_links(config)
+    artifact_link = f"\n📎 <{reports_url}|View reports>" if reports_url else ""
 
     commit_range = ""
     if commit_from and commit_to:

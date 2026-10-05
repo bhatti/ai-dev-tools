@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -509,57 +508,26 @@ def upload_html_report(config: dict, html_content: str, filename: str,
                        thread_ts: str | None, task_type: str = "run",
                        channel: str | None = None,
                        post_fallback: bool = True) -> bool:
-    """Upload HTML to Slack as a file; optionally post an artifact fallback link on failure.
+    """Post a #reports link to Slack instead of uploading the HTML file.
 
-    Called after the main Slack message is already posted.  `thread_ts` is the
-    ts to reply to (the original thread or the new message's ts).
+    HTML file uploads have been replaced by the formicary inline report viewer.
+    This function posts a single link to the job's Reports section so users can
+    view all reports (including images) directly in the browser.
 
-    Primary path: upload `html_content` as a Slack file (requires files:write scope).
-    Fallback when upload fails and `post_fallback=True`: post a by-job artifact link.
-    Set `post_fallback=False` when a downstream post task will post the link itself
-    (avoids duplicate links in the thread).
-
-    Returns True if the HTML was uploaded or a fallback link was posted.
+    post_fallback and task_type are kept for backwards-compatibility but unused.
+    Returns True when the link was posted, False when config is incomplete.
     """
     from scripts.common.slack_format import build_artifact_links
 
-    if not html_content:
+    if not post_fallback:
         return False
 
-    tmp_path: str | None = None
-    upload_ok = False
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w",
-                                        encoding="utf-8") as fh:
-            tmp_path = fh.name  # set before write so finally can unlink on IOError
-            fh.write(html_content)
-        upload_ok = upload_file(config, tmp_path, filename,
-                                channel=channel, thread_ts=thread_ts)
-        if not upload_ok:
-            print(f"[slack] WARNING: HTML upload failed for '{filename}' — "
-                  f"check bot has files:write scope and is in the channel", flush=True)
-    except Exception as e:
-        print(f"[slack] HTML upload error for '{filename}' (non-fatal): {e}", flush=True)
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-    if not upload_ok and post_fallback:
-        # Always use the by-job URL — it extracts the HTML from the job's artifact zip.
-        # The direct SHA256 upload path creates an orphaned artifact unrelated to the job.
-        by_job_url, job_link = build_artifact_links(config, task_type, filename)
-        if by_job_url:
-            fallback_text = f"📎 Full report: <{by_job_url}|{filename}>  |  <{job_link}|All artifacts>"
-        else:
-            fallback_text = None
-        if fallback_text:
-            _post_message_ts(config, fallback_text, channel=channel, thread_ts=thread_ts)
-        return bool(fallback_text)
-
-    return upload_ok
+    reports_url, _ = build_artifact_links(config)
+    if not reports_url:
+        return False
+    _post_message_ts(config, f"📎 <{reports_url}|View reports>",
+                     channel=channel, thread_ts=thread_ts)
+    return True
 
 
 def post_report(config: dict, slack_text: str, md_text: str,
@@ -567,38 +535,29 @@ def post_report(config: dict, slack_text: str, md_text: str,
                 thread_ts: str | None = None,
                 channel: str | None = None,
                 task_type: str = "post") -> bool:
-    """Post a mrkdwn report to Slack and upload an HTML version in the same thread.
+    """Post a mrkdwn report to Slack with a link to the job's Reports section.
 
-    Primary path: render HTML and upload as a Slack file (requires files:write scope).
-    Fallback when Slack upload fails: upload HTML directly to formicary artifact store
-    and post a direct download link.
+    Posts the formatted text message, then appends a single link to the
+    formicary job Reports card where users can view HTML/MD reports inline.
 
     Args:
         slack_text:  Pre-formatted mrkdwn text (from format_for_slack).
-        md_text:     Original markdown source used to render the HTML.
-        title:       HTML page <title> and <h1>.
-        filename:    Slack display name for the uploaded file (e.g. "audit_report.html").
-        thread_ts:   Existing thread to reply into.  When None the text message creates a
-                     new top-level post and the HTML is threaded to that new message's ts.
-        task_type:   Formicary task type that produces the report artifact (e.g. "audit-prs").
-                     Used in the fallback link to select the correct task's artifact zip.
+        md_text:     Unused — kept for backwards-compatibility.
+        title:       Unused — kept for backwards-compatibility.
+        filename:    Unused — kept for backwards-compatibility.
+        thread_ts:   Existing thread to reply into.
+        channel:     Override channel (defaults to config SLACK_CHANNEL).
+        task_type:   Unused — kept for backwards-compatibility.
     """
-    from scripts.common.report_renderer import render_simple_html
+    from scripts.common.slack_format import build_artifact_links
 
-    msg_ts = _post_message_ts(config, slack_text, channel=channel, thread_ts=thread_ts)
-    if not msg_ts:
-        return False
+    reports_url, _ = build_artifact_links(config)
+    text = slack_text
+    if reports_url:
+        text = text.rstrip() + f"\n📎 <{reports_url}|View reports>"
 
-    html: str = ""
-    try:
-        html = render_simple_html(title, md_text)
-    except Exception as e:
-        print(f"[slack] HTML render error for '{filename}' (non-fatal): {e}", flush=True)
-
-    if html:
-        upload_html_report(config, html, filename, thread_ts=thread_ts or msg_ts,
-                           task_type=task_type, channel=channel)
-    return True
+    msg_ts = _post_message_ts(config, text, channel=channel, thread_ts=thread_ts)
+    return bool(msg_ts)
 
 
 def notify(config: dict, text: str, channel_key: str = "SLACK_CHANNEL",
@@ -639,8 +598,8 @@ if __name__ == "__main__":
         _workspace = _config.get("WORKSPACE_DIR", "/workspace")
         _report_exists = os.path.exists(os.path.join(_workspace, "reports", "report.html"))
         if _report_exists:
-            _html_url, _job_url = build_artifact_links(_config, "run", "report.html")
-            _text += f"\n📎 Full report: <{_html_url}|View report.html>  |  <{_job_url}|All artifacts>"
+            _reports_url, _ = build_artifact_links(_config)
+            _text += f"\n📎 <{_reports_url}|View reports>"
         else:
             _text += f"\n<{_public_url}/dashboard/jobs/requests/{_job_id}|View job in Formicary>"
     post_message(_config, _text, thread_ts=_ts)

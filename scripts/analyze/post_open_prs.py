@@ -13,7 +13,6 @@ Env:
     SLACK_THREAD_TS         optional thread timestamp
     FORMICARY_PUBLIC_URL    base URL for job artifacts link
     JOB_ID                  job request ID
-    TASK_TYPE               must match the YAML task name ("open-prs")
 """
 from __future__ import annotations
 
@@ -64,12 +63,8 @@ def main() -> None:
         except Exception as e:
             print(f"[post-open-prs] warning: could not parse summary JSON: {e}", flush=True)
 
-    # Build artifact link — task_type must match YAML task name "open-prs"
-    task_type = config.get("TASK_TYPE") or "open-prs"
-    html_url, job_url = build_artifact_links(config, task_type, "open_prs_report.html")
-    artifact_link = ""
-    if html_url:
-        artifact_link = f"\n<{html_url}|View open_prs_report.html>  |  <{job_url}|All artifacts>"
+    reports_url, _ = build_artifact_links(config)
+    artifact_link = f"\n📎 <{reports_url}|View reports>" if reports_url else ""
 
     risk_summary = ""
     if high_risk:
@@ -104,7 +99,7 @@ def main() -> None:
     slack_ok = post_report(
         config, slack_text, full_report_text,
         title=title, filename="open_prs_report.html",
-        thread_ts=thread_ts, task_type=task_type,
+        thread_ts=thread_ts,
     )
 
     result = {

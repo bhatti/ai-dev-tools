@@ -242,9 +242,9 @@ def main(findings_path: str) -> None:
 
     # Always write slack message to artifact (regardless of whether Slack is configured)
     text = _build_slack_text(findings)
-    html_url, job_url = build_artifact_links(config, "post", "report.html")
-    if html_url:
-        text += f"\n<{html_url}|View report.html>  |  <{job_url}|All artifacts>"
+    reports_url, _ = build_artifact_links(config)
+    if reports_url:
+        text += f"\n📎 <{reports_url}|View reports>"
     (reports_dir / "slack_message.txt").write_text(text)
 
     # --- Slack post (non-fatal) ---
