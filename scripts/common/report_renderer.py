@@ -53,39 +53,10 @@ def render_implement_report_md(issue_id: str, result: dict) -> str:
 
 
 def render_implement_report_html(issue_id: str, result: dict, md_text: str) -> str:
-    """Wrap the implement Markdown report in minimal HTML for browser viewing."""
+    """Wrap the implement Markdown report in HTML for browser viewing."""
     status = result.get("status", "UNKNOWN")
-
-    html = md_text
-    html = re.sub(r"^### (.+)$", r"<h3>\1</h3>", html, flags=re.MULTILINE)
-    html = re.sub(r"^## (.+)$", r"<h2>\1</h2>", html, flags=re.MULTILINE)
-    html = re.sub(r"^# (.+)$", r"<h1>\1</h1>", html, flags=re.MULTILINE)
-    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
-    html = re.sub(r"`(.+?)`", r"<code>\1</code>", html)
-    html = re.sub(r"^- (.+)$", r"<li>\1</li>", html, flags=re.MULTILINE)
-    html = html.replace("\n", "<br>\n")
-
     title = f"Implementation {issue_id} — {status}"
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         max-width: 900px; margin: 40px auto; padding: 0 20px; color: #24292e; }}
-  h1 {{ border-bottom: 2px solid #e1e4e8; padding-bottom: 8px; }}
-  h2 {{ border-bottom: 1px solid #e1e4e8; padding-bottom: 4px; margin-top: 24px; }}
-  code {{ background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-  li {{ margin-left: 20px; }}
-  strong {{ font-weight: 600; }}
-</style>
-</head>
-<body>
-{_annotate_emoji(html)}
-</body>
-</html>"""
+    return render_simple_html(title, md_text)
 
 
 _EMOJI_LABELS: dict[str, str] = {
@@ -222,7 +193,7 @@ def render_simple_html(title: str, md_text: str) -> str:
                     table_header_done = True
                 continue
             if not in_table:
-                output.append('<table><thead><tr>')
+                output.append('<table class="table table-bordered table-sm table-hover table-striped"><thead><tr>')
                 in_table = True
                 table_header_done = False
                 tag = "th"
@@ -279,29 +250,26 @@ def render_simple_html(title: str, md_text: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escaped_title}</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         max-width: 1000px; margin: 40px auto; padding: 0 20px; color: #24292e; line-height: 1.6; }}
-  h1 {{ border-bottom: 2px solid #e1e4e8; padding-bottom: 8px; }}
-  h2 {{ border-bottom: 1px solid #e1e4e8; padding-bottom: 4px; margin-top: 24px; }}
-  h3 {{ margin-top: 18px; }}
-  code {{ background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; font-family: monospace; }}
-  pre {{ background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; }}
-  pre code {{ background: none; padding: 0; }}
-  ul, ol {{ margin-left: 24px; margin-bottom: 8px; }}
-  li {{ margin-bottom: 4px; }}
-  strong {{ font-weight: 600; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
-  td, th {{ border: 1px solid #e1e4e8; padding: 6px 12px; text-align: left; }}
-  th {{ background: #f6f8fa; font-weight: 600; }}
-  hr {{ border: none; border-top: 1px solid #e1e4e8; margin: 16px 0; }}
-  p {{ margin: 8px 0; }}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escaped_title}</title>
+  <link rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    crossorigin="anonymous">
+  <style>
+    body {{ font-size: .9rem; }}
+    h1 {{ border-bottom: 2px solid #dee2e6; padding-bottom: .5rem; margin-bottom: 1rem; }}
+    h2 {{ border-bottom: 1px solid #dee2e6; padding-bottom: .3rem; margin-top: 1.5rem; margin-bottom: .75rem; }}
+    h3 {{ margin-top: 1.25rem; margin-bottom: .5rem; }}
+    h4, h5, h6 {{ margin-top: 1rem; margin-bottom: .4rem; }}
+    pre {{ background: #f8f9fa; padding: .75rem; border-radius: .375rem; font-size: .8rem; overflow-x: auto; }}
+    pre code {{ background: none; padding: 0; }}
+    .risk-high {{ border-left: 4px solid #dc3545; padding-left: .75rem; margin-bottom: .75rem; }}
+    .risk-med  {{ border-left: 4px solid #ffc107; padding-left: .75rem; margin-bottom: .75rem; }}
+    .risk-low  {{ border-left: 4px solid #0dcaf0; padding-left: .75rem; margin-bottom: .75rem; }}
+  </style>
 </head>
-<body>
+<body class="container py-4">
 {body}
 </body>
 </html>"""

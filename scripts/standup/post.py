@@ -27,6 +27,7 @@ import sys
 from datetime import date
 
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.common.report_utils import write_report
 from scripts.common.slack_format import format_for_slack, strip_section_heading
 from scripts.standup.render_html import DONE_STATUSES
 from scripts.standup.slack_client import post_report
@@ -141,7 +142,7 @@ def main() -> None:
     print(report_text, flush=True)
     print("=" * 60 + "\n", flush=True)
 
-    (reports_dir / "report.md").write_text(report_text)
+    write_report(reports_dir / "report.md", report_text)
     print("[post] reports/report.md written", flush=True)
 
     # Build the full Slack message: brief + risk report, then convert to mrkdwn

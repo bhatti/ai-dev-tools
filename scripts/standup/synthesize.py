@@ -269,10 +269,11 @@ def main() -> None:
     # Write standardized reports/ directory
     try:
         from scripts.common.report_renderer import render_simple_html
+        from scripts.common.report_utils import write_report
         reports_dir = workspace_dir / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / "report.md").write_text(brief)
-        (reports_dir / "report.html").write_text(render_simple_html("Standup Brief", brief))
+        write_report(reports_dir / "report.md", brief)
+        write_report(reports_dir / "report.html", render_simple_html("Standup Brief", brief))
         (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2))
         print(f"[synthesize] wrote reports/report.md, reports/report.html, reports/result.json", flush=True)
     except Exception as _re:

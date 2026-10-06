@@ -32,6 +32,7 @@ from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.pr_classify import build_open_pr_dashboard
 from scripts.common.pr_metadata import enrich_pr_full, normalize_pr
 from scripts.common.report_renderer import render_simple_html
+from scripts.common.report_utils import write_report
 
 
 def _parse_slack_flags(message: str) -> dict:
@@ -135,10 +136,10 @@ def main() -> None:
     )
 
     md = "\n".join(lines)
-    (reports_dir / "open_prs_report.md").write_text(md, encoding="utf-8")
+    write_report(reports_dir / "open_prs_report.md", md)
 
     html = render_simple_html(f"Open PR Dashboard — {full_repo_label}", md)
-    (reports_dir / "open_prs_report.html").write_text(html, encoding="utf-8")
+    write_report(reports_dir / "open_prs_report.html", html)
 
     print(
         f"[open-prs] done: total={len(prs)} high_risk={high_risk} stale={stale}",

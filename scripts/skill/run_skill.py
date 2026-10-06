@@ -113,14 +113,13 @@ def _write_reports(workspace: Path, skill: str, output_text: str, status_data: d
     """Write reports/report.md, reports/report.html, reports/result.json."""
     try:
         from scripts.common.report_renderer import render_simple_html
+        from scripts.common.report_utils import write_report
 
         md_with_model = _append_model_footer(output_text, model)
         reports_dir = workspace / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / "report.md").write_text(md_with_model, encoding="utf-8")
-        (reports_dir / "report.html").write_text(
-            render_simple_html(skill, md_with_model), encoding="utf-8"
-        )
+        write_report(reports_dir / "report.md", md_with_model)
+        write_report(reports_dir / "report.html", render_simple_html(skill, md_with_model))
         (reports_dir / "result.json").write_text(
             json.dumps(status_data, indent=2), encoding="utf-8"
         )
@@ -128,8 +127,12 @@ def _write_reports(workspace: Path, skill: str, output_text: str, status_data: d
     except Exception as e:
         print(f"[skill] WARNING: could not write reports/: {e}", flush=True)
 
-def _find_report_content(workspace: Path) -> str | None:
-    """Check for report files written by Claude. Returns content or None."""
+def _find_report_content(workspace: Path, skill: str = "") -> str | None:
+    """Check for report files written by Claude. Returns content or None.
+
+    Also generates a Bootstrap HTML companion alongside any named .md file found
+    (e.g. standup_brief.html next to standup_brief.md) so all artifacts are browsable.
+    """
     candidates = [
         "standup_brief.md",
         "risk_report.md",
@@ -143,6 +146,14 @@ def _find_report_content(workspace: Path) -> str | None:
             content = path.read_text(encoding="utf-8").strip()
             if content:
                 print(f"[skill] using report from {candidate} ({len(content)} chars)", flush=True)
+                if candidate.endswith(".md") and not candidate.startswith("reports/"):
+                    html_path = workspace / candidate.replace(".md", ".html")
+                    try:
+                        from scripts.common.report_renderer import render_simple_html
+                        from scripts.common.report_utils import write_report
+                        write_report(html_path, render_simple_html(skill or candidate, content))
+                    except Exception as _he:
+                        print(f"[skill] WARNING: could not write {html_path.name}: {_he}", flush=True)
                 return content
     return None
 
@@ -312,7 +323,7 @@ def main() -> None:
     output_text = result.output.strip()
 
     # Check for report files written by Claude.
-    report_content = _find_report_content(workspace)
+    report_content = _find_report_content(workspace, skill=flags.skill)
     if report_content:
         output_text = report_content
 

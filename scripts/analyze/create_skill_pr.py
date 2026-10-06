@@ -28,6 +28,7 @@ from scripts.common import bitbucket_api
 from scripts.common.artifacts import read_json as artifacts_read_json
 from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.report_utils import write_report
 from scripts.common.git_utils import clone_by_tracker, configure_git, detect_bitbucket_url, get_bitbucket_git_username, push_branch
 from scripts.common.shell import run_cmd
 from scripts.standup.slack_client import post_message
@@ -440,7 +441,7 @@ def _write_ygs_recommendations(reports_dir: Path, recs: list[dict]) -> None:
         lines.append(f"## {skill}")
         lines.append(f"{recommendation}")
         lines.append("")
-    (reports_dir / "ygs_recommendations.md").write_text("\n".join(lines), encoding="utf-8")
+    write_report(reports_dir / "ygs_recommendations.md", "\n".join(lines))
     print(f"[create-skill-pr] wrote ygs_recommendations.md ({len(recs)} recommendations)", flush=True)
 
 

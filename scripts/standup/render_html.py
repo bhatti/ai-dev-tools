@@ -19,6 +19,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.common.report_utils import write_report
 from scripts.common.slack_format import strip_section_heading
 
 
@@ -310,7 +311,7 @@ def main() -> None:
     reports_dir = workspace_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     out_path = reports_dir / "report.html"
-    out_path.write_text(html)
+    write_report(out_path, html)
     print(f"[render_html] written: {out_path}", flush=True)
     sys.exit(0)
 

@@ -26,6 +26,7 @@ from scripts.common.report_renderer import (
     render_implement_report_md,
     render_implement_report_html,
 )
+from scripts.common.report_utils import write_report
 
 
 IMPLEMENT_PROMPT_TEMPLATE = """\
@@ -138,9 +139,9 @@ def _write_impl_reports(issue_dir, issue_id: str, result_data: dict) -> None:
     """Always render human-readable self-review reports as artifacts."""
     md_text = render_implement_report_md(issue_id, result_data)
     html_text = render_implement_report_html(issue_id, result_data, md_text)
-    (issue_dir / "impl_report.md").write_text(md_text, encoding="utf-8")
-    (issue_dir / "impl_report.html").write_text(html_text, encoding="utf-8")
-    print(f"[run-implement] wrote impl_report.md + impl_report.html", flush=True)
+    write_report(issue_dir / "impl_report.md", md_text)
+    if write_report(issue_dir / "impl_report.html", html_text):
+        print(f"[run-implement] wrote impl_report.md + impl_report.html", flush=True)
 
 
 if __name__ == "__main__":

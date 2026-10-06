@@ -37,6 +37,7 @@ from scripts.common.config import get_workspace_dir, load_config, validate_claud
 from scripts.common.git_archaeology import build_audit_context, get_repo_info
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
 from scripts.common.report_renderer import render_simple_html
+from scripts.common.report_utils import write_report
 from scripts.common.skills import apply_project_skills, inline_shared_refs
 
 
@@ -764,12 +765,12 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "audit_report.html"
-        if report_md_path.exists() and not report_html_path.exists():
+        if report_md_path.exists():
             try:
                 md_text = report_md_path.read_text(encoding="utf-8")
                 html_text = render_simple_html(f"Codebase Audit — {repo_label}", md_text)
-                report_html_path.write_text(html_text, encoding="utf-8")
-                print(f"[audit] wrote reports/audit_report.html ({len(html_text)} chars)", flush=True)
+                if write_report(report_html_path, html_text):
+                    print(f"[audit] wrote reports/audit_report.html ({len(html_text)} chars)", flush=True)
             except Exception as e:
                 print(f"[audit] WARNING: could not render HTML: {e}", flush=True)
 

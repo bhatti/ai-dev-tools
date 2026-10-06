@@ -28,6 +28,7 @@ from scripts.common.artifacts import read_text
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, get_issue_dir, load_config, validate_claude_config
 from scripts.common.skills import apply_project_skills, inline_shared_refs as _inline_shared_refs
+from scripts.common.report_utils import write_report
 from scripts.mq._shared import parse_pr_ref
 from scripts.review.post_findings import render_report_md, render_report_html
 
@@ -342,8 +343,8 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
         html_text = render_report_html(findings, md_text)
         reports_dir = workspace / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / "report.md").write_text(md_text, encoding="utf-8")
-        (reports_dir / "report.html").write_text(html_text, encoding="utf-8")
+        write_report(reports_dir / "report.md", md_text)
+        write_report(reports_dir / "report.html", html_text)
         (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
         (reports_dir / "findings.json").write_text(findings_path.read_text(encoding="utf-8"), encoding="utf-8")
         print(f"[review] wrote reports/report.md, reports/report.html, reports/result.json, reports/findings.json", flush=True)

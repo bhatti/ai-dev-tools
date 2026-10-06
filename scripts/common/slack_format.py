@@ -42,30 +42,51 @@ def is_full_report(config: dict) -> bool:
 
 def format_for_slack(text: str) -> str:
     """Convert markdown to Slack mrkdwn format."""
-    # Fenced code blocks → plain indented text (Slack supports ```code``` blocks)
+    # Fenced code blocks → Slack ```code``` blocks (preserve, just strip lang tag)
     text = re.sub(r'```[^\n]*\n(.*?)```', lambda m: '```' + m.group(1).rstrip() + '```',
                   text, flags=re.DOTALL)
-    # Markdown tables → plain aligned text (Slack doesn't render tables)
-    def _table_to_text(m: re.Match) -> str:
+    # Markdown tables → bullet rows (more readable in Slack narrow panes)
+    def _table_to_bullets(m: re.Match) -> str:
         rows = []
+        header_cells: list[str] = []
         for row in m.group(0).splitlines():
             # Skip separator rows (|---|---|)
             if re.match(r'^\|[\s\-\|:]+\|?\s*$', row):
                 continue
-            cells = [c.strip() for c in row.strip('|').split('|')]
-            rows.append('  '.join(c for c in cells if c))
+            cells = [c.strip() for c in row.strip('|').split('|') if c.strip()]
+            if not cells:
+                continue
+            if not header_cells:
+                # First row is header — keep as bold labels
+                header_cells = cells
+                rows.append('*' + ' | '.join(cells) + '*')
+            else:
+                # Data row — pair with header labels where available
+                if len(header_cells) == len(cells):
+                    pairs = ' | '.join(f'*{h}:* {v}' for h, v in zip(header_cells, cells))
+                else:
+                    pairs = ' | '.join(cells)
+                rows.append(f'• {pairs}')
         return '\n'.join(rows)
-    text = re.sub(r'(\|[^\n]+\n)+', _table_to_text, text)
-    # Headings → bold
-    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    # Match table blocks of 2+ rows (requires at least one \n-terminated row before the final one)
+    # to avoid false-matching isolated | characters in prose.
+    text = re.sub(r'(\|[^\n]+\n)+\|[^\n]+\n?', _table_to_bullets, text)
+    # Headings → bold (h1/h2 get a divider line above for visual separation)
+    def _heading_to_bold(m: re.Match) -> str:
+        level = len(m.group(1))
+        content = m.group(2).strip()
+        if level <= 2:
+            return f'\n*{content}*'
+        return f'*{content}*'
+    text = re.sub(r'^(#{1,6})\s+(.+)$', _heading_to_bold, text, flags=re.MULTILINE)
     # Bold **text** → *text*
     text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
     # __bold__ → *bold*
     text = re.sub(r'__(.+?)__', r'*\1*', text)
     # [text](url) → <url|text>
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
-    # Horizontal rules → empty line
-    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Horizontal rules → visual divider
+    text = re.sub(r'^[-*_]{3,}\s*$', '─────────────────────', text, flags=re.MULTILINE)
     # Bullet lists
     text = re.sub(r'^[ \t]*[-*+][ \t]+', '• ', text, flags=re.MULTILINE)
     # Numbered lists

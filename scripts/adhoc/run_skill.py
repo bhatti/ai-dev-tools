@@ -26,6 +26,7 @@ import requests
 
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills, _KNOWN_SKILLS
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
+from scripts.common.report_utils import write_report
 from scripts.standup.slack_client import (
     build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
     PR_GROUP_ORDER, PR_CI_EMOJI, PR_PRIORITY_EMOJI, PR_GROUP_BADGE, pr_group,
@@ -281,8 +282,8 @@ def _write_pr_queue_report(config: dict, workspace, pr_data: dict, title: str,
     reports_dir = workspace / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     html_content = render_simple_html(title, md_report)
-    (reports_dir / "report.md").write_text(md_report, encoding="utf-8")
-    (reports_dir / "report.html").write_text(html_content, encoding="utf-8")
+    write_report(reports_dir / "report.md", md_report)
+    write_report(reports_dir / "report.html", html_content)
     (reports_dir / "result.json").write_text(
         json.dumps({"status": "DONE", "pr_count": pr_data.get("pr_count", 0)}, indent=2),
         encoding="utf-8",
@@ -746,7 +747,7 @@ def main(skill: str, prompt_text: str) -> None:
                 if not html_path.exists():
                     try:
                         from scripts.common.report_renderer import render_simple_html
-                        html_path.write_text(render_simple_html(skill, file_content), encoding="utf-8")
+                        write_report(html_path, render_simple_html(skill, file_content))
                         print(f"[adhoc] wrote {html_path.name}", flush=True)
                     except Exception as _he:
                         print(f"[adhoc] WARNING: could not write HTML: {_he}", flush=True)
@@ -755,8 +756,8 @@ def main(skill: str, prompt_text: str) -> None:
                     from scripts.common.report_renderer import render_simple_html
                     reports_dir = workspace / "reports"
                     reports_dir.mkdir(parents=True, exist_ok=True)
-                    (reports_dir / "report.md").write_text(file_content, encoding="utf-8")
-                    (reports_dir / "report.html").write_text(render_simple_html(skill, file_content), encoding="utf-8")
+                    write_report(reports_dir / "report.md", file_content)
+                    write_report(reports_dir / "report.html", render_simple_html(skill, file_content))
                     (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
                     print(f"[adhoc] wrote reports/report.md, reports/report.html, reports/result.json", flush=True)
                 except Exception as _re:
@@ -770,8 +771,8 @@ def main(skill: str, prompt_text: str) -> None:
                 from scripts.common.report_renderer import render_simple_html
                 reports_dir = workspace / "reports"
                 reports_dir.mkdir(parents=True, exist_ok=True)
-                (reports_dir / "report.md").write_text(output_text, encoding="utf-8")
-                (reports_dir / "report.html").write_text(render_simple_html(skill, output_text), encoding="utf-8")
+                write_report(reports_dir / "report.md", output_text)
+                write_report(reports_dir / "report.html", render_simple_html(skill, output_text))
                 (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
                 print(f"[adhoc] wrote reports/ from Claude output", flush=True)
             except Exception as _re:

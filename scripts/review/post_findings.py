@@ -24,6 +24,8 @@ import click
 import requests
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.report_renderer import render_simple_html
+from scripts.common.report_utils import write_report
 from scripts.common.slack_format import build_artifact_links
 from scripts.standup.slack_client import upload_file as _slack_upload_file
 
@@ -85,48 +87,13 @@ def render_report_md(findings: dict) -> str:
 
 
 def render_report_html(findings: dict, md_text: str) -> str:
-    """Wrap the Markdown report in minimal HTML for browser viewing."""
-    import re
-    pr_url = findings.get("pr_url", "")
+    """Render the Markdown PR review report as a Bootstrap HTML page."""
     verdict = findings.get("verdict", "COMMENT")
-
-    # Simple md → html conversion (headings, bold, italic, code, links)
-    html = md_text
-    html = re.sub(r"^### (.+)$", r"<h3>\1</h3>", html, flags=re.MULTILINE)
-    html = re.sub(r"^## (.+)$", r"<h2>\1</h2>", html, flags=re.MULTILINE)
-    html = re.sub(r"^# (.+)$", r"<h1>\1</h1>", html, flags=re.MULTILINE)
-    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
-    html = re.sub(r"_\((.+?)\)_", r"<em>(\1)</em>", html)
-    html = re.sub(r"`(.+?)`", r"<code>\1</code>", html)
-    # Convert bare URLs to links
-    if pr_url:
-        html = html.replace(pr_url, f'<a href="{pr_url}">{pr_url}</a>')
-    html = html.replace("\n", "<br>\n")
-
+    pr_url = findings.get("pr_url", "")
     title = f"PR Review — {verdict}"
     if pr_url:
         title += f" — {pr_url}"
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         max-width: 900px; margin: 40px auto; padding: 0 20px; color: #24292e; }}
-  h1 {{ border-bottom: 2px solid #e1e4e8; padding-bottom: 8px; }}
-  h2 {{ border-bottom: 1px solid #e1e4e8; padding-bottom: 4px; margin-top: 24px; }}
-  h3 {{ margin-top: 16px; }}
-  code {{ background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-  strong {{ font-weight: 600; }}
-</style>
-</head>
-<body>
-{html}
-</body>
-</html>"""
+    return render_simple_html(title, md_text)
 
 
 def _post_text(token: str, channel: str, thread_ts: str | None, text: str) -> dict:
@@ -154,6 +121,9 @@ def _post_text(token: str, channel: str, thread_ts: str | None, text: str) -> di
     return data
 
 
+_SLACK_DESC_MAX = 220
+
+
 def _build_slack_text(findings: dict) -> str:
     """Build compact Slack mrkdwn message from findings."""
     pr_url = findings.get("pr_url", "")
@@ -162,19 +132,23 @@ def _build_slack_text(findings: dict) -> str:
     finding_list = findings.get("findings", [])
 
     emoji = _VERDICT_EMOJI.get(verdict, "💬")
-    lines = [
-        f"{emoji} *PR Review — {verdict}*",
-        f"*PR:* {pr_url}" if pr_url else "",
-        "",
-        summary,
-    ]
+    lines: list[str] = [f"{emoji} *PR Review — {verdict}*"]
+    if pr_url:
+        lines.append(f"*PR:* {pr_url}")
+    if summary:
+        lines += ["", summary]
 
     if finding_list:
         lines += ["", "*Findings:*"]
+        prev_severity = None
         for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
-            for f in finding_list:
-                if f.get("severity", "").upper() != severity:
-                    continue
+            sev_findings = [f for f in finding_list if f.get("severity", "").upper() == severity]
+            if not sev_findings:
+                continue
+            if prev_severity is not None:
+                lines.append("")
+            prev_severity = severity
+            for f in sev_findings:
                 sem = _SEVERITY_EMOJI.get(severity, "•")
                 loc = ""
                 if f.get("file"):
@@ -184,12 +158,15 @@ def _build_slack_text(findings: dict) -> str:
                 conf = f.get("confidence", "")
                 conf_txt = f" _(confidence: {conf})_" if conf else ""
                 lines.append(f"{sem} *{severity}*{conf_txt} — {f.get('title', '(untitled)')}{loc}")
-                if f.get("description"):
-                    lines.append(f"  {f['description']}")
+                desc = (f.get("description") or "").strip()
+                if desc:
+                    if len(desc) > _SLACK_DESC_MAX:
+                        desc = desc[:_SLACK_DESC_MAX].rstrip() + "…"
+                    lines.append(f"> {desc}")
     else:
         lines.append("_No specific findings — see summary above._")
 
-    return "\n".join(l for l in lines if l is not None)
+    return "\n".join(lines)
 
 
 @click.command()
@@ -220,10 +197,10 @@ def main(findings_path: str) -> None:
     html_text = render_report_html(findings, md_text)
     md_path = reports_dir / "report.md"
     html_path = reports_dir / "report.html"
-    md_path.write_text(md_text, encoding="utf-8")
-    html_path.write_text(html_text, encoding="utf-8")
-    print(f"[post_findings] wrote {md_path} ({len(md_text)} chars)", flush=True)
-    print(f"[post_findings] wrote {html_path} ({len(html_text)} chars)", flush=True)
+    if write_report(md_path, md_text):
+        print(f"[post_findings] wrote {md_path} ({len(md_text)} chars)", flush=True)
+    if write_report(html_path, html_text):
+        print(f"[post_findings] wrote {html_path} ({len(html_text)} chars)", flush=True)
 
     # Upload HTML to Slack if credentials are available (non-fatal)
     token = config.get("SLACK_BOT_TOKEN", "")

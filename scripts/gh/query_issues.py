@@ -18,6 +18,7 @@ import click
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.common.gh_api import resolve_github_issues
 from scripts.common.report_renderer import render_simple_html
+from scripts.common.report_utils import write_report
 from scripts.common.shell import run_cmd as _run
 from scripts.standup.slack_client import build_gh_issue_blocks, notify
 
@@ -84,10 +85,10 @@ def _write_query_output(config: dict, query: str, issues: list) -> None:
         labels = f" [{', '.join(issue['labels'])}]" if issue["labels"] else ""
         lines.append(f"- [#{issue['number']}]({issue['url']}){labels} {issue['title']} — _{issue['assignee']}_")
     md_text = "\n".join(lines)
-    (reports / "report.md").write_text(md_text, encoding="utf-8")
+    write_report(reports / "report.md", md_text)
 
     title = f"GitHub Issues: \"{query}\" ({len(issues)} found)"
-    (reports / "report.html").write_text(render_simple_html(title, md_text), encoding="utf-8")
+    write_report(reports / "report.html", render_simple_html(title, md_text))
     print(f"[gh-query] wrote reports/result.json, reports/report.md, reports/report.html", flush=True)
 
 

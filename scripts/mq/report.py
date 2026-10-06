@@ -44,6 +44,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.report_utils import write_report
 from scripts.common.slack_format import format_for_slack
 from scripts.standup.slack_client import post_report
 
@@ -1535,8 +1536,8 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
 </body>
 </html>"""
 
-    (reports_dir / "risk_heatmap.html").write_text(html)
-    print("[mq-report] reports/risk_heatmap.html written", flush=True)
+    if write_report(reports_dir / "risk_heatmap.html", html):
+        print("[mq-report] reports/risk_heatmap.html written", flush=True)
 
 
 def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -> str:
@@ -1665,7 +1666,7 @@ def main() -> None:
     print(report_text, flush=True)
     print("=" * 60 + "\n", flush=True)
 
-    (reports_dir / "report.md").write_text(report_text)
+    write_report(reports_dir / "report.md", report_text)
     print("[mq-report] reports/report.md written", flush=True)
 
     for key, val in ctx.items():
@@ -1674,8 +1675,8 @@ def main() -> None:
     from scripts.common.report_renderer import render_simple_html
     try:
         html = render_simple_html(title, report_text)
-        (reports_dir / "report.html").write_text(html)
-        print("[mq-report] reports/report.html written", flush=True)
+        if write_report(reports_dir / "report.html", html):
+            print("[mq-report] reports/report.html written", flush=True)
     except Exception as e:
         print(f"[mq-report] HTML render failed (non-fatal): {e}", flush=True)
 

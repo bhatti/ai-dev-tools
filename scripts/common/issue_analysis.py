@@ -15,6 +15,7 @@ from typing import Optional, Tuple
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS
 from scripts.common.config import get_workspace_dir
 from scripts.common.report_renderer import render_simple_html
+from scripts.common.report_utils import write_report
 
 DEFAULT_ANALYSIS_PROMPT = """\
 You are a principal engineer performing evidence-based issue analysis.
@@ -458,9 +459,9 @@ def write_analysis_output(config: dict, issue_ids: list[str], analysis: str,
     if write_html:
         header = f"# Analysis of {len(issue_ids)} issue(s): {', '.join(issue_ids)}\n\n"
         md_text = header + analysis
-        (reports / "report.md").write_text(md_text, encoding="utf-8")
+        write_report(reports / "report.md", md_text)
         title = f"Analysis of {len(issue_ids)} issue(s)"
-        (reports / "report.html").write_text(render_simple_html(title, md_text), encoding="utf-8")
+        write_report(reports / "report.html", render_simple_html(title, md_text))
         print("[analyze] wrote reports/result.json, reports/report.md, reports/report.html",
               flush=True)
     else:
@@ -469,8 +470,7 @@ def write_analysis_output(config: dict, issue_ids: list[str], analysis: str,
         if skill_md_path.exists():
             skill_md = skill_md_path.read_text(encoding="utf-8")
             title = f"Analysis of {len(issue_ids)} issue(s)" if issue_ids else "Analysis"
-            (reports / "report.html").write_text(render_simple_html(title, skill_md),
-                                                  encoding="utf-8")
+            write_report(reports / "report.html", render_simple_html(title, skill_md))
             print("[analyze] wrote reports/result.json, reports/report.html "
                   "(skill owns reports/report.md)", flush=True)
         else:
