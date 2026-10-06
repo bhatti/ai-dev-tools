@@ -182,9 +182,7 @@ def test_artifact_link_uses_by_job_endpoint(tmp_workspace, monkeypatch):
     msg_file = tmp_workspace / "reports" / "slack_message.txt"
     assert msg_file.exists()
     text = msg_file.read_text()
-    assert "by-job/job-review-001/download" in text
-    assert "task=post" in text
-    assert "file=reports/report.html" in text
+    assert "dashboard/jobs/requests/job-review-001#reports" in text
     assert "dashboard/jobs/requests/job-review-001" in text
 
 

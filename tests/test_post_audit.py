@@ -89,9 +89,7 @@ class TestPostAuditSlackBodySelection:
             "JOB_ID": "job-audit-001",
         }, has_summary=True)
         text = result["posted_text"]
-        assert "by-job/job-audit-001/download" in text
-        assert "task=audit" in text
-        assert "file=reports/audit_report.html" in text
+        assert "dashboard/jobs/requests/job-audit-001#reports" in text
         assert "dashboard/jobs/requests/job-audit-001" in text
 
     def test_artifact_link_absent_without_config(self, tmp_path):
