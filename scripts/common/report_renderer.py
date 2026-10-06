@@ -120,8 +120,10 @@ def _inline_md_to_html(text: str) -> str:
     text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
     # Images ![alt](url) — before links so the ! prefix is consumed first
     text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%">', text)
-    # Links [text](url)
+    # Standard markdown links [text](url)
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+    # Slack mrkdwn links <url|text> — after HTML escaping appear as &lt;url|text&gt;
+    text = re.sub(r'&lt;(https?://[^|&]+)\|([^&]+)&gt;', r'<a href="\1">\2</a>', text)
     return text
 
 
