@@ -219,21 +219,54 @@ _HTML = """\
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Standup Report — {report_date}</title>
-  <link rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-    crossorigin="anonymous">
   <style>
-    body {{ font-size: .9rem; }}
-    h3 {{ margin-top: 1.5rem; }}
-    pre {{ background:#f8f9fa; padding:.75rem; border-radius:.375rem; font-size:.8rem; }}
-    .risk-high {{ border-left: 4px solid #dc3545; padding-left:.75rem; margin-bottom:.75rem; }}
-    .risk-med  {{ border-left: 4px solid #ffc107; padding-left:.75rem; margin-bottom:.75rem; }}
-    .risk-low  {{ border-left: 4px solid #0dcaf0; padding-left:.75rem; margin-bottom:.75rem; }}
-    .brief-section {{ background:#f8f9fa; border-radius:.5rem; padding:1rem 1.25rem; margin-bottom:1rem; }}
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: .9rem; line-height: 1.6; color: #212529;
+      max-width: 1200px; margin: 0 auto; padding: 1.25rem 1.5rem;
+    }}
+    h2 {{ font-size: 1.4rem; margin: 0 0 .75rem; }}
+    h3 {{ font-size: 1.15rem; margin: 1.5rem 0 .5rem; border-bottom: 1px solid #dee2e6; padding-bottom: .25rem; }}
+    h4, h5 {{ margin: 1rem 0 .4rem; }}
+    p {{ margin: .4rem 0 .6rem; }}
+    a {{ color: #0d6efd; }}
+    code {{
+      background: #f0f2f5; padding: .15rem .35rem; border-radius: .25rem; font-size: .85em;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }}
+    pre {{ background: #f8f9fa; padding: .75rem 1rem; border-radius: .375rem; font-size: .8rem; overflow-x: auto; border: 1px solid #e9ecef; }}
+    pre code {{ background: none; padding: 0; }}
+    ul, ol {{ padding-left: 1.4rem; margin-bottom: .5rem; }}
+    li {{ margin-bottom: .2rem; }}
+    hr {{ border: 0; border-top: 1px solid #dee2e6; margin: 1rem 0; }}
+    strong {{ font-weight: 600; }}
+    /* Board status table */
+    .table {{ width: 100%; border-collapse: collapse; margin: .5rem 0 1rem; font-size: .875rem; }}
+    .table th {{ background: #212529; color: #fff; font-weight: 600; padding: .45rem .75rem; border: 1px solid #dee2e6; text-align: left; white-space: nowrap; }}
+    .table td {{ border: 1px solid #dee2e6; padding: .4rem .75rem; vertical-align: top; }}
+    .table-sm th, .table-sm td {{ padding: .3rem .6rem; }}
+    tbody tr:nth-child(odd) {{ background: #f8f9fa; }}
+    tbody tr:hover {{ background: #dbe9ff; }}
+    .text-center {{ text-align: center; }}
+    .text-success {{ color: #198754; font-weight: 600; }}
+    .text-warning {{ color: #b45309; font-weight: 600; }}
+    .text-muted {{ color: #6c757d; }}
+    .small {{ font-size: .8rem; }}
+    .d-flex {{ display: flex; }}
+    .align-items-center {{ align-items: center; }}
+    .justify-content-between {{ justify-content: space-between; }}
+    .mb-0 {{ margin-bottom: 0; }}
+    .mb-3 {{ margin-bottom: 1rem; }}
+    /* Risk and brief sections */
+    .risk-high {{ border-left: 4px solid #dc3545; padding-left: .75rem; margin-bottom: .75rem; }}
+    .risk-med  {{ border-left: 4px solid #ffc107; padding-left: .75rem; margin-bottom: .75rem; }}
+    .risk-low  {{ border-left: 4px solid #0dcaf0; padding-left: .75rem; margin-bottom: .75rem; }}
+    .brief-section {{ background: #f8f9fa; border-radius: .5rem; padding: 1rem 1.25rem; margin-bottom: 1rem; border: 1px solid #e9ecef; }}
     .brief-section hr {{ border-color: #dee2e6; }}
   </style>
 </head>
-<body class="container-fluid py-3">
+<body>
 
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h2 class="mb-0">📋 Standup Report — {report_date}</h2>

@@ -94,7 +94,7 @@ def _escape_html(text: str) -> str:
 
 
 def _inline_md_to_html(text: str) -> str:
-    """Convert inline markdown (bold, italic, code, links) to HTML."""
+    """Convert inline markdown (bold, italic, code, images, links) to HTML."""
     # Inline code first (prevents double-processing)
     parts: list[str] = []
     remainder = text
@@ -118,6 +118,8 @@ def _inline_md_to_html(text: str) -> str:
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     # Italic * (not bold) — only word-boundary to avoid matching list bullets
     text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
+    # Images ![alt](url) — before links so the ! prefix is consumed first
+    text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%">', text)
     # Links [text](url)
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
     return text
@@ -193,7 +195,7 @@ def render_simple_html(title: str, md_text: str) -> str:
                     table_header_done = True
                 continue
             if not in_table:
-                output.append('<table class="table table-bordered table-sm table-hover table-striped"><thead><tr>')
+                output.append('<table><thead><tr>')
                 in_table = True
                 table_header_done = False
                 tag = "th"
@@ -253,23 +255,51 @@ def render_simple_html(title: str, md_text: str) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escaped_title}</title>
-  <link rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-    crossorigin="anonymous">
   <style>
-    body {{ font-size: .9rem; }}
-    h1 {{ border-bottom: 2px solid #dee2e6; padding-bottom: .5rem; margin-bottom: 1rem; }}
-    h2 {{ border-bottom: 1px solid #dee2e6; padding-bottom: .3rem; margin-top: 1.5rem; margin-bottom: .75rem; }}
-    h3 {{ margin-top: 1.25rem; margin-bottom: .5rem; }}
-    h4, h5, h6 {{ margin-top: 1rem; margin-bottom: .4rem; }}
-    pre {{ background: #f8f9fa; padding: .75rem; border-radius: .375rem; font-size: .8rem; overflow-x: auto; }}
-    pre code {{ background: none; padding: 0; }}
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: .9rem; line-height: 1.6; color: #212529;
+      max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+    }}
+    h1 {{ font-size: 1.75rem; border-bottom: 2px solid #dee2e6; padding-bottom: .5rem; margin: 0 0 1rem; }}
+    h2 {{ font-size: 1.4rem; border-bottom: 1px solid #dee2e6; padding-bottom: .3rem; margin: 1.75rem 0 .75rem; }}
+    h3 {{ font-size: 1.15rem; margin: 1.4rem 0 .5rem; }}
+    h4, h5, h6 {{ margin: 1rem 0 .4rem; }}
+    p {{ margin: .4rem 0 .75rem; }}
+    a {{ color: #0d6efd; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    code {{
+      background: #f0f2f5; padding: .15rem .35rem;
+      border-radius: .25rem; font-size: .85em;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }}
+    pre {{
+      background: #f8f9fa; padding: .85rem 1rem;
+      border-radius: .4rem; overflow-x: auto;
+      border: 1px solid #e9ecef;
+    }}
+    pre code {{ background: none; padding: 0; font-size: .82rem; }}
+    ul, ol {{ padding-left: 1.5rem; margin-bottom: .75rem; }}
+    li {{ margin-bottom: .2rem; }}
+    hr {{ border: 0; border-top: 1px solid #dee2e6; margin: 1.25rem 0; }}
+    strong {{ font-weight: 600; }}
+    img {{ max-width: 100%; height: auto; border-radius: .375rem; margin: .5rem 0; }}
+    table {{ width: 100%; border-collapse: collapse; margin: .75rem 0 1.25rem; font-size: .875rem; }}
+    th {{
+      background: #f8f9fa; font-weight: 600;
+      border: 1px solid #dee2e6; padding: .45rem .75rem;
+      text-align: left; white-space: nowrap;
+    }}
+    td {{ border: 1px solid #dee2e6; padding: .4rem .75rem; vertical-align: top; }}
+    tbody tr:nth-child(odd) {{ background: #f8f9fa; }}
+    tbody tr:hover {{ background: #dbe9ff; }}
     .risk-high {{ border-left: 4px solid #dc3545; padding-left: .75rem; margin-bottom: .75rem; }}
     .risk-med  {{ border-left: 4px solid #ffc107; padding-left: .75rem; margin-bottom: .75rem; }}
     .risk-low  {{ border-left: 4px solid #0dcaf0; padding-left: .75rem; margin-bottom: .75rem; }}
   </style>
 </head>
-<body class="container py-4">
+<body>
 {body}
 </body>
 </html>"""
