@@ -14,6 +14,7 @@ Reads:
 Writes:
     /workspace/reports/skill_update_plan.md
     /workspace/reports/skill_update_plan_result.json
+    /workspace/reports/skill_improvements_refined.json  (machine-readable output for create_skill_pr)
 
 Exit codes: 0=done, 1=error
 """
@@ -74,8 +75,30 @@ Your job is to review the findings and create a detailed, actionable skill updat
        If updating an existing file, show the specific section to add/change with before/after.
    - **Priority order**: highest-impact changes first (most frequently recurring gap → highest priority)
    - **Rejected proposals**: list any proposals from `skill_improvements.json` that were rejected and why
-8. Output ONLY this JSON on the last line (no text after it):
-   {{"status":"DONE","skill_updates":<N>,"new_skills":<M>,"summary":"<one sentence>"}}
+8. Write `reports/skill_improvements_refined.json` — the machine-readable output that
+   `create_skill_pr` will apply. Schema:
+   ```json
+   {{"repo_skill_changes": [
+     {{"action": "update|create",
+      "file_path": "relative/path",
+      "description": "one-line summary for PR body",
+      "final_content": "COMPLETE file content after the change"}}
+   ],
+   "new_docs": [
+     {{"path": "relative/path", "description": "one-line summary", "content": "complete file content"}}
+   ],
+   "ygs_recommendations": []}}
+   ```
+   CRITICAL rules for `final_content`:
+   - For `action=update`: read the existing file, merge the new rule into the correct section,
+     and write the COMPLETE merged file content. Do NOT just write the new addition — include
+     EVERYTHING that should be in the file after the change. Preserve all existing content.
+   - For `action=create`: write the complete new file.
+   - Remove ALL PR-specific references from `final_content`. Generalize every rule.
+     PR citations belong in the audit report and plan, not in skill files.
+   - Pass through `ygs_recommendations` from the original `skill_improvements.json` unchanged.
+9. Output ONLY this JSON on the last line (no text after it):
+   {{"status":"DONE","skill_updates":<N>,"new_skills":<M>,"refined_json":true,"summary":"<one sentence>"}}
    Or if blocked:
    {{"status":"BLOCKED","reason":"<explanation>"}}
 """
@@ -160,6 +183,16 @@ def main() -> None:
     else:
         print("[plan-skill-updates] WARNING: skill_update_plan.md was not written by Claude", flush=True)
         print(f"::add-task-context SKILL_UPDATE_PLAN::no", flush=True)
+
+    refined_path = reports_dir / "skill_improvements_refined.json"
+    if refined_path.exists():
+        print(f"[plan-skill-updates] skill_improvements_refined.json written ({refined_path.stat().st_size} bytes)",
+              flush=True)
+        print(f"::add-task-context REFINED_JSON::yes", flush=True)
+    else:
+        print("[plan-skill-updates] WARNING: skill_improvements_refined.json was not written — "
+              "create_skill_pr will fall back to raw skill_improvements.json", flush=True)
+        print(f"::add-task-context REFINED_JSON::no", flush=True)
 
     status = status_data.get("status", "UNKNOWN")
     print(f"[plan-skill-updates] status={status} result={json.dumps(status_data)}", flush=True)

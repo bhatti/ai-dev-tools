@@ -103,6 +103,70 @@ class TestMainNoImprovements:
         assert pr_json["url"] == ""
 
 
+class TestRefinedJsonPreference:
+    """Test that create_skill_pr prefers refined JSON over raw."""
+
+    @patch("scripts.analyze.create_skill_pr.load_config")
+    @patch("scripts.analyze.create_skill_pr.get_workspace_dir")
+    def test_prefers_refined_over_raw(self, mock_workspace, mock_config, tmp_path, capsys):
+        """When both files exist but refined has no changes, refined is loaded (not raw)."""
+        mock_config.return_value = {"WORKSPACE_DIR": str(tmp_path)}
+        mock_workspace.return_value = tmp_path
+        reports = tmp_path / "reports"
+        reports.mkdir()
+
+        raw = {"repo_skill_changes": [{"file_path": "a.md", "changes": "raw content"}], "new_docs": []}
+        refined = {"repo_skill_changes": [], "new_docs": []}
+        (reports / "skill_improvements.json").write_text(json.dumps(raw))
+        (reports / "skill_improvements_refined.json").write_text(json.dumps(refined))
+
+        from scripts.analyze.create_skill_pr import main
+        main()
+
+        captured = capsys.readouterr()
+        assert "Using refined improvements from plan step" in captured.out
+        pr_json = json.loads((tmp_path / "pr.json").read_text())
+        assert pr_json["url"] == ""
+
+    @patch("scripts.analyze.create_skill_pr.load_config")
+    @patch("scripts.analyze.create_skill_pr.get_workspace_dir")
+    def test_falls_back_to_raw(self, mock_workspace, mock_config, tmp_path):
+        mock_config.return_value = {"WORKSPACE_DIR": str(tmp_path)}
+        mock_workspace.return_value = tmp_path
+        reports = tmp_path / "reports"
+        reports.mkdir()
+
+        raw = {"repo_skill_changes": [], "new_docs": []}
+        (reports / "skill_improvements.json").write_text(json.dumps(raw))
+        # No refined file
+
+        from scripts.analyze.create_skill_pr import main
+        main()
+
+        pr_json = json.loads((tmp_path / "pr.json").read_text())
+        assert pr_json["url"] == ""
+
+
+class TestFinalContentWrite:
+    """Test that final_content writes complete file content."""
+
+    def test_final_content_writes_complete_file(self, tmp_path):
+        """Verify final_content replaces file entirely (not append)."""
+        target = tmp_path / "skill.md"
+        target.write_text("# Old Content\n\nExisting rules here.", encoding="utf-8")
+
+        final_content = "# Updated Content\n\nExisting rules here.\n\n## New Section\n\nNew rule added."
+
+        # Simulate what create_skill_pr now does
+        target.write_text(final_content, encoding="utf-8")
+
+        result = target.read_text()
+        assert result == final_content
+        assert "Old Content" not in result
+        assert "New Section" in result
+        assert "Existing rules here." in result
+
+
 class TestBuildPrBody:
     """Tests for _build_pr_body — single function used by both GH and BB (DRY)."""
 

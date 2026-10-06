@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.mq.report import (
-    _build_report, _generate_risk_heatmap_html, _read_json, _valley_of_calm_section,
+    _build_report, _build_mq_slack_summary, _generate_risk_heatmap_html,
+    _read_json, _valley_of_calm_section,
 )
 
 
@@ -715,3 +716,53 @@ class TestGateReviewMetricsDashboard:
         (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
         md, _ = _build_report(tmp_path, "", "Merge Queue")
         assert "LOC Changed" not in md
+
+
+class TestBuildMqSlackSummary:
+    @staticmethod
+    def _make_prs(n_feature=10, n_bug=3, n_test=2) -> list[dict]:
+        prs = []
+        for _ in range(n_feature):
+            prs.append({"pr_type": "feature", "created_at": "2026-09-15",
+                        "blast_radius": "low", "ci_status": "pass", "category": "ui"})
+        for _ in range(n_bug):
+            prs.append({"pr_type": "bug", "created_at": "2026-08-01",
+                        "blast_radius": "high", "ci_status": "pass", "category": "api"})
+        for _ in range(n_test):
+            prs.append({"pr_type": "test", "created_at": "2026-09-10",
+                        "blast_radius": "low", "ci_status": "fail", "category": "test"})
+        return prs
+
+    def test_includes_deploy_risk(self):
+        prs = self._make_prs(n_feature=80, n_bug=15, n_test=5)
+        lanes = [{"prs": prs[:50]}, {"prs": prs[50:]}]
+        ctx = {"MQ_TOTAL": str(len(prs)), "MQ_HIGH_RISK": "15", "MQ_NEEDS_REVIEW": "10"}
+        text = _build_mq_slack_summary(ctx, prs, lanes)
+        assert "Deploy Risk" in text
+        assert "Defect rate" in text
+        assert "Batch success" in text
+
+    def test_includes_categories(self):
+        prs = self._make_prs()
+        lanes = [{"prs": prs}]
+        ctx = {"MQ_TOTAL": str(len(prs)), "MQ_HIGH_RISK": "3", "MQ_NEEDS_REVIEW": "0"}
+        text = _build_mq_slack_summary(ctx, prs, lanes)
+        assert "Categories" in text
+        assert "ui" in text
+
+    def test_includes_throughput(self):
+        prs = self._make_prs()
+        lanes = [{"prs": prs}]
+        ctx = {"MQ_TOTAL": str(len(prs)), "MQ_HIGH_RISK": "3", "MQ_NEEDS_REVIEW": "0"}
+        text = _build_mq_slack_summary(ctx, prs, lanes)
+        assert "Throughput" in text
+        assert "avg age" in text
+        assert "CFR proxy" in text
+
+    def test_no_deploy_risk_when_zero_defects(self):
+        prs = self._make_prs(n_feature=20, n_bug=0, n_test=5)
+        lanes = [{"prs": prs}]
+        ctx = {"MQ_TOTAL": str(len(prs)), "MQ_HIGH_RISK": "0", "MQ_NEEDS_REVIEW": "0"}
+        text = _build_mq_slack_summary(ctx, prs, lanes)
+        assert "Defect rate: 0.0%" in text
+        assert "Batch success" not in text

@@ -24,14 +24,29 @@ def _make_config(tmp_path):
 
 
 def _fake_run_claude_ok(prompt, working_dir, model, max_turns, log_file, system_prompt):
-    """Simulates a successful Claude run that writes skill_update_plan.md."""
+    """Simulates a successful Claude run that writes skill_update_plan.md and refined JSON."""
     (working_dir / "reports" / "skill_update_plan.md").write_text(
         "# Skill Update Plan\n\nPriority 1: update ygs-review.md",
         encoding="utf-8",
     )
+    refined = {
+        "repo_skill_changes": [
+            {
+                "action": "update",
+                "file_path": ".claude/skills/ygs-review.md",
+                "description": "Add security checklist section",
+                "final_content": "# Review Skill\n\n## Security Checklist\n\n- Validate all inputs",
+            }
+        ],
+        "new_docs": [],
+        "ygs_recommendations": [],
+    }
+    (working_dir / "reports" / "skill_improvements_refined.json").write_text(
+        json.dumps(refined, indent=2), encoding="utf-8",
+    )
     result = MagicMock()
     result.status = "DONE"
-    result.status_json = {"status": "DONE", "skill_updates": 2, "new_skills": 1, "summary": "ok"}
+    result.status_json = {"status": "DONE", "skill_updates": 2, "new_skills": 1, "refined_json": True, "summary": "ok"}
     return result
 
 
@@ -133,6 +148,50 @@ class TestPlanSkillUpdatesSuccess:
         call_kwargs = mock_claude.call_args
         prompt_arg = call_kwargs[0][0]
         assert "repo_skill_changes" in prompt_arg or "skill_improvements" in prompt_arg.lower()
+
+
+class TestPlanSkillUpdatesRefinedJson:
+    """Verify that the plan step outputs skill_improvements_refined.json."""
+
+    @patch("scripts.analyze.plan_skill_updates.load_config")
+    @patch("scripts.analyze.plan_skill_updates.validate_claude_config")
+    @patch("scripts.analyze.plan_skill_updates.run_claude", side_effect=_fake_run_claude_ok)
+    def test_writes_refined_json(self, mock_claude, mock_validate, mock_config, tmp_path):
+        mock_config.return_value = _make_config(tmp_path)
+        reports = tmp_path / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        (reports / "pr_audit_report.md").write_text("# Audit\n\nFindings.", encoding="utf-8")
+
+        from scripts.analyze.plan_skill_updates import main
+
+        main()
+
+        refined_path = reports / "skill_improvements_refined.json"
+        assert refined_path.exists(), "refined JSON should be written by Claude"
+        refined = json.loads(refined_path.read_text())
+        assert "repo_skill_changes" in refined
+        assert refined["repo_skill_changes"][0].get("final_content")
+
+    @patch("scripts.analyze.plan_skill_updates.load_config")
+    @patch("scripts.analyze.plan_skill_updates.validate_claude_config")
+    @patch("scripts.analyze.plan_skill_updates.run_claude", side_effect=_fake_run_claude_ok)
+    def test_prompt_includes_generalizability_rules(self, mock_claude, mock_validate, mock_config, tmp_path):
+        mock_config.return_value = _make_config(tmp_path)
+        reports = tmp_path / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        (reports / "pr_audit_report.md").write_text("# Audit\n\nFindings.", encoding="utf-8")
+
+        from scripts.analyze.plan_skill_updates import main
+
+        main()
+
+        prompt_arg = mock_claude.call_args[0][0]
+        assert "GENERALIZE" in prompt_arg or "generalize" in prompt_arg.lower()
+        assert "final_content" in prompt_arg
 
 
 class TestPlanSkillUpdatesClaudeError:

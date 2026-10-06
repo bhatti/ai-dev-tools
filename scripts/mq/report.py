@@ -383,7 +383,7 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
                 health_label = "healthy defect rate"
             lines.append(
                 f"> {health_emoji} **Defect rate proxy: {defect_pct}%** "
-                f"({n_bugs} bug+security PRs / {total} total) — ~1-in-{defect_ratio} commit rate. "
+                f"({n_bugs} bug+security PRs / {total} total). "
                 f"At batch size ~{avg_batch}, est. batch success ≈ {batch_success_est}% "
                 f"({health_label})."
             )
@@ -1423,6 +1423,9 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
 
     rows_html = []
     for dr in defect_rates:
+        dr_pct = dr * 100
+        dr_label = f"{dr_pct:.1f}%"
+        is_current_row = abs(dr - actual_defect_rate) <= 0.015
         cells = []
         for bs in batch_sizes:
             success = merge_batch_success(dr, bs)
@@ -1436,24 +1439,39 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
             else:
                 bg = "#cf222e"
             is_current = (
-                abs(dr - actual_defect_rate) <= 0.015
+                is_current_row
                 and abs(bs - avg_batch) <= max(5, avg_batch * 0.3)
             )
             border = "3px solid #0969da" if is_current else "1px solid #30363d"
-            marker = " *" if is_current else ""
+            marker = " ★" if is_current else ""
+            tooltip = (
+                f"Defect rate {dr_pct:.1f}% means {dr_pct:.1f} out of 100 PRs are buggy. "
+                f"Deploying {bs} PRs at once → {pct}% chance all are clean."
+            )
             cells.append(
-                f'<td style="background:{bg};color:#fff;border:{border};'
-                f'text-align:center;padding:6px;font-size:13px;min-width:55px">'
+                f'<td title="{tooltip}" style="background:{bg};color:#fff;border:{border};'
+                f'text-align:center;padding:6px;font-size:13px;min-width:55px;cursor:help">'
                 f'{pct}%{marker}</td>'
             )
-        label = f"{dr*100:.1f}%"
-        rows_html.append(f'<tr><td style="padding:6px;font-weight:bold;background:#161b22;'
-                         f'color:#c9d1d9;text-align:right">{label}</td>{"".join(cells)}</tr>')
+        row_bg = "#1c2333" if is_current_row else "#161b22"
+        row_extra = "font-size:14px;" if is_current_row else ""
+        row_tip = f"{dr_pct:.1f}% of PRs in the queue are bug/security fixes"
+        rows_html.append(
+            f'<tr><td title="{row_tip}" style="padding:6px;font-weight:bold;background:{row_bg};'
+            f'color:#c9d1d9;text-align:right;{row_extra}cursor:help">'
+            f'{dr_label}{"  ◄" if is_current_row else ""}</td>{"".join(cells)}</tr>'
+        )
 
-    header_cells = "".join(
-        f'<th style="padding:6px;background:#161b22;color:#c9d1d9;min-width:55px">{bs}</th>'
-        for bs in batch_sizes
-    )
+    header_cells = ""
+    for bs in batch_sizes:
+        is_cur_col = abs(bs - avg_batch) <= max(5, avg_batch * 0.3)
+        col_tip = f"Deploy {bs} PRs together in one release batch"
+        col_bg = "#1c2333" if is_cur_col else "#161b22"
+        col_marker = " ▼" if is_cur_col else ""
+        header_cells += (
+            f'<th title="{col_tip}" style="padding:6px;background:{col_bg};'
+            f'color:#c9d1d9;min-width:55px;cursor:help">{bs}{col_marker}</th>'
+        )
 
     summary_lines = [
         f"Queue size: {total} PRs",
@@ -1507,12 +1525,14 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
 </div>
 
 <h2>Batch Success Rate: Defect Rate × Batch Size</h2>
-<p style="font-size:13px;color:#8b949e">Formula: (1 − defect_rate)<sup>batch_size</sup> — probability that ALL PRs in a batch are defect-free</p>
+<p style="font-size:13px;color:#8b949e"><strong>Rows</strong> = defect rate: % of PRs that are bug/security fixes (e.g., 5% means 5 out of 100 PRs are buggy).<br>
+<strong>Columns</strong> = batch size: how many PRs are released together in one deploy.<br>
+<strong>Cells</strong> = probability that ALL PRs in the batch are defect-free. Formula: (1 − defect_rate)<sup>batch_size</sup></p>
 
 <table>
   <thead>
     <tr>
-      <th style="padding:6px;background:#161b22;color:#8b949e">Defect Rate ↓ \\ Batch →</th>
+      <th style="padding:6px;background:#161b22;color:#8b949e" title="% of PRs in queue that are bug/security fixes">Defect Rate ↓ \\ Batch →</th>
       {header_cells}
     </tr>
   </thead>
@@ -1523,11 +1543,14 @@ def _generate_risk_heatmap_html(workspace: Path, reports_dir: Path) -> None:
 
 <h2>Reading the Heatmap</h2>
 <ul style="line-height:1.8">
+  <li><strong>Defect rate (rows)</strong> — % of PRs in the queue that are bug-fix or security PRs. E.g., 5.0% means 5 out of 100 PRs are buggy. This is a proxy for the probability that any given PR introduces a defect.</li>
+  <li><strong>Batch size (columns)</strong> — how many PRs are released together in one deploy/release train. E.g., "10" means 10 PRs ship at once. Smaller batches = lower risk per deploy.</li>
+  <li><strong>Cell value</strong> — probability that ALL PRs in the batch are defect-free. E.g., "82%" means 82% chance the entire batch is clean (18% chance at least one PR is buggy).</li>
   <li><strong>Green cells (&ge;90%)</strong> — safe zone. Small batches or low defect rates.</li>
-  <li><strong>Yellow cells (70–89%)</strong> — caution. One-in-three to one-in-ten chance of a bad batch.</li>
+  <li><strong>Yellow cells (70–89%)</strong> — caution. 10–30% chance of a bad batch.</li>
   <li><strong>Orange cells (50–69%)</strong> — danger. Coin-flip whether your batch is clean.</li>
   <li><strong>Red cells (&lt;50%)</strong> — calamity zone. More likely to fail than succeed.</li>
-  <li><strong>Blue border (*)</strong> — your current approximate position based on queue defect rate and batch size.</li>
+  <li><strong>Blue border (★)</strong> — your current position. <strong>◄</strong> marks your defect rate row, <strong>▼</strong> marks your batch size column.</li>
 </ul>
 
 <p style="font-size:12px;color:#484f58;margin-top:32px">
@@ -1628,20 +1651,43 @@ def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -
         type_str = " · ".join(f"{t}:{n}" for t, n in top)
         lines_out.append(f"*Work*: {type_str}")
 
+    # Defect rate + batch success
+    bug_sec_prs = [p for p in all_prs if p.get("pr_type") in ("bug", "security")]
+    defect_parts: list[str] = []
+    if all_prs:
+        n_defect = len(bug_sec_prs)
+        defect_pct = round(n_defect / len(all_prs) * 100, 1)
+        defect_emoji = "✅" if defect_pct <= 8 else ("⚠️" if defect_pct <= 15 else "🔴")
+        defect_parts.append(f"Defect rate: {defect_pct}% ({n_defect}/{total}) {defect_emoji}")
+        # Batch success estimate — compute from lanes
+        n_lanes = max(len(lanes), 1)
+        avg_batch = round(total / n_lanes, 1)
+        if n_defect > 0 and avg_batch > 0:
+            from scripts.mq.simulate import merge_batch_success
+            batch_success = round(merge_batch_success(n_defect / total, avg_batch) * 100, 1)
+            batch_emoji = "✅" if batch_success >= 90 else ("⚠️" if batch_success >= 70 else "🔴")
+            defect_parts.append(f"Batch success: {batch_success}% (at ~{avg_batch:.0f} PRs/batch) {batch_emoji}")
+    if defect_parts:
+        lines_out.append("*Deploy Risk*: " + " · ".join(defect_parts))
+
     # Throughput: avg age + CFR proxy
     throughput_parts: list[str] = []
     if all_prs:
         ages = [_compute_pr_age_inline(p) for p in all_prs]
         avg_age = round(sum(ages) / len(ages), 1) if ages else 0
         throughput_parts.append(f"{avg_age}d avg age")
-
-    bug_sec_prs = [p for p in all_prs if p.get("pr_type") in ("bug", "security")]
-    if all_prs:
         cfr = round(len(bug_sec_prs) / len(all_prs) * 100, 1)
         cfr_emoji = "✅" if cfr <= 10 else ("⚠️" if cfr <= 25 else "🔴")
         throughput_parts.append(f"CFR proxy: {cfr}% {cfr_emoji}")
     if throughput_parts:
         lines_out.append("*Throughput*: " + " · ".join(throughput_parts))
+
+    # Top categories (compact)
+    categories = Counter(p.get("category", "unknown") for p in all_prs)
+    if categories:
+        top_cats = categories.most_common(5)
+        cat_str = " · ".join(f"{c}:{n}" for c, n in top_cats)
+        lines_out.append(f"*Categories*: {cat_str}")
 
     lines_out.append("Full report in thread ↑")
     return "\n".join(lines_out)

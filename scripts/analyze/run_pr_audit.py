@@ -727,18 +727,26 @@ Write these files using relative paths from the repo root (the `reports/` symlin
    - LOW: gap seen in 1-2 PRs, or a style/process issue with minimal impact
 
 3. `reports/skill_improvements.json` -- Proposed improvements grounded ONLY in observed patterns:
-   {{"repo_skill_changes":[{{"action":"update|create","file_path":"relative/path","description":"what to change","changes":"content to write"}}],
-    "new_docs":[{{"path":"relative/path","description":"what this doc covers","content":"full content"}}],
-    "ygs_recommendations":[{{"skill":"skill-name","recommendation":"what to improve"}}]}}
+   {{"repo_skill_changes":[{{"action":"update|create","file_path":"relative/path","description":"one-line summary","reason":"gap + 3+ PR citations","content_to_add":"for update: NEW section only","full_content":"for create: complete file"}}],
+    "new_docs":[{{"path":"relative/path","description":"one-line summary","content":"complete file content","reason":"gap that motivated the doc"}}],
+    "ygs_recommendations":[{{"skill":"skill-name","recommendation":"what to improve","pr_evidence_count":0}}]}}
+
+   Schema notes:
+   - For action=update: set `content_to_add` to ONLY the new section/rule to add. Set `full_content` to null.
+   - For action=create: set `full_content` to the complete new file content. Set `content_to_add` to null.
 
    CRITICAL RULES for skill_improvements:
-   - Every change MUST cite 3+ specific PRs as evidence (e.g. "PRs #123, #456, #789 all missed X")
+   - Every change MUST cite 3+ specific PRs as evidence in the `reason` field (e.g. "PRs #123, #456, #789 all missed X")
    - Before proposing a change to a `.claude/skills/` file, read that file — do NOT duplicate what is already there
    - NEVER propose generic industry rules (LOC thresholds, reviewer count formulas, mandatory review checklists)
      without 3+ PRs showing the team is missing that specific practice
    - NEVER invent process overhead without evidence that it would have caught real bugs in these PRs
    - The goal is to address RECURRING GAPS specific to this codebase and team
    - If you cannot cite 3+ PRs, do not propose a skill change — add it to the single-PR observations appendix instead
+   - Rule text in `content_to_add` and `full_content` must be GENERALIZABLE — write instructions for future
+     developers, not incident reports about specific PRs. PR numbers go in `reason`, NEVER in rule text.
+   - BAD content: "PR #49628 had a missing null check in the auth handler"
+   - GOOD content: "Always validate nullable fields before dereferencing, especially in authentication paths"
 
 DO NOT emit any ::add-task-context markers yourself -- the orchestrator script reads
 your JSON output and emits them automatically. Focus only on writing the three report files.

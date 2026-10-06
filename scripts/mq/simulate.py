@@ -417,7 +417,10 @@ def build_risk_heatmap(
     lines: list[str] = [
         "### Deployment Success Heatmap",
         "",
-        "Defect rate (rows) × batch size (columns) → batch success probability.",
+        "**Rows** = defect rate: % of PRs in the queue that are bug/security fixes "
+        "(proxy for probability any PR introduces a defect).",
+        "**Columns** = batch size: how many PRs are released together in one deploy.",
+        "**Cells** = probability that ALL PRs in the batch are defect-free.",
         f"📍 = current position (defect rate ≈{current_defect_rate:.1%}, batch ≈{current_batch_size:.0f})",
         "",
     ]
@@ -431,8 +434,8 @@ def build_risk_heatmap(
     lines.append(sep)
 
     for dr_idx, dr in enumerate(defect_rates):
-        label = f"1-in-{round(1/dr)}" if dr > 0 else "0%"
-        row = f"| {label:>11} |"
+        pct_label = f"{dr*100:.0f}%"
+        row = f"| {pct_label:>11} |"
         for bs_idx, bs in enumerate(batch_sizes):
             success = merge_batch_success(dr, bs)
             is_current = (dr_idx == cur_dr_idx and bs_idx == cur_bs_idx)

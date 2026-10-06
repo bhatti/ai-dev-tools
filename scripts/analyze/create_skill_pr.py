@@ -42,9 +42,16 @@ def main() -> None:
     reports_dir = workspace_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read skill_improvements.json
-    improvements_path = reports_dir / "skill_improvements.json"
-    if not improvements_path.exists():
+    # Prefer refined JSON from plan step; fall back to raw for backward compat
+    refined_path = reports_dir / "skill_improvements_refined.json"
+    raw_path = reports_dir / "skill_improvements.json"
+    if refined_path.exists():
+        improvements_path = refined_path
+        print("[create-skill-pr] Using refined improvements from plan step", flush=True)
+    elif raw_path.exists():
+        improvements_path = raw_path
+        print("[create-skill-pr] WARNING: No refined JSON — falling back to raw improvements", flush=True)
+    else:
         print("[create-skill-pr] No skill_improvements.json found", flush=True)
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
@@ -53,7 +60,7 @@ def main() -> None:
     try:
         improvements = json.loads(improvements_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        print(f"[create-skill-pr] Could not parse skill_improvements.json: {e}", flush=True)
+        print(f"[create-skill-pr] Could not parse {improvements_path.name}: {e}", flush=True)
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         return
@@ -116,22 +123,18 @@ def main() -> None:
     pr_branch = f"ai/pr-audit-improvements-{branch_suffix}"
     _run_git(codebase_dir, ["checkout", "-b", pr_branch])
 
-    # Apply changes
+    # Apply changes — refined JSON uses `final_content` (complete merged file);
+    # raw JSON fallback uses `changes` (backward compat).
     changes_made: list[str] = []
     for change in repo_changes:
-        action = change.get("action", "update")
         file_path = change.get("file_path", "")
-        content = change.get("changes", "")
-        if not file_path or not content:
+        final_content = change.get("final_content") or change.get("changes", "")
+        if not file_path or not final_content:
             continue
         target = codebase_dir / file_path
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            if action == "create":
-                target.write_text(content, encoding="utf-8")
-            else:
-                existing_text = target.read_text(encoding="utf-8") if target.exists() else ""
-                target.write_text(existing_text + "\n" + content, encoding="utf-8")
+            target.write_text(final_content, encoding="utf-8")
             changes_made.append(file_path)
         except OSError as e:
             print(f"[create-skill-pr] Could not write {file_path}: {e}", flush=True)
