@@ -51,19 +51,26 @@ Your job is to review the findings and create a detailed, actionable skill updat
 
 1. Read `reports/pr_audit_report.md` for the full audit findings.
 2. Read `reports/skill_improvements.json` for the complete proposed changes list.
-3. For each entry in `repo_skill_changes`: if the target file exists under `.claude/skills/`,
-   read it to understand what is already there vs. what needs to change.
-4. For each entry in `new_docs`: check whether an equivalent file already exists in the repo.
+3. For each entry in `repo_skill_changes`: if the target file exists in the workspace
+   (e.g. under `repo/.claude/skills/`), read it to understand what is already there vs.
+   what needs to change. If the file does not exist in the workspace, treat it as a new create.
+   Do NOT skip a proposal just because you cannot find an existing file — proceed with create.
+4. For each entry in `new_docs`: check whether an equivalent file exists in `repo/`. If not,
+   include it as a new creation.
 5. Review and refine the proposals:
    - Expand vague descriptions into specific, actionable content
    - Correct file paths (must be relative to repo root)
    - Combine duplicates or near-duplicates into a single entry
-   - Remove any entries that are already covered by existing skills
-   - **REJECT any proposed change that introduces generic process rules** (LOC-based thresholds,
-     mandatory reviewer counts, blanket "design doc required" policies, etc.) unless the audit
-     report cites multiple specific PRs where the absence of that practice caused a real defect.
-     The team has millions of LOC and thousands of engineers — process overhead must be justified
-     by observed recurring problems, not textbook best practices.
+   - Remove any entries that are already covered by existing skills (only if you can confirm the
+     existing file already contains equivalent content — do NOT remove if uncertain)
+   - **Only reject** changes that are pure generic boilerplate with zero specific evidence:
+     e.g. "all functions must be under 50 lines", "all PRs require 2 reviewers",
+     "design doc required for every ticket". These are textbook rules with no PR evidence.
+   - **Do NOT reject** rule files, skill files, or automation configs that are backed by patterns
+     the audit cited with 3+ specific PRs. The audit step already enforced the 3+ PR evidence
+     requirement — your job is to expand and polish content, not re-filter.
+   - When in doubt, keep the proposal — a kept proposal that gets declined in PR review is
+     far less harmful than a silently rejected proposal that leaves a real gap unfixed.
 6. Identify gaps: anything the audit report flags that `skill_improvements.json` does not address.
 7. Write your detailed plan to `reports/skill_update_plan.md` with:
    - **Executive summary**: which SPECIFIC recurring gaps are addressed, their frequency (e.g. "8/50 PRs"), and the PRs that evidence them
@@ -90,12 +97,13 @@ Your job is to review the findings and create a detailed, actionable skill updat
    "ygs_recommendations": []}}
    ```
    CRITICAL rules for `final_content`:
-   - For `action=update`: read the existing file, merge the new rule into the correct section,
-     and write the COMPLETE merged file content. Do NOT just write the new addition — include
-     EVERYTHING that should be in the file after the change. Preserve all existing content.
-   - For `action=create`: write the complete new file.
-   - Remove ALL PR-specific references from `final_content`. Generalize every rule.
-     PR citations belong in the audit report and plan, not in skill files.
+   - For `action=update`: read the existing file, then ADD the new rule/section to the existing
+     content. Write the COMPLETE result — all original content plus the addition. NEVER delete
+     or rewrite existing sections just because they are not related to the new addition. If you
+     cannot find or read the existing file, set action to "create" and write only the new content.
+   - For `action=create`: write the complete new file with the new content only.
+   - Rules must be GENERALIZABLE — write instructions that apply to all future PRs, not just
+     the ones that motivated the change. PR citations belong in the audit report and plan only.
    - Pass through `ygs_recommendations` from the original `skill_improvements.json` unchanged.
 9. Output ONLY this JSON on the last line (no text after it):
    {{"status":"DONE","skill_updates":<N>,"new_skills":<M>,"refined_json":true,"summary":"<one sentence>"}}

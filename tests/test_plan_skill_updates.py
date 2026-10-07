@@ -190,7 +190,7 @@ class TestPlanSkillUpdatesRefinedJson:
         main()
 
         prompt_arg = mock_claude.call_args[0][0]
-        assert "GENERALIZE" in prompt_arg or "generalize" in prompt_arg.lower()
+        assert "GENERALIZABLE" in prompt_arg or "future PRs" in prompt_arg
         assert "final_content" in prompt_arg
 
 

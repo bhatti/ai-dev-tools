@@ -1,6 +1,7 @@
 """Create a PR proposing skill/doc improvements based on PR audit findings.
 
-Reads reports/skill_improvements.json written by run_pr_audit.py and creates
+Reads reports/skill_improvements_refined.json (from plan_skill_updates.py) or falls back
+to reports/skill_improvements.json (from run_pr_audit.py) and creates
 a branch with the proposed changes, then opens a PR.
 
 Usage:
@@ -123,15 +124,32 @@ def main() -> None:
     pr_branch = f"ai/pr-audit-improvements-{branch_suffix}"
     _run_git(codebase_dir, ["checkout", "-b", pr_branch])
 
-    # Apply changes — refined JSON uses `final_content` (complete merged file);
-    # raw JSON fallback uses `changes` (backward compat).
+    # Apply changes.
+    # Field priority: final_content (refined JSON) > full_content (raw JSON create) > changes (legacy).
+    # For raw JSON updates (action=update, content_to_add set), append to existing file if present.
     changes_made: list[str] = []
     for change in repo_changes:
         file_path = change.get("file_path", "")
-        final_content = change.get("final_content") or change.get("changes", "")
-        if not file_path or not final_content:
+        if not file_path:
             continue
         target = codebase_dir / file_path
+
+        final_content = (
+            change.get("final_content")   # refined JSON: complete merged file
+            or change.get("full_content")  # raw JSON: action=create, complete new file
+            or change.get("changes", "")   # legacy field
+        )
+        if not final_content:
+            # Raw JSON action=update: content_to_add is only the new section — append to existing.
+            content_to_add = change.get("content_to_add", "")
+            if content_to_add:
+                existing = target.read_text(encoding="utf-8").rstrip() if target.exists() else ""
+                final_content = (existing + "\n\n" + content_to_add) if existing else content_to_add
+                print(f"[create-skill-pr] raw-update fallback: appending to {file_path}", flush=True)
+
+        if not final_content:
+            print(f"[create-skill-pr] skipping {file_path}: no content in any field", flush=True)
+            continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(final_content, encoding="utf-8")
