@@ -183,7 +183,7 @@ class TestRawJsonContentFields:
         improvements = {
             "repo_skill_changes": [{
                 "action": "create",
-                "file_path": ".goatbot/rules/ai-scope.md",
+                "file_path": ".claude/skills/ai-scope/SKILL.md",
                 "description": "AI scope enforcement rule",
                 "full_content": "# AI Scope Rule\n\nAI PRs must match their Jira scope.",
             }],
@@ -212,7 +212,7 @@ class TestRawJsonContentFields:
         # Directly test content resolution logic
         change = {
             "action": "create",
-            "file_path": ".goatbot/rules/ai-scope.md",
+            "file_path": ".claude/skills/ai-scope/SKILL.md",
             "full_content": "# AI Scope Rule\n\nGeneralized rule here.",
         }
         final_content = (

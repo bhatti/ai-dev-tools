@@ -97,6 +97,11 @@ Your job is to review the findings and create a detailed, actionable skill updat
    "ygs_recommendations": []}}
    ```
    CRITICAL rules for `final_content`:
+   - **ALL `file_path` values MUST be under `.claude/skills/` in the audited repo.**
+     Never output a path under any third-party tool directory, `.github/`, `CODEOWNERS`,
+     or `~/.claude/`. Only the local repo's `.claude/skills/` directory.
+     If a proposal targets a third-party tool config, translate it into the equivalent
+     `.claude/skills/<topic>/SKILL.md` with the same guidance for Claude reviewers.
    - For `action=update`: read the existing file, then ADD the new rule/section to the existing
      content. Write the COMPLETE result — all original content plus the addition. NEVER delete
      or rewrite existing sections just because they are not related to the new addition. If you

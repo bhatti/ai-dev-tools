@@ -41,10 +41,10 @@ class TestSlackMrkdwnLinks:
         html = render_simple_html(
             "Test",
             "🔴 PR <https://bitbucket.org/repo/pull/47076|#47076> "
-            "(<https://jira.com/browse/CRIBL-44643|CRIBL-44643>, Holden) — 35 days open",
+            "(<https://jira.com/browse/PROJ-44643|PROJ-44643>, Alice) — 35 days open",
         )
         assert '<a href="https://bitbucket.org/repo/pull/47076">#47076</a>' in html
-        assert '<a href="https://jira.com/browse/CRIBL-44643">CRIBL-44643</a>' in html
+        assert '<a href="https://jira.com/browse/PROJ-44643">PROJ-44643</a>' in html
         assert "&lt;https://" not in html
 
     def test_slack_link_in_list_item(self):

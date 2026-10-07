@@ -736,6 +736,10 @@ Write these files using relative paths from the repo root (the `reports/` symlin
    - For action=create: set `full_content` to the complete new file content. Set `content_to_add` to null.
 
    CRITICAL RULES for skill_improvements:
+   - **ALL `file_path` values MUST be under `.claude/skills/` in the audited repo.**
+     Do NOT propose changes to any other directory (e.g. third-party tool config dirs, `.github/`,
+     `CODEOWNERS`). Only the local repo's `.claude/skills/` directory is in scope.
+     Do NOT write to `~/.claude/skills/` — only paths within the audited repo.
    - Every change MUST cite 3+ specific PRs as evidence in the `reason` field (e.g. "PRs #123, #456, #789 all missed X")
    - Before proposing a change to a `.claude/skills/` file, read that file — do NOT duplicate what is already there
    - NEVER propose generic industry rules (LOC thresholds, reviewer count formulas, mandatory review checklists)
