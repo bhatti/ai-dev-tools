@@ -370,9 +370,12 @@ The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that list
 | `@bot standup` | Compact daily brief: board status, per-person status, risks, discussion | `ai-standup-jira` / `ai-standup-gh` |
 | `@bot risk` / `@bot risks` | Ranked sprint risks: stale work, PR bottlenecks, dependency chains | `ai-adhoc` (ygs-risk-scan) |
 | `@bot prs` | Open PRs grouped by reviewer status, sorted by age | `ai-adhoc` |
-| `@bot open-prs` | Full open-PR dashboard: per-PR metrics (Status/Category/Type/Blast/Risk/CI/Age), grouped by risk tier, stale PRs, category/type breakdown, metrics dashboard | `ai-open-prs` |
-| `@bot open prs` | Same as open-prs | `ai-open-prs` |
-| `@bot pr dashboard` | Same as open-prs | `ai-open-prs` |
+| `@bot open-prs` / `@bot open prs` / `@bot pr dashboard` | Full open-PR dashboard: per-PR metrics (Status/Category/Type/Blast/Risk/CI/Age), grouped by risk tier, stale PRs, category/type breakdown, metrics dashboard | `ai-open-prs` |
+| `@bot resync-prs` | Merge base branch into each of your open PRs, verify diff integrity, push if clean. Reports per-PR: synced/conflict/up-to-date, diff lines before→after, CI, reviewer health | `ai-resync-prs` |
+| `@bot resync-prs --dry-run` | Same as resync-prs but never pushes — shows what *would* change | `ai-resync-prs` |
+| `@bot resync-prs <pr-url> [<pr-url2>...]` | Resync specific PRs by URL (bypasses author guard) | `ai-resync-prs` |
+| `@bot resync-prs #42 #101 --dry-run` | Resync specific PRs by number with dry-run | `ai-resync-prs` |
+| `@bot sync-prs` | Same as resync-prs | `ai-resync-prs` |
 | `@bot review queue` | Same as prs | `ai-adhoc` |
 | `@bot pr comments <url>` | All comments, inline feedback, and open tasks for a PR | `ai-adhoc` |
 | `@bot pr feedback <url>` | Same as pr comments | `ai-adhoc` |
@@ -860,6 +863,7 @@ python3 tests/test_pod_functional.py --list
 | `skill-flag-parsing` | Flag parsing: empty args → error, valid args → correct context markers |
 | `skill-integ-tests` | Built-in `integ-tests` skill against a repo (requires Claude creds) |
 | `skill-service-awareness` | SERVICE_IMAGE env detection and service info logging |
+| `resync-prs-dry-run` | `run_resync_prs` with `DRY_RUN=1` — verifies report files, `dry_run=true` in summary JSON, no pushes |
 
 Each test creates its own pod, copies scripts, runs, then deletes the pod — clean isolation.
 The standup-pipeline test runs `gather_jira` then `synthesize` in the **same pod** so

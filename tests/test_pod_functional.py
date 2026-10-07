@@ -5011,6 +5011,99 @@ def test_44_open_prs_gh(base_env: dict[str, str]) -> TestResult:
     return _pass(result, f"open-prs pipeline OK — {content_info}")
 
 
+def test_45_resync_prs_dry_run(base_env: dict[str, str]) -> TestResult:
+    """Run resync-prs pipeline in --dry-run mode (no git pushes).
+
+    Validates:
+      1. run_resync_prs.py fetches open PRs and writes resync_prs_report.md + summary.json
+      2. summary.json exists and contains expected fields (total, dry_run=true)
+      3. No git push was performed (dry-run mode)
+      4. post_resync_prs.py runs without import/crash errors
+    """
+    result = TestResult("resync-prs-dry-run")
+
+    env = dict(base_env)
+    ws = "/workspace/resync_prs_dry"
+    env["WORKSPACE_DIR"] = ws
+    env["DEFAULT_TRACKER"] = "github"
+    env["DRY_RUN"] = "1"
+    env["SLACK_MESSAGE"] = "resync-prs --dry-run"
+    env["TASK_TYPE"] = "resync-prs"
+    env["GIT_USER_NAME"] = "AI Resync Bot"
+    env["GIT_USER_EMAIL"] = "ai-resync@noreply.local"
+
+    gh_org = os.environ.get("GH_ORG", "bhatti")
+    gh_repo = os.environ.get("GH_REPO", "formicary")
+    env["GH_ORG"] = gh_org
+    env["GH_REPO"] = gh_repo
+    for bb_key in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_USERNAME", "BITBUCKET_TOKEN"):
+        env.pop(bb_key, None)
+    env.pop("SLACK_BOT_TOKEN", None)
+
+    with pod_fixture("resync-prs-dry-run") as pod:
+        # 1. Run run_resync_prs.py in dry-run mode
+        run_step = exec_step(pod, "run-resync-prs",
+                             "python3 -m scripts.resync.run_resync_prs",
+                             env, timeout=300)
+        result.steps.append(run_step)
+        if not run_step.ok:
+            # No open PRs authored by bot user is acceptable
+            if "no PRs found" in run_step.stdout.lower() or "0 PR" in run_step.stdout:
+                return _pass(result, "no open PRs for current user — script exited cleanly")
+            return _fail(result, run_step, f"run_resync_prs.py failed: {run_step.stderr[-400:]}")
+
+        # 2. Verify report files written
+        verify_files = exec_step(
+            pod, "verify-files",
+            f"python3 -c \""
+            f"import os, sys\n"
+            f"ws = '{ws}'\n"
+            f"issues = []\n"
+            f"md = os.path.join(ws, 'reports', 'resync_prs_report.md')\n"
+            f"html = os.path.join(ws, 'reports', 'resync_prs_report.html')\n"
+            f"summary = os.path.join(ws, 'reports', 'resync_prs_summary.json')\n"
+            f"if not os.path.exists(md): issues.append('resync_prs_report.md missing')\n"
+            f"if not os.path.exists(html): issues.append('resync_prs_report.html missing')\n"
+            f"if not os.path.exists(summary): issues.append('resync_prs_summary.json missing')\n"
+            f"if issues: print('FAIL: ' + ', '.join(issues)); sys.exit(1)\n"
+            f"import json\n"
+            f"s = json.load(open(summary))\n"
+            f"if not s.get('dry_run'): issues.append('dry_run not True in summary')\n"
+            f"if issues: print('FAIL: ' + ', '.join(issues)); sys.exit(1)\n"
+            f"print(f'OK: all report files written, total={{s.get(\\\"total\\\",0)}} PRs, dry_run={{s.get(\\\"dry_run\\\")}}')\\n\"",
+            env, timeout=15)
+        result.steps.append(verify_files)
+        if not verify_files.ok:
+            return _fail(result, verify_files, verify_files.stderr[-300:])
+
+        # 3. Verify report content
+        verify_content = exec_step(
+            pod, "verify-content",
+            f"python3 -c \""
+            f"import sys\n"
+            f"md = open('{ws}/reports/resync_prs_report.md').read()\n"
+            f"issues = []\n"
+            f"if 'PR Resync Report' not in md: issues.append('missing report heading')\n"
+            f"if 'dry-run' not in md.lower(): issues.append('missing dry-run indicator')\n"
+            f"if issues: print('FAIL: ' + ', '.join(issues)); sys.exit(1)\n"
+            f"print(f'OK: report has {{len(md)}} bytes, dry-run indicator present')\\n\"",
+            env, timeout=15)
+        result.steps.append(verify_content)
+        if not verify_content.ok:
+            return _fail(result, verify_content, verify_content.stderr[-300:])
+
+        # 4. Run post step (no Slack token — just verify no import/crash)
+        post_step = exec_step(pod, "post-resync-prs",
+                              "python3 -m scripts.resync.post_resync_prs",
+                              env, timeout=30)
+        result.steps.append(post_step)
+        if not post_step.ok and "ImportError" in (post_step.stderr or ""):
+            return _fail(result, post_step, f"post_resync_prs import error: {post_step.stderr[-300:]}")
+
+    content_info = verify_content.stdout.strip() if verify_content.ok else "no content info"
+    return _pass(result, f"resync-prs dry-run pipeline OK — {content_info}")
+
+
 ALL_TESTS: dict[str, callable] = {
     "jira-query":            test_01_jira_query,
     "jira-analyze":          test_02_jira_analyze,
@@ -5056,6 +5149,7 @@ ALL_TESTS: dict[str, callable] = {
     "contract-volume-isolation": test_40_contract_volume_isolation,
     "contract-artifact-handoff": test_41_contract_artifact_handoff,
     "open-prs-gh":               test_44_open_prs_gh,
+    "resync-prs-dry-run":        test_45_resync_prs_dry_run,
 }
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]

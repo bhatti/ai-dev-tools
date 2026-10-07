@@ -20,11 +20,14 @@ ai-dev-tools is a set of small, independent Python scripts packaged in a single 
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  scripts/common/                                              │   │
-│  │    config.py       — env var loading + defaults               │   │
-│  │    artifacts.py    — read/write /workspace/{id}/              │   │
-│  │    git_utils.py    — clone, branch, commit, push              │   │
+│  │    config.py        — env var loading + defaults              │   │
+│  │    artifacts.py     — read/write /workspace/{id}/             │   │
+│  │    git_utils.py     — clone, branch, commit, push             │   │
 │  │    claude_runner.py — invoke `claude` CLI                     │   │
 │  │    label_utils.py   — GH labels, Jira labels                  │   │
+│  │    report_renderer.py — Markdown→HTML renderer (shared)       │   │
+│  │    slack_emoji.py   — Slack shortcode→Unicode for HTML/MD     │   │
+│  │    slack_format.py  — Slack mrkdwn helpers + artifact links   │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
 │  ┌────────────────────┐    ┌────────────────────────────┐           │
@@ -50,6 +53,13 @@ ai-dev-tools is a set of small, independent Python scripts packaged in a single 
 │  │    run_skill.py — run any you-got-skills skill,       │           │
 │  │                   post result to Slack thread         │           │
 │  └──────────────────────────────────────────────────────┘           │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  scripts/resync/                                            │     │
+│  │    run_resync_prs.py  — orchestrate: fetch PRs → sync each │     │
+│  │    pr_syncer.py       — clone, merge, verify diff, push    │     │
+│  │    post_resync_prs.py — post per-PR digest to Slack        │     │
+│  └────────────────────────────────────────────────────────────┘     │
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  scripts/slack/                                               │   │

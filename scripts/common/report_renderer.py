@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+from scripts.common.slack_emoji import convert_slack_emoji
+
 _STATUS_EMOJI = {
     "DONE": "✅",
     "TESTS_FAILING": "🔴",
@@ -94,7 +96,12 @@ def _escape_html(text: str) -> str:
 
 
 def _inline_md_to_html(text: str) -> str:
-    """Convert inline markdown (bold, italic, code, images, links) to HTML."""
+    """Convert inline markdown (bold, italic, code, images, links) to HTML.
+
+    Slack emoji shortcodes (:rocket:, :spiral_calendar_pad:, etc.) are converted
+    to Unicode before any further processing so they render correctly in HTML.
+    """
+    text = convert_slack_emoji(text)
     # Inline code first (prevents double-processing)
     parts: list[str] = []
     remainder = text
@@ -129,6 +136,7 @@ def _inline_md_to_html(text: str) -> str:
 
 def render_simple_html(title: str, md_text: str) -> str:
     """Convert Markdown to HTML with proper code blocks, tables, and lists."""
+    md_text = convert_slack_emoji(md_text)
     lines = md_text.splitlines()
     output: list[str] = []
     in_code_block = False

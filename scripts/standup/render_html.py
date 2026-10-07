@@ -18,6 +18,8 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from scripts.common.slack_emoji import convert_slack_emoji
+
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.common.report_utils import write_report
 from scripts.common.slack_format import strip_section_heading
@@ -127,25 +129,14 @@ def _esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-_EMOJI_MAP = {
-    ":white_check_mark:": "✅", ":warning:": "⚠️",
-    ":red_circle:": "🔴", ":large_yellow_circle:": "🟡",
-    ":rotating_light:": "🚨", ":bust_in_silhouette:": "👤",
-    ":question:": "❓", ":paperclip:": "📎",
-    ":mag:": "🔍", ":chart_with_upwards_trend:": "📈",
-    ":speech_balloon:": "💬", ":clock1:": "🕐",
-    ":fire:": "🔥", ":bell:": "🔔",
-}
-
-
 def _inline_md(s: str) -> str:
     """Apply inline Markdown/mrkdwn: bold, italic, code, links, emoji shortcuts.
 
     Input has already been HTML-escaped by _esc(), so < > & are entities.
     Slack mrkdwn links <url|text> arrive as &lt;url|text&gt; — convert those first.
+    Slack shortcodes (:rocket:, :spiral_calendar_pad:, etc.) are converted to Unicode.
     """
-    for alias, emoji in _EMOJI_MAP.items():
-        s = s.replace(alias, emoji)
+    s = convert_slack_emoji(s)
     # Slack mrkdwn links: &lt;https://...url|display text&gt; → <a href="url">text</a>
     s = re.sub(r"&lt;(https?://[^|&]+)\|([^&]+)&gt;", r'<a href="\1">\2</a>', s)
     # Bold **text** or *text* (mrkdwn)

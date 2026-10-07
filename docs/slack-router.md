@@ -420,7 +420,8 @@ connectivity and posts results to your Slack thread.
 |---------|---------|-------------|
 | `standup` | `@bot standup` | Daily standup brief from Jira or GitHub |
 | `risk` / `risks` | `@bot risk` | Sprint risk scan — stale, blocked, capacity |
-| `prs` / `pr queue` | `@bot prs` | Open PR queue grouped by reviewer |
+| `prs` / `open-prs` / `pr dashboard` | `@bot prs` | Open PR dashboard — grouped by reviewer, risk, blast radius, CI, age |
+| `resync-prs` / `sync-prs` | `@bot resync-prs [<pr-url\|#>...] [--dry-run] [--tracker github\|jira]` | Merge base branch into your open PRs, verify diff, push if clean. Author guard in auto-discover mode; bypassed for explicit URLs/numbers |
 | `review <url>` | `@bot review https://github.com/...` | AI code review → Slack thread, pause for decision |
 | `implement <id>` | `@bot implement PROJ-42` | Full implement pipeline — plan → code → PR |
 | `jira query <keywords>` / `search jira <keywords>` | `@bot jira query flaky tests` | Search open Jira/GitHub issues by keyword |
