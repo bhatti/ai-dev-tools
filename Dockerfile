@@ -80,7 +80,7 @@ RUN ARCH=$(dpkg --print-architecture) \
     "https://github.com/chinmaymk/acli/releases/download/v${ACLI_VERSION}/acli_${ACLI_VERSION}_linux_${ARCH}.tar.gz" \
   | tar xz -C /usr/local/bin acli \
   && chmod +x /usr/local/bin/acli \
-  && acli --version
+  && acli version
 
 # Claude Code and OpenAI Codex CLI (npm global installs)
 RUN npm install -g \
