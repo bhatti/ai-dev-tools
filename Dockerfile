@@ -82,6 +82,28 @@ RUN ARCH=$(dpkg --print-architecture) \
   && chmod +x /usr/local/bin/acli \
   && acli version
 
+# kubectl — stable release, architecture-aware
+RUN ARCH=$(dpkg --print-architecture) \
+  && curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" \
+     -o /usr/local/bin/kubectl \
+  && chmod +x /usr/local/bin/kubectl \
+  && kubectl version --client
+
+# kind — architecture-aware
+ARG KIND_VERSION=0.25.0
+RUN ARCH=$(dpkg --print-architecture) \
+  && curl -fsSL "https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-${ARCH}" \
+     -o /usr/local/bin/kind \
+  && chmod +x /usr/local/bin/kind \
+  && kind version
+
+# helm — architecture-aware; tarball layout: linux-{arch}/helm
+ARG HELM_VERSION=3.16.4
+RUN ARCH=$(dpkg --print-architecture) \
+  && curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+  | tar xz -C /usr/local/bin --strip-components=1 "linux-${ARCH}/helm" \
+  && helm version
+
 # Claude Code and OpenAI Codex CLI (npm global installs)
 RUN npm install -g \
     @anthropic-ai/claude-code \
