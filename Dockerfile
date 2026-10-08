@@ -3,37 +3,34 @@
 # npm packages (esbuild, @swc/core, etc.) work with glibc without any musl shims.
 FROM python:3.12-bookworm
 
-# Node 22 via nodesource (official Debian channel)
+# All apt-based installs in one layer: nodesource + system packages + Docker CLI.
+# Single apt-get update avoids redundant index fetches and reduces layer count.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  # Node 22 repo
   && mkdir -p /etc/apt/keyrings \
   && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
   && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
      > /etc/apt/sources.list.d/nodesource.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends nodejs \
-  && rm -rf /var/lib/apt/lists/*
-
-# Remaining system packages
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    jq \
-    unzip \
-    openssh-client \
-    gcc \
-    libc6-dev \
-  && rm -rf /var/lib/apt/lists/*
-
-# Docker CLI (client only) — official Docker apt repo for Debian bookworm
-RUN install -m 0755 -d /etc/apt/keyrings \
+  # Docker CLI repo
+  && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
        https://download.docker.com/linux/debian bookworm stable" \
        > /etc/apt/sources.list.d/docker.list \
+  # Single update + install for everything
   && apt-get update \
-  && apt-get install -y --no-install-recommends docker-ce-cli \
+  && apt-get install -y --no-install-recommends \
+       nodejs \
+       docker-ce-cli \
+       git \
+       jq \
+       unzip \
+       openssh-client \
+       gcc \
+       libc6-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain — architecture-aware
@@ -74,6 +71,16 @@ RUN ARCH=$(dpkg --print-architecture) \
   && mv /tmp/jira_${JIRA_CLI_VERSION}_${JIRA_ARCH}/bin/jira /usr/local/bin/jira \
   && chmod +x /usr/local/bin/jira \
   && jira version
+
+# acli (Atlassian CLI by chinmaymk) — architecture-aware
+# Release assets: acli_{version}_linux_{amd64|arm64}.tar.gz; tarball root contains binary directly.
+ARG ACLI_VERSION=0.0.8
+RUN ARCH=$(dpkg --print-architecture) \
+  && curl -fsSL \
+    "https://github.com/chinmaymk/acli/releases/download/v${ACLI_VERSION}/acli_${ACLI_VERSION}_linux_${ARCH}.tar.gz" \
+  | tar xz -C /usr/local/bin acli \
+  && chmod +x /usr/local/bin/acli \
+  && acli --version
 
 # Claude Code and OpenAI Codex CLI (npm global installs)
 RUN npm install -g \
