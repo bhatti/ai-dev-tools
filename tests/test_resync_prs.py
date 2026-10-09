@@ -46,9 +46,27 @@ def test_parse_slack_flags_tracker():
 def test_parse_slack_flags_no_flags():
     flags = _parse_slack_flags("resync-prs")
     assert flags["dry_run"] is False
+    assert flags["me"] is False
     assert flags["tracker"] == ""
     assert flags["pr_urls"] == []
     assert flags["pr_numbers"] == []
+
+
+def test_parse_slack_flags_me():
+    flags = _parse_slack_flags("resync-prs --me")
+    assert flags["me"] is True
+    assert flags["dry_run"] is False
+
+
+def test_parse_slack_flags_me_with_dry_run():
+    flags = _parse_slack_flags("resync-prs --me --dry-run")
+    assert flags["me"] is True
+    assert flags["dry_run"] is True
+
+
+def test_parse_slack_flags_me_not_set_by_default():
+    flags = _parse_slack_flags("resync-prs --dry-run --tracker github")
+    assert flags["me"] is False
 
 
 def test_parse_slack_flags_github_pr_url():
@@ -63,18 +81,47 @@ def test_parse_slack_flags_bitbucket_pr_url():
     assert "https://bitbucket.org/ws/repo/pull-requests/77" in flags["pr_urls"]
 
 
-def test_parse_slack_flags_bare_numbers():
-    # Bare numbers must be prefixed with # to avoid grabbing arbitrary numbers from message text
+def test_parse_slack_flags_bare_numbers_with_hash():
+    # #N form works for any size PR number
     flags = _parse_slack_flags("resync-prs #42 #101")
     assert 42 in flags["pr_numbers"]
     assert 101 in flags["pr_numbers"]
 
 
-def test_parse_slack_flags_bare_numbers_without_hash_ignored():
-    # "resync-prs 42" without # should NOT be treated as PR numbers (too risky for git ops)
+def test_parse_slack_flags_bare_small_numbers_without_hash_ignored():
+    # Small numbers (< 10000) without # are rejected — too risky for git ops
+    # e.g. "resync-prs fix the 100 failing tests" must NOT trigger PR #100
     flags = _parse_slack_flags("resync-prs 42 101")
     assert 42 not in flags["pr_numbers"]
     assert 101 not in flags["pr_numbers"]
+
+
+def test_parse_slack_flags_bare_large_numbers_accepted():
+    # Large PR numbers (>= 10000) without # are accepted — unambiguously PR refs
+    flags = _parse_slack_flags("resync-prs 48239 48240 --dry-run")
+    assert 48239 in flags["pr_numbers"]
+    assert 48240 in flags["pr_numbers"]
+    assert flags["dry_run"] is True
+
+
+def test_parse_slack_flags_bare_large_number_with_url():
+    # Mix of URL and bare large number — both should be captured
+    flags = _parse_slack_flags(
+        "resync-prs https://bitbucket.org/ws/repo/pull-requests/48239 49866"
+    )
+    assert "https://bitbucket.org/ws/repo/pull-requests/48239" in flags["pr_urls"]
+    # 49866 is a standalone large number in the message (not part of URL)
+    assert 49866 in flags["pr_numbers"]
+    # 48239 must not be double-counted (already in pr_urls)
+    assert 48239 not in flags["pr_numbers"]
+
+
+def test_parse_slack_flags_bb_url_with_overview_suffix():
+    # Bitbucket URLs often end in /overview — must still be parsed correctly
+    msg = "https://bitbucket.org/org/repo/pull-requests/48239/overview --dry-run"
+    flags = _parse_slack_flags(msg)
+    assert any("48239" in u for u in flags["pr_urls"])
+    assert flags["dry_run"] is True
 
 
 def test_parse_slack_flags_combined():
@@ -464,8 +511,9 @@ def test_fetch_target_prs_explicit_by_url(mock_parse, mock_fetch):
 
 @patch("scripts.resync.run_resync_prs._fetch_my_open_gh_prs", return_value=[_PR_OWN])
 def test_fetch_target_prs_auto_discover_github(mock_gh):
+    # --me required to trigger auto-discover; without it, returns empty
     prs, explicit = _fetch_target_prs(
-        _BASE_CONFIG, "github", "alice", {}, [], []
+        _BASE_CONFIG, "github", "alice", {}, [], [], me=True
     )
     assert explicit is False
     assert prs == [_PR_OWN]
@@ -474,9 +522,19 @@ def test_fetch_target_prs_auto_discover_github(mock_gh):
 
 @patch("scripts.resync.run_resync_prs._fetch_my_open_bb_prs", return_value=[_PR_OTHER])
 def test_fetch_target_prs_auto_discover_bitbucket(mock_bb):
+    # --me required to trigger auto-discover; without it, returns empty
     prs, explicit = _fetch_target_prs(
-        _BASE_CONFIG, "jira/bitbucket", "Carol", {"display_name": "Carol"}, [], []
+        _BASE_CONFIG, "jira/bitbucket", "Carol", {"display_name": "Carol"}, [], [], me=True
     )
     assert explicit is False
     assert prs == [_PR_OTHER]
     mock_bb.assert_called_once()
+
+
+def test_fetch_target_prs_no_target_returns_empty():
+    # No pr_urls, no pr_numbers, no me=True → returns empty (caller must have rejected already)
+    prs, explicit = _fetch_target_prs(
+        _BASE_CONFIG, "github", "alice", {}, [], [], me=False
+    )
+    assert prs == []
+    assert explicit is False

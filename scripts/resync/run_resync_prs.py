@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Resync open PRs with their base branch.
 
-Slack: @bot resync-prs [PR-URL...] [PR#...] [--dry-run] [--tracker github|jira]
+Slack: @bot resync-prs <url|#N|NNNNN...> [--dry-run] [--tracker github|jira]
+       @bot resync-prs --me [--dry-run]
+
+A target is REQUIRED — either explicit PR URL(s)/number(s) or --me.
+Omitting both exits with code 1 (prevents accidental mass sync).
 
 Safety:
-  - Auto-discover mode: only PRs authored by current user are processed
-  - Explicit PR URLs/numbers bypass author guard (user intent is clear)
+  - --me mode: author guard — only PRs authored by current user are processed
+  - Explicit PR URLs/numbers: no author guard (user intent is clear)
   - Diff snapshot before/after merge — must match within 5% threshold
   - --dry-run never pushes anything
 
@@ -37,10 +41,16 @@ from scripts.resync.pr_syncer import SyncResult, sync_pr
 def _parse_slack_flags(message: str) -> dict:
     """Parse flags from SLACK_MESSAGE.
 
-    Extracts: --dry-run, --tracker, PR URLs, bare PR numbers.
+    Extracts: --dry-run, --me, --tracker, PR URLs, bare PR numbers.
+
+    Targeting rules:
+      --me           → auto-discover all open PRs authored by current user
+      <URL|#N|NNNNN> → explicit mode; only those PRs are processed
+      (neither)      → error; caller must reject and ask user to be explicit
     """
     flags: dict = {
         "dry_run": False,
+        "me": False,
         "tracker": "",
         "pr_urls": [],
         "pr_numbers": [],
@@ -48,6 +58,9 @@ def _parse_slack_flags(message: str) -> dict:
 
     if re.search(r"--dry[-_]?run\b", message, re.IGNORECASE):
         flags["dry_run"] = True
+
+    if re.search(r"--me\b", message, re.IGNORECASE):
+        flags["me"] = True
 
     m = re.search(r"--tracker\s+(\S+)", message, re.IGNORECASE)
     if m:
@@ -62,12 +75,22 @@ def _parse_slack_flags(message: str) -> dict:
         flags["pr_urls"].append(message[m.start():m.end()])
         url_spans.append((m.start(), m.end()))
 
-    # Bare PR numbers — only accept #N form to avoid grabbing arbitrary numbers from the message
-    # (e.g. "@bot resync-prs fix the 100 failing tests" must NOT trigger PR #100)
+    # Bare PR numbers — #N form (any size) or plain 5-6 digit numbers (>= 10000).
+    # Small plain numbers are rejected (e.g. "@bot resync-prs fix 100 tests" must NOT
+    # match 100), but large numbers like "48239 48240" are unambiguously PR refs.
     cleaned = pr_url_re.sub("", message)
+    seen_numbers: set[int] = set()
     for m in re.finditer(r"#(\d+)\b", cleaned):
         n = int(m.group(1))
-        if 1 <= n <= 99999:
+        if 1 <= n <= 999999 and n not in seen_numbers:
+            seen_numbers.add(n)
+            flags["pr_numbers"].append(n)
+    # Accept plain 5-6 digit numbers >= 10000 (very unlikely to be accidental in PR commands)
+    cleaned_no_hash = re.sub(r"#\d+", "", cleaned)
+    for m in re.finditer(r"\b(\d{5,6})\b", cleaned_no_hash):
+        n = int(m.group(1))
+        if 10000 <= n <= 999999 and n not in seen_numbers:
+            seen_numbers.add(n)
             flags["pr_numbers"].append(n)
 
     return flags
@@ -260,10 +283,13 @@ def _fetch_target_prs(
     current_user_bb: dict,
     pr_urls: list[str],
     pr_numbers: list[int],
+    me: bool = False,
 ) -> tuple[list[dict], bool]:
     """Return (prs, explicit_mode).
 
     explicit_mode=True when pr_urls or pr_numbers were given — author guard is disabled.
+    me=True triggers auto-discovery of the current user's open PRs (author guard active).
+    Callers must pass either explicit PR refs OR me=True; passing neither is a caller error.
     """
     if pr_urls or pr_numbers:
         # Build deduplicated list preserving order (URL and bare number may overlap)
@@ -284,10 +310,14 @@ def _fetch_target_prs(
         prs = fetch_prs_by_numbers(config, numbers) if numbers else []
         return prs, True
 
-    # Auto-discover: fetch my own open PRs
-    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
-        return _fetch_my_open_bb_prs(config, current_user_bb), False
-    return _fetch_my_open_gh_prs(config), False
+    # --me: auto-discover all open PRs authored by the current user
+    if me:
+        if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+            return _fetch_my_open_bb_prs(config, current_user_bb), False
+        return _fetch_my_open_gh_prs(config), False
+
+    # No target specified — caller should have rejected before reaching here
+    return [], False
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +341,21 @@ def _build_report_md(
     dry_run: bool,
     as_of: str,
 ) -> str:
+    if dry_run:
+        mode_banner = (
+            "> 🔍 **DRY-RUN MODE** — No changes were pushed. "
+            "All merges were simulated locally and then discarded."
+        )
+    else:
+        mode_banner = (
+            "> 🚀 **LIVE SYNC** — Changes have been pushed to the remote branches listed below."
+        )
+
     lines: list[str] = [
         f"# PR Resync Report — {repo}",
-        f"*Generated: {as_of}*" + ("  *(dry-run — no changes pushed)*" if dry_run else ""),
+        f"*Generated: {as_of}*",
+        "",
+        mode_banner,
         "",
         "## Summary",
         "",
@@ -404,6 +446,11 @@ def _build_report_md(
     errors = sum(1 for r in results if r.status == "error")
     skipped = sum(1 for r in results if r.status == "skipped")
 
+    mode_footer = (
+        "**Mode: DRY-RUN — no changes were pushed to any branch.**"
+        if dry_run else
+        "**Mode: LIVE SYNC — changes were pushed to remote.**"
+    )
     lines += [
         "## Summary Counts",
         f"- Total PRs: {len(results)}",
@@ -412,9 +459,9 @@ def _build_report_md(
         f"- ⚠️ Conflicts: {conflicts}",
         f"- ❌ Errors: {errors}",
         f"- ⏭️ Skipped: {skipped}",
+        "",
+        mode_footer,
     ]
-    if dry_run:
-        lines += ["", "*Dry-run mode: no changes were pushed to any branch.*"]
 
     return "\n".join(lines)
 
@@ -452,8 +499,53 @@ def main() -> None:
             if url:
                 flags["pr_urls"].append(url)
 
+    # --- Require explicit target to prevent accidental mass sync ---
+    # Either provide PR URL(s)/number(s), or --me to opt into syncing all your open PRs.
+    has_explicit = bool(flags["pr_urls"] or flags["pr_numbers"])
+    if not has_explicit and not flags["me"]:
+        msg = (
+            "[resync] ERROR: no PR targets specified.\n"
+            "  Provide one of:\n"
+            "    • PR URL(s): @bot resync-prs https://github.com/org/repo/pull/42\n"
+            "    • PR number(s): @bot resync-prs #42 #101  or  @bot resync-prs 48239 48240\n"
+            "    • All your open PRs: @bot resync-prs --me [--dry-run]\n"
+        )
+        print(msg, file=sys.stderr, flush=True)
+        repo_lbl = config.get("GH_REPO") or config.get("BITBUCKET_REPO") or "repo"
+        error_md = (
+            "# PR Resync — No Target Specified\n\n"
+            "> ❌ **Error**: No PR targets provided. Provide PR URLs/numbers or `--me` "
+            "to sync all your open PRs.\n\n"
+            "**Examples:**\n"
+            "- `@bot resync-prs https://github.com/org/repo/pull/42`\n"
+            "- `@bot resync-prs #42 #101 --dry-run`\n"
+            "- `@bot resync-prs 48239 48240 --dry-run`\n"
+            "- `@bot resync-prs --me --dry-run`\n"
+        )
+        (reports_dir / "resync_prs_report.md").write_text(error_md, encoding="utf-8")
+        (reports_dir / "resync_prs_report.html").write_text(
+            render_simple_html("PR Resync — Error", error_md), encoding="utf-8"
+        )
+        summary = {
+            "total": 0, "synced": 0, "up_to_date": 0, "conflicts": 0,
+            "errors": 1, "skipped": 0, "dry_run": dry_run,
+            "tracker": tracker, "repo": repo_lbl, "as_of": "",
+            "results": [],
+            "error": "no PR targets specified — provide URL/number or --me",
+        }
+        (reports_dir / "resync_prs_summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
+        sys.exit(1)
+
+    # Print clear mode banner before any git work begins
+    if dry_run:
+        print("[resync] MODE: DRY-RUN — no changes will be pushed", flush=True)
+    else:
+        print("[resync] MODE: LIVE SYNC — changes WILL be pushed to remote branches", flush=True)
+
     print(
-        f"[resync] tracker={tracker} dry_run={dry_run} "
+        f"[resync] tracker={tracker} dry_run={dry_run} me={flags['me']} "
         f"pr_urls={flags['pr_urls']} pr_numbers={flags['pr_numbers']}",
         flush=True,
     )
@@ -472,7 +564,7 @@ def main() -> None:
     # Fetch target PRs
     prs, explicit_mode = _fetch_target_prs(
         config, tracker, current_user, current_user_bb,
-        flags["pr_urls"], flags["pr_numbers"],
+        flags["pr_urls"], flags["pr_numbers"], me=flags["me"],
     )
     print(f"[resync] {len(prs)} PR(s) to process (explicit_mode={explicit_mode})", flush=True)
 

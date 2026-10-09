@@ -165,19 +165,23 @@ def _verify_diff(
     return True, ""
 
 
-def _fetch_branch(repo_path: Path, branch: str) -> None:
+def _fetch_branch(repo_path: Path, branch: str, dry_run: bool = False) -> None:
+    depth = "100" if dry_run else "500"
     refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
     _run_git(
-        ["git", "fetch", "--depth", "500", "origin", refspec],
+        ["git", "fetch", "--depth", depth, "origin", refspec],
         cwd=repo_path, check=False,
     )
 
 
-def _ensure_merge_base(repo_path: Path, base_branch: str, pr_branch: str) -> bool:
+def _ensure_merge_base(
+    repo_path: Path, base_branch: str, pr_branch: str, dry_run: bool = False
+) -> bool:
     """Ensure the common ancestor between base and PR branch is locally available.
 
-    Returns True if the merge base is reachable. If the clone is too shallow,
-    attempts an unshallow fetch. Returns False if unshallow also fails.
+    For dry-run: deepens by 2000 commits instead of full unshallow (avoids multi-minute
+    history fetches on large repos where a full --unshallow is unnecessary for a no-push check).
+    Returns True if the merge base is reachable, False otherwise.
     """
     result = _run_git(
         ["git", "merge-base", f"origin/{base_branch}", f"origin/{pr_branch}"],
@@ -185,14 +189,23 @@ def _ensure_merge_base(repo_path: Path, base_branch: str, pr_branch: str) -> boo
     )
     if result.returncode == 0:
         return True
-    # Shallow clone doesn't have enough history — try to unshallow
-    print(
-        f"[resync] shallow clone missing merge-base for {pr_branch}↔{base_branch}; "
-        "attempting unshallow fetch",
-        flush=True,
-    )
-    _run_git(["git", "fetch", "--unshallow", "origin"], cwd=repo_path, check=False)
-    # Re-fetch both branches without depth limit
+
+    if dry_run:
+        print(
+            f"[resync] shallow clone missing merge-base for {pr_branch}↔{base_branch}; "
+            "deepening by 2000 commits (dry-run — skipping full unshallow)",
+            flush=True,
+        )
+        _run_git(["git", "fetch", "--deepen=2000", "origin"], cwd=repo_path, check=False)
+    else:
+        print(
+            f"[resync] shallow clone missing merge-base for {pr_branch}↔{base_branch}; "
+            "attempting unshallow fetch",
+            flush=True,
+        )
+        _run_git(["git", "fetch", "--unshallow", "origin"], cwd=repo_path, check=False)
+
+    # Re-fetch both branches after deepening
     for branch in (base_branch, pr_branch):
         refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
         _run_git(["git", "fetch", "origin", refspec], cwd=repo_path, check=False)
@@ -295,27 +308,31 @@ def sync_pr(
         clone_url = _build_clone_url(config, tracker)
         http_token, http_username, ssh_key = resolve_clone_auth(config, tracker)
 
+        # Dry-run uses a shallower clone to avoid fetching unnecessary history on large repos.
+        # Real syncs keep depth=500 for reliable merge-base detection.
+        clone_depth = 100 if dry_run else 500
         print(
-            f"[resync] PR #{pr_number}: '{pr_title}' — cloning {clone_url!r}",
+            f"[resync] PR #{pr_number}: '{pr_title}' — cloning {clone_url!r} "
+            f"(depth={clone_depth}{'  dry-run' if dry_run else ''})",
             flush=True,
         )
 
-        # Clone with depth=500; we may unshallow further if merge-base is missing
         clone_repo(
-            clone_url, clone_dest, depth=500,
+            clone_url, clone_dest, depth=clone_depth,
             http_token=http_token, http_username=http_username, ssh_key=ssh_key,
         )
 
         # Ensure both branches have local tracking refs
-        _fetch_branch(clone_dest, base_branch)
-        _fetch_branch(clone_dest, pr_branch)
+        _fetch_branch(clone_dest, base_branch, dry_run=dry_run)
+        _fetch_branch(clone_dest, pr_branch, dry_run=dry_run)
 
-        # Verify common ancestor is available; unshallow if not
-        if not _ensure_merge_base(clone_dest, base_branch, pr_branch):
+        # Verify common ancestor is available; for dry-run deepens rather than full unshallow
+        if not _ensure_merge_base(clone_dest, base_branch, pr_branch, dry_run=dry_run):
             result.status = "error"
+            fetch_desc = "deepening by 2000 commits" if dry_run else "unshallow fetch"
             result.error = (
                 f"could not find merge-base between origin/{base_branch} "
-                f"and origin/{pr_branch} — even after unshallow fetch"
+                f"and origin/{pr_branch} — even after {fetch_desc}"
             )
             return result
 
