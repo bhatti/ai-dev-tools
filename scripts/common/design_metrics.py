@@ -17,14 +17,15 @@ def render_design_metrics_table(design_metrics: dict) -> list[str]:
     if not design_metrics:
         return []
 
-    srp = design_metrics.get("srp_violations", 0)
-    dip = design_metrics.get("dip_violations", 0)
-    adp = design_metrics.get("adp_cycles", 0)
-    layer = design_metrics.get("layer_violations", 0)
-    inst = float(design_metrics.get("avg_instability", 0.0))
-    hotspot = design_metrics.get("hotspot_coupling", False)
-    readability = design_metrics.get("readability_score", 0)
-    isp = design_metrics.get("isp_violations", 0)
+    # Use `or` fallback (not just .get default) so explicit null values from Claude also get replaced
+    srp = design_metrics.get("srp_violations") or 0
+    dip = design_metrics.get("dip_violations") or 0
+    adp = design_metrics.get("adp_cycles") or 0
+    layer = design_metrics.get("layer_violations") or 0
+    inst = float(design_metrics.get("avg_instability") or 0.0)
+    hotspot = design_metrics.get("hotspot_coupling") or False
+    readability = design_metrics.get("readability_score") or 0
+    isp = design_metrics.get("isp_violations") or 0
 
     # Benchmark: < 0.5 healthy — at exactly 0.5 use yellow (boundary is exclusive)
     inst_sig = "🟢" if inst < 0.5 else ("🟡" if inst < 0.7 else "🔴")
