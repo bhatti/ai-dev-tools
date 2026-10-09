@@ -900,10 +900,18 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
 
     sections = findings_sections  # review findings block
     review = _read_json(workspace / "review_result.json")
-    if review:
-        verdict = review.get("verdict", "UNKNOWN")
-        all_findings = review.get("findings", [])
-        verdict_emoji = {"DONE": "✅", "DONE_WITH_CONCERNS": "⚠️", "BLOCKED": "🚫"}.get(verdict, "📋")
+    # findings.json (written by Claude) has the full findings list and design_metrics;
+    # review_result.json only has the status JSON — prefer findings.json for display.
+    findings_full = _read_json(workspace / "findings.json") or _read_json(workspace / "reports" / "findings.json")
+    if review or findings_full:
+        from scripts.common.design_metrics import render_design_metrics_table
+        _rv = review or {}
+        verdict = _rv.get("verdict", "UNKNOWN")
+        # Prefer full findings from findings.json over the empty array in review_result.json
+        all_findings = (findings_full or {}).get("findings") or _rv.get("findings", [])
+        design_metrics = (findings_full or {}).get("design_metrics", {})
+        review_summary = (findings_full or {}).get("summary", "") or _rv.get("summary", "")
+        verdict_emoji = {"DONE": "✅", "DONE_WITH_CONCERNS": "⚠️", "BLOCKED": "🚫", "APPROVE": "✅", "REQUEST_CHANGES": "🔄", "COMMENT": "💬"}.get(verdict, "📋")
         _SEV_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "info": "ℹ️"}
         sev_counts: dict[str, int] = {}
         for f in all_findings:
@@ -916,28 +924,58 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         )
         sections.append("## Review Findings")
         sections.append("")
+        if review_summary:
+            sections.append(review_summary)
+            sections.append("")
         if not all_findings:
             sections.append("✅ No issues found")
         else:
             sections.append(f"{verdict_emoji} **{verdict}** — {len(all_findings)} finding(s)"
                             + (f" ({sev_summary})" if sev_summary else ""))
         sections.append("")
+
+        # Design Quality Metrics table — emitted before the detailed findings list
+        sections.extend(render_design_metrics_table(design_metrics))
+
         if all_findings:
-            sections.append("| Severity | Category | File | Line | Summary |")
-            sections.append("|----------|----------|------|------|---------|")
+            sections.append("| Severity | Confidence | File | Summary |")
+            sections.append("|----------|------------|------|---------|")
             for f in all_findings[:20]:
                 sev = f.get("severity", "info").lower()
-                cat = f.get("category", "")
+                conf = f.get("confidence", "")
+                conf_cell = f"_{conf}_" if conf else ""
                 fpath = f.get("file", "")
                 line = f.get("line", "")
-                summary = f.get("summary", f.get("short_summary", ""))
-                # Truncate long summaries for table readability
-                if len(summary) > 80:
-                    summary = summary[:77] + "..."
-                sections.append(f"| {_SEV_EMOJI.get(sev,'')}{sev} | {cat} | `{fpath}` | {line} | {summary} |")
+                loc = f"`{fpath}:{line}`" if fpath and line else (f"`{fpath}`" if fpath else "")
+                title = f.get("title", f.get("summary", f.get("short_summary", "")))
+                if len(title) > 100:
+                    title = title[:97] + "..."
+                sections.append(f"| {_SEV_EMOJI.get(sev,'')}{sev} | {conf_cell} | {loc} | {title} |")
             if len(all_findings) > 20:
-                sections.append(f"| ... | | | | {len(all_findings) - 20} more findings in review_result.json |")
+                sections.append(f"| ... | | | {len(all_findings) - 20} more findings in findings.json |")
             sections.append("")
+
+            # Detailed findings with description + fix for each
+            for f in all_findings:
+                sev = f.get("severity", "info").lower()
+                conf = f.get("confidence", "")
+                conf_txt = f" _(confidence: {conf})_" if conf else ""
+                sem = _SEV_EMOJI.get(sev, "•")
+                title = f.get("title", f.get("summary", ""))
+                fpath = f.get("file", "")
+                line = f.get("line", "")
+                loc = f" — `{fpath}:{line}`" if fpath and line else (f" — `{fpath}`" if fpath else "")
+                sections.append(f"### {sem} {sev.upper()}{conf_txt} — {title}{loc}")
+                desc = f.get("description", "")
+                if desc:
+                    sections.append("")
+                    sections.append(desc)
+                fix = f.get("fix", "")
+                if fix:
+                    sections.append("")
+                    sections.append(f"**Fix:** {fix}")
+                sections.append("")
+
         ctx["REVIEW_VERDICT"] = verdict
         ctx["REVIEW_FINDINGS_COUNT"] = str(len(all_findings))
         ctx["REVIEW_CRITICAL"] = str(sev_counts.get("critical", 0))
@@ -1712,8 +1750,10 @@ def main() -> None:
     print(report_text, flush=True)
     print("=" * 60 + "\n", flush=True)
 
-    write_report(reports_dir / "report.md", report_text)
-    print("[mq-report] reports/report.md written", flush=True)
+    # mq.report runs last in the pipeline and has the most complete data (scope + risk + findings).
+    # Force-write report.md/report.html even if run.py already wrote a findings-only version.
+    (reports_dir / "report.md").write_text(report_text, encoding="utf-8")
+    print("[mq-report] reports/report.md written (forced)", flush=True)
 
     for key, val in ctx.items():
         print(f"::add-task-context {key}::{val}", flush=True)
@@ -1721,8 +1761,8 @@ def main() -> None:
     from scripts.common.report_renderer import render_simple_html
     try:
         html = render_simple_html(title, report_text)
-        if write_report(reports_dir / "report.html", html):
-            print("[mq-report] reports/report.html written", flush=True)
+        (reports_dir / "report.html").write_text(html, encoding="utf-8")
+        print("[mq-report] reports/report.html written (forced)", flush=True)
     except Exception as e:
         print(f"[mq-report] HTML render failed (non-fatal): {e}", flush=True)
 

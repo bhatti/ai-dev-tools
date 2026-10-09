@@ -107,7 +107,7 @@ _CLAUDE_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
     "large_pr_review_depth": ("Large PR Review Depth", ">5 comments/PR", "Avg substantive human comments on merged PRs >400 LOC — large PRs need deeper scrutiny"),
     "xl_pr_review_coverage_pct": ("XL PR Review Coverage", "100% target", "% merged PRs ≥1000 LOC that received ≥1 substantive human comment (not just LGTM)"),
     "large_pr_human_comments_avg": ("Large PR Avg Comments", ">5/PR healthy", "Mean substantive human comments per large PR (>400 LOC merged only)"),
-    "solid_violation_rate": ("SOLID Violation Rate", "<0.5/PR healthy", "SOLID principle violations per PR (SRP, DIP, ISP) — measures design discipline across PRs. See shared/design-principles.md."),
+    "solid_violation_rate": ("SOLID Violation Rate", "< 0.5/PR", "SOLID principle violations per PR (SRP, DIP, ISP) — measures design discipline across PRs. See shared/design-principles.md."),
     "hotspot_coupling_count": ("Hotspot Coupling", "0 ideal", "# files that are both high-churn AND high-instability (I > 0.5) — highest defect-probability files in the codebase"),
     "avg_readability_score": ("Avg Readability Score", ">7 healthy", "Mean readability score (0–10) across reviewed PRs: scannability, locality, abstraction consistency, progressive disclosure, predictability"),
 }
@@ -156,7 +156,7 @@ def _metric_signal(key: str, val: float) -> str:
     if key == "large_pr_human_comments_avg":
         return "🟢" if val >= 5 else ("🟡" if val >= 2 else "🔴")
     if key == "solid_violation_rate":
-        return "🟢" if val <= 0.5 else ("🟡" if val <= 1.5 else "🔴")
+        return "🟢" if val < 0.5 else ("🟡" if val <= 1.5 else "🔴")
     if key == "hotspot_coupling_count":
         return "🟢" if val == 0 else ("🟡" if val <= 2 else "🔴")
     if key == "avg_readability_score":

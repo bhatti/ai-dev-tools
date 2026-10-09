@@ -24,6 +24,7 @@ import click
 import requests
 
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.design_metrics import render_design_metrics_table
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.report_utils import write_report
 from scripts.common.slack_format import build_artifact_links
@@ -58,6 +59,9 @@ def render_report_md(findings: dict) -> str:
         "",
     ]
 
+    # Design Quality Metrics table — emitted before findings when present
+    lines += render_design_metrics_table(findings.get("design_metrics", {}))
+
     if finding_list:
         lines += ["## Findings", ""]
         for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
@@ -80,7 +84,8 @@ def render_report_md(findings: dict) -> str:
                     lines.append(f"")
                     lines.append(f"**Fix:** {f['fix']}")
                 lines.append("")
-    else:
+    elif not findings.get("design_metrics"):
+        # Only show "no findings" when there's also no design metrics content
         lines += ["_No specific findings — see summary above._", ""]
 
     return "\n".join(l for l in lines if l is not None)
