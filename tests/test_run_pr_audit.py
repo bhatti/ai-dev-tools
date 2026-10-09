@@ -559,3 +559,91 @@ class TestFilterPrsByState:
 
     def test_empty_prs_returns_empty(self):
         assert _filter_prs_by_state([], ["merged", "declined"]) == []
+
+
+class TestDesignMetricsRows:
+    """New design-principle metric rows appear in _CLAUDE_METRIC_ROWS and produce correct signals."""
+
+    def test_design_metric_keys_in_claude_rows(self):
+        from scripts.analyze.run_pr_audit import _CLAUDE_METRIC_ROWS
+        assert "solid_violation_rate" in _CLAUDE_METRIC_ROWS
+        assert "hotspot_coupling_count" in _CLAUDE_METRIC_ROWS
+        assert "avg_readability_score" in _CLAUDE_METRIC_ROWS
+
+    def test_design_metric_keys_in_context_keys(self):
+        from scripts.analyze.run_pr_audit import _METRIC_CONTEXT_KEYS
+        assert "solid_violation_rate" in _METRIC_CONTEXT_KEYS
+        assert "hotspot_coupling_count" in _METRIC_CONTEXT_KEYS
+        assert "avg_readability_score" in _METRIC_CONTEXT_KEYS
+
+    def test_context_keys_and_metric_rows_are_in_sync(self):
+        """The assert in the module guards this, but make it explicit in tests too."""
+        from scripts.analyze.run_pr_audit import _CLAUDE_METRIC_ROWS, _METRIC_CONTEXT_KEYS
+        assert set(_METRIC_CONTEXT_KEYS) == set(_CLAUDE_METRIC_ROWS)
+
+    def test_solid_violation_rate_signal_green(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("solid_violation_rate", 0.3) == "🟢"
+
+    def test_solid_violation_rate_signal_yellow(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("solid_violation_rate", 1.0) == "🟡"
+
+    def test_solid_violation_rate_signal_red(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("solid_violation_rate", 2.0) == "🔴"
+
+    def test_hotspot_coupling_count_signal_green(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("hotspot_coupling_count", 0) == "🟢"
+
+    def test_hotspot_coupling_count_signal_yellow(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("hotspot_coupling_count", 2) == "🟡"
+
+    def test_hotspot_coupling_count_signal_red(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("hotspot_coupling_count", 4) == "🔴"
+
+    def test_avg_readability_score_signal_green(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("avg_readability_score", 8.0) == "🟢"
+
+    def test_avg_readability_score_signal_yellow(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("avg_readability_score", 6.0) == "🟡"
+
+    def test_avg_readability_score_signal_red(self):
+        from scripts.analyze.run_pr_audit import _metric_signal
+        assert _metric_signal("avg_readability_score", 3.0) == "🔴"
+
+    def test_read_all_claude_metrics_returns_design_rows(self, tmp_path):
+        """_read_all_claude_metrics parses design metric keys from pr_audit_findings.json."""
+        import json
+        from scripts.analyze.run_pr_audit import _read_all_claude_metrics
+        findings = {
+            "metrics": {
+                "solid_violation_rate": 0.8,
+                "hotspot_coupling_count": 3,
+                "avg_readability_score": 6.5,
+            }
+        }
+        (tmp_path / "pr_audit_findings.json").write_text(json.dumps(findings))
+        rows = _read_all_claude_metrics(tmp_path)
+        names = [r[0] for r in rows]
+        assert "SOLID Violation Rate" in names
+        assert "Hotspot Coupling" in names
+        assert "Avg Readability Score" in names
+
+    def test_design_rows_appear_in_dashboard(self, tmp_path):
+        """Design metric extra_rows flow through build_metrics_dashboard correctly."""
+        import json
+        from scripts.analyze.run_pr_audit import _read_all_claude_metrics
+        from scripts.common.pr_classify import build_metrics_dashboard
+        findings = {"metrics": {"solid_violation_rate": 1.2, "hotspot_coupling_count": 2, "avg_readability_score": 5.5}}
+        (tmp_path / "pr_audit_findings.json").write_text(json.dumps(findings))
+        rows = _read_all_claude_metrics(tmp_path)
+        dashboard = build_metrics_dashboard([], extra_rows=rows)
+        assert "SOLID Violation Rate" in dashboard
+        assert "Hotspot Coupling" in dashboard
+        assert "Avg Readability Score" in dashboard

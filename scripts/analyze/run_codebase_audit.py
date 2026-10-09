@@ -183,6 +183,9 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
                 "high_mass_functions": "AUDIT_HIGH_MASS_FUNCTIONS",
                 "churn_complexity_hotspots": "AUDIT_CHURN_COMPLEXITY_HOTSPOTS",
                 "disabled_skipped_tests": "AUDIT_DISABLED_SKIPPED_TESTS",
+                "avg_instability_score": "AUDIT_AVG_INSTABILITY",
+                "adp_cycle_count": "AUDIT_ADP_CYCLES",
+                "solid_srp_violations": "AUDIT_SRP_VIOLATIONS",
             }
             for metric_key, ctx_key in _AUDIT_METRIC_CTX_KEYS.items():
                 val = metrics.get(metric_key)
@@ -207,6 +210,9 @@ _AUDIT_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
     "high_mass_functions": ("High-Mass Functions (CC>10)", "0 ideal", "# functions with estimated cyclomatic complexity >10 (>50 branch points) — split them"),
     "churn_complexity_hotspots": ("Churn×Complexity Hotspots", "0 ideal", "# files in risk quadrant: high commit frequency AND high branch density — highest change-failure risk"),
     "disabled_skipped_tests": ("Disabled/Skipped Tests", "0 ideal", "# xit/it.skip/describe.skip/@Ignore/@Disabled — each is a hole in the test safety net"),
+    "avg_instability_score": ("Avg Instability Score (I)", "< 0.5 healthy", "Mean I = Ce/(Ca+Ce) across non-leaf, non-test modules. I > 0.7 for core/shared modules = high outbound coupling, fragile design. See shared/design-principles.md."),
+    "adp_cycle_count": ("ADP Cycle Count", "0 ideal", "# confirmed circular dependency groups (ADP violations). Any cycle prevents independent module testing and blocks incremental deployment."),
+    "solid_srp_violations": ("SRP Violations (confirmed)", "0 ideal", "# modules/classes with confirmed Single Responsibility Principle violations: god objects, classes covering multiple unrelated concerns."),
 }
 
 
@@ -223,6 +229,12 @@ def _audit_metric_signal(key: str, val: float) -> str:
         return "🟢" if val <= 0.30 else ("🟡" if val <= 0.50 else "🔴")
     if key == "erosion_score":
         return "🟢" if val <= 0.35 else ("🟡" if val <= 0.55 else "🔴")
+    if key == "avg_instability_score":
+        return "🟢" if val <= 0.5 else ("🟡" if val <= 0.7 else "🔴")
+    if key == "adp_cycle_count":
+        return "🟢" if val == 0 else "🔴"
+    if key == "solid_srp_violations":
+        return "🟢" if val == 0 else ("🟡" if val <= 2 else "🔴")
     return "—"
 
 

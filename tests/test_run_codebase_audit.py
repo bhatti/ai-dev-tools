@@ -134,3 +134,86 @@ class TestAuditMetricsDashboardWithPRs:
         result = build_metrics_dashboard([], extra_rows=audit_rows)
         assert "Erosion Score" in result
         assert "PR State Breakdown" not in result
+
+
+class TestAuditDesignMetricsRows:
+    """New design-principle metric rows appear in _AUDIT_METRIC_ROWS and produce correct signals."""
+
+    def test_design_metric_keys_in_audit_rows(self):
+        from scripts.analyze.run_codebase_audit import _AUDIT_METRIC_ROWS
+        assert "avg_instability_score" in _AUDIT_METRIC_ROWS
+        assert "adp_cycle_count" in _AUDIT_METRIC_ROWS
+        assert "solid_srp_violations" in _AUDIT_METRIC_ROWS
+
+    def test_design_metric_keys_in_ctx_keys(self):
+        from scripts.analyze.run_codebase_audit import _read_all_audit_metrics
+        # Indirectly check: the function reads from _AUDIT_METRIC_CTX_KEYS at module level
+        import scripts.analyze.run_codebase_audit as m
+        # Verify context keys contain the new entries (they're defined inline in _emit_task_context_markers)
+        src = open(m.__file__).read()
+        assert "AUDIT_AVG_INSTABILITY" in src
+        assert "AUDIT_ADP_CYCLES" in src
+        assert "AUDIT_SRP_VIOLATIONS" in src
+
+    def test_avg_instability_signal_green(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("avg_instability_score", 0.3) == "🟢"
+
+    def test_avg_instability_signal_yellow(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("avg_instability_score", 0.6) == "🟡"
+
+    def test_avg_instability_signal_red(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("avg_instability_score", 0.8) == "🔴"
+
+    def test_adp_cycle_count_signal_green(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("adp_cycle_count", 0) == "🟢"
+
+    def test_adp_cycle_count_signal_red(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("adp_cycle_count", 1) == "🔴"
+
+    def test_solid_srp_violations_signal_green(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("solid_srp_violations", 0) == "🟢"
+
+    def test_solid_srp_violations_signal_yellow(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("solid_srp_violations", 2) == "🟡"
+
+    def test_solid_srp_violations_signal_red(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal
+        assert _audit_metric_signal("solid_srp_violations", 5) == "🔴"
+
+    def test_read_all_audit_metrics_returns_design_rows(self, tmp_path):
+        """_read_all_audit_metrics parses design metric keys from audit_findings.json."""
+        import json
+        from scripts.analyze.run_codebase_audit import _read_all_audit_metrics
+        findings = {
+            "metrics": {
+                "avg_instability_score": 0.62,
+                "adp_cycle_count": 2,
+                "solid_srp_violations": 3,
+            }
+        }
+        (tmp_path / "audit_findings.json").write_text(json.dumps(findings))
+        rows = _read_all_audit_metrics(tmp_path)
+        names = [r[0] for r in rows]
+        assert "Avg Instability Score (I)" in names
+        assert "ADP Cycle Count" in names
+        assert "SRP Violations (confirmed)" in names
+
+    def test_design_rows_appear_in_dashboard(self, tmp_path):
+        """Design metric extra_rows flow through build_metrics_dashboard correctly."""
+        import json
+        from scripts.analyze.run_codebase_audit import _read_all_audit_metrics
+        from scripts.common.pr_classify import build_metrics_dashboard
+        findings = {"metrics": {"avg_instability_score": 0.55, "adp_cycle_count": 1, "solid_srp_violations": 2}}
+        (tmp_path / "audit_findings.json").write_text(json.dumps(findings))
+        rows = _read_all_audit_metrics(tmp_path)
+        dashboard = build_metrics_dashboard([], extra_rows=rows)
+        assert "Avg Instability Score (I)" in dashboard
+        assert "ADP Cycle Count" in dashboard
+        assert "SRP Violations (confirmed)" in dashboard

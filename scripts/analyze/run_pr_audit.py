@@ -107,6 +107,9 @@ _CLAUDE_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
     "large_pr_review_depth": ("Large PR Review Depth", ">5 comments/PR", "Avg substantive human comments on merged PRs >400 LOC — large PRs need deeper scrutiny"),
     "xl_pr_review_coverage_pct": ("XL PR Review Coverage", "100% target", "% merged PRs ≥1000 LOC that received ≥1 substantive human comment (not just LGTM)"),
     "large_pr_human_comments_avg": ("Large PR Avg Comments", ">5/PR healthy", "Mean substantive human comments per large PR (>400 LOC merged only)"),
+    "solid_violation_rate": ("SOLID Violation Rate", "<0.5/PR healthy", "SOLID principle violations per PR (SRP, DIP, ISP) — measures design discipline across PRs. See shared/design-principles.md."),
+    "hotspot_coupling_count": ("Hotspot Coupling", "0 ideal", "# files that are both high-churn AND high-instability (I > 0.5) — highest defect-probability files in the codebase"),
+    "avg_readability_score": ("Avg Readability Score", ">7 healthy", "Mean readability score (0–10) across reviewed PRs: scannability, locality, abstraction consistency, progressive disclosure, predictability"),
 }
 
 # task-context marker key names for all Claude-computed metrics (derived from _CLAUDE_METRIC_ROWS)
@@ -124,6 +127,9 @@ _METRIC_CONTEXT_KEYS: dict[str, str] = {
     "large_pr_review_depth": "PR_AUDIT_LARGE_PR_DEPTH",
     "xl_pr_review_coverage_pct": "PR_AUDIT_XL_PR_REVIEW_COVERAGE",
     "large_pr_human_comments_avg": "PR_AUDIT_LARGE_PR_COMMENTS_AVG",
+    "solid_violation_rate": "PR_AUDIT_SOLID_VIOLATION_RATE",
+    "hotspot_coupling_count": "PR_AUDIT_HOTSPOT_COUPLING",
+    "avg_readability_score": "PR_AUDIT_AVG_READABILITY",
 }
 assert set(_METRIC_CONTEXT_KEYS) == set(_CLAUDE_METRIC_ROWS), (
     "METRIC_CONTEXT_KEYS and _CLAUDE_METRIC_ROWS must have identical key sets"
@@ -149,6 +155,12 @@ def _metric_signal(key: str, val: float) -> str:
         return "🟢" if val >= 100 else ("🟡" if val >= 80 else "🔴")
     if key == "large_pr_human_comments_avg":
         return "🟢" if val >= 5 else ("🟡" if val >= 2 else "🔴")
+    if key == "solid_violation_rate":
+        return "🟢" if val <= 0.5 else ("🟡" if val <= 1.5 else "🔴")
+    if key == "hotspot_coupling_count":
+        return "🟢" if val == 0 else ("🟡" if val <= 2 else "🔴")
+    if key == "avg_readability_score":
+        return "🟢" if val >= 7 else ("🟡" if val >= 5 else "🔴")
     return "—"
 
 
