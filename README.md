@@ -391,7 +391,7 @@ The Slack router is a Bolt Socket Mode app (`scripts/slack/router.py`) that list
 | `@bot jira-analyze PROJ-1,PROJ-2` | Analyze and summarize a set of Jira issues | `ai-jira-query` (Mode=analyze) |
 | `@bot gh-query <keywords>` | Search GitHub issues by keyword | `ai-jira-query` (DefaultTracker=github) |
 | `@bot gh-analyze #123,#456` | Analyze GitHub issues for root cause and fixes | `ai-jira-query` (Mode=analyze, DefaultTracker=github) |
-| `@bot skill <name> [flags] [-- instructions]` | Run any YGS skill against a repo with optional service sidecar | `ai-skill` |
+| `@bot skill <name> [flags] [-- instructions]` | Run any YGS skill against a repo with optional service sidecar or Docker-in-Docker | `ai-skill` |
 | `@bot doctor` | Connectivity check against all configured services | `ai-connectivity-check` |
 
 When a paused job is waiting in a thread, replying in that thread resumes the job with `ReplyText` set to your message.
@@ -537,6 +537,7 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 | `--service-port <port>` | Port the sidecar listens on; skill accesses it at `localhost:<port>` | `8080` |
 | `--service-cmd <cmd>` | Documents the sidecar command in the prompt; actual command must be set via `ServiceCommand` job variable at submission time | Image default |
 | `--service-args <args>` | Extra args described in the prompt; actual args via `ServiceArgs` job variable | None |
+| `--dind` | Enable Docker-in-Docker: starts a `docker:dind` sidecar so the skill can run `docker build`/`docker run`. `DOCKER_HOST` is set automatically to `tcp://localhost:2375`. | Disabled |
 | `-- <text>` | Additional instructions passed to the skill | None |
 
 ### Container Image (`RunImage`)
@@ -562,8 +563,40 @@ When `ServiceImage` is set (via API `params`), a sidecar container runs alongsid
 | `ServiceCommand` | Full command override | Image entrypoint |
 | `ServiceArgs` | Extra args appended to `ServiceCommand` | None |
 | `ServiceEntrypoint` | Override container entrypoint | Image default |
-| `ServiceMemoryLimit` | Memory limit for sidecar | `2G` |
+| `ServiceMemoryLimit` | Memory limit for sidecar | `8G` |
 | `ServiceCpuRequest` | CPU request for sidecar | `250m` |
+
+### Docker-in-Docker (DinD)
+
+Use `--dind` from Slack (or set `DockerEnabled=true` via API) when a skill needs to build or run Docker containers (e.g. integration test suites that spin up dependencies with `docker-compose` or `docker run`).
+
+```
+@bot skill ygs-qa --repo org/myapp --branch main --dind
+```
+
+How it works:
+- A `docker:dind` sidecar starts alongside the skill task
+- `DOCKER_HOST=tcp://localhost:2375` is injected automatically (TLS disabled)
+- The task container runs with `privileged: true` (required for DinD)
+- Claude is informed that Docker is available and can run `docker build`, `docker run`, etc.
+
+Variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DockerEnabled` | Set to any non-empty value to enable DinD | — |
+| `DindMemoryLimit` | Memory limit for the DinD sidecar | `8G` |
+
+Via API:
+```bash
+curl -X POST .../api/v1/jobs/requests \
+  -d '{"job_type":"ai-skill","params":{
+    "RawArgs":"ygs-qa --repo https://github.com/org/myapp --branch main --dind",
+    "DockerEnabled":"true"
+  }}'
+```
+
+> **Note**: `DockerEnabled=true` is redundant when `--dind` is in `RawArgs` — the template checks both. Either approach works.
 
 **Formicary as a service**: you can run formicary itself as a sidecar to exercise integration tests against a live leader. Auth is disabled by default (no credentials needed):
 

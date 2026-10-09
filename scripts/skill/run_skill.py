@@ -225,6 +225,21 @@ def main() -> None:
         print(f"::add-task-context REPO_URL::{clone_url}", flush=True)
         print(f"::add-task-context BRANCH::{branch}", flush=True)
 
+    # Docker-in-Docker awareness: inject DOCKER_HOST context if DinD is enabled.
+    docker_host = os.getenv("DOCKER_HOST", "").strip()
+    docker_info = ""
+    if flags.dind or docker_host:
+        effective_host = docker_host or "tcp://localhost:2375"
+        docker_info = (
+            f"\n\n## Docker Daemon\n\n"
+            f"A Docker-in-Docker daemon is running as a sidecar.\n"
+            f"- DOCKER_HOST: {effective_host}\n"
+            f"- You can run `docker` commands directly (DOCKER_TLS_CERTDIR is empty, no TLS).\n"
+            f"- Example: `docker build -t myimage .` or `docker run --rm myimage`\n"
+        )
+        print(f"[skill] docker-in-docker enabled: DOCKER_HOST={effective_host}", flush=True)
+        print(f"::add-task-context DOCKER_ENABLED::true", flush=True)
+
     # Service awareness: if a service sidecar is running, inject info into instructions.
     service_image = os.getenv("SERVICE_IMAGE", "").strip()
     service_name = os.getenv("SERVICE_NAME", "skill-service").strip()
@@ -263,6 +278,8 @@ def main() -> None:
     extra_instructions = flags.instructions
     if flags.identifier:
         extra_instructions = f"Identifier: {flags.identifier}\n{extra_instructions}".strip()
+    if docker_info:
+        extra_instructions = docker_info + "\n" + extra_instructions
     if service_info:
         extra_instructions = service_info + "\n" + extra_instructions
     if codebase_dir:

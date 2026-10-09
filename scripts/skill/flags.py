@@ -16,13 +16,16 @@ Positional shorthand (no unrecognized --flags present):
 
 Passthrough mode (any unrecognized --flag detected):
   All tokens not consumed by a known framework flag (--repo/--branch/--tracker/
-  --service/--model) are passed verbatim as instructions. This lets skills
+  --service/--model/--dind) are passed verbatim as instructions. This lets skills
   receive their own CLI-style flags naturally.
   Examples:
     run-tests unit --workers 4 --dry-run --branch feat
       → instructions="unit --workers 4 --dry-run", branch=feat
     my-skill --dry-run --count 5
       → instructions="--dry-run --count 5"
+
+Boolean framework flags (consumed silently, never forwarded as instructions):
+  --dind    Enable Docker-in-Docker; skill can run docker commands via tcp://localhost:2375.
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ class SkillFlags:
     service_args: str = ""
     model: str = ""
     turns: str = ""
+    dind: bool = False
     identifier: str = ""
     instructions: str = ""
 
@@ -52,12 +56,14 @@ _FLAG_PATTERN = re.compile(
     r"""--(?P<key>repo|branch|tracker|service(?:-port|-cmd|-args)?|model|turns)\s+(?P<val>"[^"]*"|\S+)"""
 )
 
+# No regex for --dind — use exact token match to avoid false-positives like --dind-extra.
+
 _NUMERIC = re.compile(r"^\d+$")
 
 # Matches any --flag that is NOT one of the known framework flags.
 # Presence of an unknown flag triggers passthrough mode (no positional parsing).
 _UNKNOWN_FLAG_RE = re.compile(
-    r"--(?!(?:repo|branch|tracker|service(?:-port|-cmd|-args)?|model|turns)(?:\s|$))\w"
+    r"--(?!(?:repo|branch|tracker|service(?:-port|-cmd|-args)?|model|turns|dind)(?:\s|$))\w"
 )
 
 
@@ -99,6 +105,13 @@ def parse_skill_flags(raw: str) -> SkillFlags:
     rest = " ".join(tokens[rest_start:])
 
     flags = SkillFlags(skill=skill, instructions=instructions)
+
+    # Extract --dind boolean flag using exact token match (avoids false-positives like --dind-extra).
+    rest_tokens = rest.split()
+    if "--dind" in rest_tokens:
+        flags.dind = True
+        rest_tokens = [t for t in rest_tokens if t != "--dind"]
+        rest = " ".join(rest_tokens)
 
     # Extract explicit known --key value flags.
     flag_spans: list[tuple[int, int]] = []

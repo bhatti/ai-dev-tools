@@ -2790,6 +2790,61 @@ def test_23b_skill_quoted_args(base_env: dict[str, str]) -> TestResult:
     return _pass(result, "quoted args parsed: skill and branch context markers correct")
 
 
+def test_23c_skill_dind_flag(base_env: dict[str, str]) -> TestResult:
+    """Verify --dind flag is parsed correctly in the pod.
+
+    Checks:
+      1. --dind sets DOCKER_ENABLED context marker
+      2. --dind is NOT forwarded as instructions or as an unknown flag
+      3. Other flags (--repo, --branch) are still parsed correctly alongside --dind
+    """
+    result = TestResult("skill-dind-flag")
+
+    env = dict(base_env)
+    ws = "/workspace/skill_dind"
+    env["WORKSPACE_DIR"] = ws
+    env["DEFAULT_TRACKER"] = "github"
+    env["DOCKER_HOST"] = "tcp://localhost:2375"
+    env.pop("SLACK_BOT_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLAUDE_CODE_USE_BEDROCK", None)
+
+    with pod_fixture("skill-dind") as pod:
+        env_test = dict(env)
+        env_test["RAW_ARGS"] = "qa-regression --repo https://github.com/bhatti/todo-sample.git --branch main --dind"
+        step = exec_step(pod, "dind-flag",
+                         f"mkdir -p {ws}/logs && "
+                         "python3 -m scripts.skill.run_skill 2>&1 || true",
+                         env_test, timeout=60)
+        result.steps.append(step)
+
+        combined = step.stdout + step.stderr
+        # Must not crash
+        if "traceback" in combined.lower() and "valueerror" in combined.lower():
+            return _fail(result, step, f"unexpected ValueError from flags parser: {combined[-400:]}")
+
+        # SKILL and BRANCH markers must be emitted
+        ctx_err = _check_keys(step, ["SKILL", "BRANCH", "DOCKER_ENABLED"])
+        if ctx_err:
+            return _fail(result, step, f"context markers missing: {ctx_err}")
+
+        val_err = _check_values(step, {
+            "SKILL": "qa-regression",
+            "BRANCH": "main",
+            "DOCKER_ENABLED": "true",
+        })
+        if val_err:
+            return _fail(result, step, val_err)
+
+        # --dind must NOT appear in instructions forwarded to Claude
+        if "--dind" in combined and "instructions" in combined.lower():
+            # Only fail if --dind appears in the prompt/instructions block
+            if "instructions: --dind" in combined or "\"--dind\"" in combined:
+                return _fail(result, step, f"--dind leaked into instructions: {combined[-400:]}")
+
+    return _pass(result, "--dind parsed: DOCKER_ENABLED marker set, skill/branch correct, not leaked to instructions")
+
+
 def test_24_skill_integ_tests(base_env: dict[str, str]) -> TestResult:
     """Run scripts.skill.run_skill with integ-tests skill against todo-sample repo.
 
@@ -5128,6 +5183,8 @@ ALL_TESTS: dict[str, callable] = {
     "pr-audit-slack-routing": test_21_pr_audit_slack_routing,
     "skill-invoke":           test_22_skill_invoke,
     "skill-flag-parsing":     test_23_skill_flag_parsing,
+    "skill-quoted-args":      test_23b_skill_quoted_args,
+    "skill-dind-flag":        test_23c_skill_dind_flag,
     "skill-integ-tests":      test_24_skill_integ_tests,
     "skill-service-awareness": test_25_skill_service_awareness,
     "skill-identifier-passthrough": test_26_skill_identifier_passthrough,

@@ -445,3 +445,55 @@ class TestQuotedPositionalArgs:
         assert f.skill == "my-sprint-skill"
         assert f.branch == "main"
         # No crash — graceful fallback
+
+
+class TestDindFlag:
+    def test_dind_sets_flag(self):
+        f = parse_skill_flags("qa-regression --repo org/myapp --branch main --dind")
+        assert f.dind is True
+        assert f.skill == "qa-regression"
+        assert f.repo == "org/myapp"
+        assert f.branch == "main"
+        assert "--dind" not in (f.instructions or "")
+
+    def test_dind_alone(self):
+        f = parse_skill_flags("qa-regression --dind")
+        assert f.dind is True
+        assert f.skill == "qa-regression"
+
+    def test_no_dind_flag(self):
+        f = parse_skill_flags("qa-regression --repo org/repo")
+        assert f.dind is False
+
+    def test_dind_with_instructions(self):
+        f = parse_skill_flags("qa-regression --dind -- run full suite")
+        assert f.dind is True
+        assert f.instructions == "run full suite"
+        assert "--dind" not in f.instructions
+
+    def test_dind_does_not_trigger_passthrough(self):
+        """--dind is a known boolean flag; it must NOT trigger passthrough mode."""
+        f = parse_skill_flags("qa-regression myapp --dind --branch feat")
+        assert f.dind is True
+        assert f.repo == "myapp"
+        assert f.branch == "feat"
+        assert "--dind" not in (f.instructions or "")
+
+    def test_dind_combined_with_service(self):
+        f = parse_skill_flags("integ --service nginx:alpine --dind --branch main")
+        assert f.dind is True
+        assert f.service == "nginx:alpine"
+        assert f.branch == "main"
+
+    def test_dind_in_instructions_not_parsed(self):
+        """--dind after the ' -- ' separator is instructions text, not a framework flag."""
+        f = parse_skill_flags("ygs-qa -- use --dind for docker")
+        assert f.dind is False
+        assert f.instructions == "use --dind for docker"
+
+    def test_dind_no_false_positive_on_similar_flag(self):
+        """--dind-extra must NOT set flags.dind (exact token match required)."""
+        f = parse_skill_flags("some-skill --dind-extra --branch main")
+        # --dind-extra is unknown → passthrough mode, dind must stay False
+        assert f.dind is False
+        assert "--dind-extra" in f.instructions
