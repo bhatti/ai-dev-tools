@@ -538,3 +538,46 @@ def test_fetch_target_prs_no_target_returns_empty():
     )
     assert prs == []
     assert explicit is False
+
+
+# ---------------------------------------------------------------------------
+# _fetch_single_bb_pr branch fields
+# ---------------------------------------------------------------------------
+
+def test_fetch_single_bb_pr_includes_branch_fields():
+    """_fetch_single_bb_pr must return headRefName and baseRefName so sync_pr can find branches."""
+    from unittest.mock import patch, MagicMock
+    raw_pr = {
+        "id": 49763,
+        "title": "My PR",
+        "state": "OPEN",
+        "created_on": "2026-01-01",
+        "author": {"display_name": "Alice"},
+        "source": {"branch": {"name": "feature/my-branch"}},
+        "destination": {"branch": {"name": "dev"}},
+        "links": {"html": {"href": "https://bitbucket.org/ws/repo/pull-requests/49763"}},
+        "description": "",
+        "participants": [],
+    }
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = raw_pr
+    mock_resp.raise_for_status = MagicMock()
+
+    config = {
+        "BITBUCKET_WORKSPACE": "ws",
+        "BITBUCKET_REPO": "repo",
+        "BITBUCKET_TOKEN": "tok",
+        "BITBUCKET_USERNAME": "user",
+        "DEFAULT_TRACKER": "jira/bitbucket",
+    }
+
+    with patch("scripts.analyze.pr_fetcher._fetch_bb_comments", return_value=[]), \
+         patch("scripts.analyze.pr_fetcher._fetch_bb_diffstat", return_value=[]), \
+         patch("requests.get", return_value=mock_resp):
+        from scripts.analyze.pr_fetcher import _fetch_single_bb_pr
+        pr = _fetch_single_bb_pr(config, 49763)
+
+    assert pr is not None
+    assert pr["headRefName"] == "feature/my-branch", "headRefName must be source branch"
+    assert pr["baseRefName"] == "dev", "baseRefName must be destination branch"
+    assert pr["branch"] == "feature/my-branch", "branch kept for backward compat"
