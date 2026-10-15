@@ -203,7 +203,7 @@ def job_failure(final_status: str, status_data: dict) -> str | None:
     """
     if final_status in ("MAX_TURNS_REACHED", "ERROR"):
         return final_status
-    if status_data.get("signal") == "BLOCKED":
+    if final_status == "BLOCKED" or status_data.get("signal") == "BLOCKED":
         detail = status_data.get("summary") or status_data.get("reason") or ""
         return f"skill reported BLOCKED: {detail}"[:600]
     return None

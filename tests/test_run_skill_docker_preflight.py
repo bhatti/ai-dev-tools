@@ -135,6 +135,9 @@ class TestJobFailure:
         why = job_failure("DONE", {"status": "DONE", "signal": "BLOCKED", "summary": "docker daemon unreachable"})
         assert why and "docker daemon unreachable" in why
 
+    def test_blocked_status_word_fails_the_job(self):
+        assert job_failure("BLOCKED", {"status": "BLOCKED", "reason": "no access"})
+
     @pytest.mark.parametrize("data", [{"status": "DONE"}, {"status": "DONE", "signal": "DONE_WITH_CONCERNS"}])
     def test_normal_completion_passes(self, data):
         assert job_failure("DONE", data) is None
