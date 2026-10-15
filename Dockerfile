@@ -113,7 +113,7 @@ RUN npm install -g \
 
 # Python dependencies
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 120 -r /app/requirements.txt
 
 # Playwright + Chromium for browser-driven testing.
 # Browsers must live in a shared, world-readable path: this step runs as root, but the container
