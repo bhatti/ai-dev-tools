@@ -59,6 +59,39 @@ _FLAG_PATTERN = re.compile(
 # No regex for --dind — use exact token match to avoid false-positives like --dind-extra.
 
 _NUMERIC = re.compile(r"^\d+$")
+_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")  # a Jira key is an identifier, never a repository name
+
+# Slack wraps links as <url|label>; downstream code (clone, tracker detection, the skill prompt) wants the bare url.
+_SLACK_LINK = re.compile(r"<(https?://[^|>\s]+)(?:\|[^>]*)?>")
+# A PR/issue url names its repository, so no separate --repo is needed.
+_GH_ITEM_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?/(?:pull|issues)/\d+")
+_BB_PR_URL = re.compile(r"^https://bitbucket\.org/([\w.-]+/[\w.-]+?)/pull-requests?/\d+")
+
+
+def infer_repo_url(text: str) -> str:
+    """Clone URL of the repository named by ``text`` when it *is* a GitHub PR/issue or Bitbucket PR url ('' otherwise)."""
+    m = _GH_ITEM_URL.match(text or "")
+    if m:
+        return f"https://github.com/{m.group(1)}.git"
+    m = _BB_PR_URL.match(text or "")
+    return f"https://bitbucket.org/{m.group(1)}.git" if m else ""
+
+
+def _apply_url_inference(flags: "SkillFlags", raw: str) -> "SkillFlags":
+    """Derive the repo from a PR/issue url that is the first argument after the skill name (``skill <url> ...``).
+
+    Only that position counts: a link inside free-text instructions is a reference, not a request to clone another
+    repository with the user's token. An explicit --repo wins; a url given as --repo is moved to the instructions.
+    """
+    tokens = raw.split(" -- ", 1)[0].split()
+    first_arg = tokens[1] if len(tokens) > 1 and not tokens[0].startswith("--") else ""
+    if flags.repo and infer_repo_url(flags.repo):
+        flags.instructions = f"{flags.repo} {flags.instructions}".strip()
+        flags.repo = infer_repo_url(flags.repo)
+    elif not flags.repo:
+        flags.repo = infer_repo_url(first_arg)
+    return flags
+
 
 # Matches any --flag that is NOT one of the known framework flags.
 # Presence of an unknown flag triggers passthrough mode (no positional parsing).
@@ -68,6 +101,12 @@ _UNKNOWN_FLAG_RE = re.compile(
 
 
 def parse_skill_flags(raw: str) -> SkillFlags:
+    """Parse a RAW_ARGS string into a SkillFlags dataclass (see ``_parse`` for the two modes)."""
+    cleaned = _SLACK_LINK.sub(r"\1", raw or "").strip()
+    return _apply_url_inference(_parse(cleaned), cleaned)
+
+
+def _parse(raw: str) -> SkillFlags:
     """Parse a RAW_ARGS string into a SkillFlags dataclass.
 
     Two modes depending on whether unknown --flags are present:
@@ -169,7 +208,7 @@ def parse_skill_flags(raw: str) -> SkillFlags:
     for token in pos_tokens:
         if token == "--":
             continue
-        if _NUMERIC.match(token) and not flags.identifier:
+        if (_NUMERIC.match(token) or _ISSUE_KEY.match(token)) and not flags.identifier:
             flags.identifier = token
         elif not flags.repo and not token.startswith("-"):
             flags.repo = token

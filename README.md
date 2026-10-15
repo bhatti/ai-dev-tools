@@ -493,7 +493,16 @@ Run **any** YGS skill against **any** repo with full flag parsing, smart default
 @bot skill ygs-security-review --repo https://github.com/org/repo --branch release-2.0
 @bot skill ygs-investigate -- investigate flaky test JIRA-123 and update Jira
 @bot skill ygs-qa myapp -- run E2E tests
+@bot skill ygs-qa https://github.com/org/repo/pull/12 --url https://staging.example.com
+@bot skill ygs-qa https://github.com/org/repo/pull/12 --mode regression --baseline-url https://prod.example.com --url https://pr-12.example.com
+@bot skill ygs-qa https://github.com/org/repo/pull/12 --mode regression --baseline-image app:1.4 --image app:pr-12 --dind
+@bot skill ygs-flaky-test --repo org/repo -- tests/cart.test.js
+@bot skill ygs-flaky-test https://github.com/org/repo/issues/42
 ```
+
+A GitHub PR/issue URL or a Bitbucket PR URL as the first argument names its repository, so `--repo` is not needed (explicit `--repo` wins; a link inside free text never changes the repo). A bare Jira key becomes the identifier; a test path or ticket text goes after `--` or with `--repo`.
+`ygs-qa` and `ygs-flaky-test` are backed by `scripts/qa`, `scripts/flaky` and `scripts/common/pr_context.py`: see [QA and flaky-test skills](docs/qa-and-flaky-skills.md).
+`--image` / `--compose` / `--dind` need a Docker daemon; without one the job stops with BLOCKED and says to add `--dind`.
 
 The default image (`plexobject/ai-dev-tools:latest`) is based on `python:3.12-bookworm` with
 Node 22 included, so skills that use native npm packages (esbuild, @swc/core, etc.) work
@@ -537,7 +546,7 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 | `--service-port <port>` | Port the sidecar listens on; skill accesses it at `localhost:<port>` | `8080` |
 | `--service-cmd <cmd>` | Documents the sidecar command in the prompt; actual command must be set via `ServiceCommand` job variable at submission time | Image default |
 | `--service-args <args>` | Extra args described in the prompt; actual args via `ServiceArgs` job variable | None |
-| `--dind` | Enable Docker-in-Docker: starts a `docker:dind` sidecar so the skill can run `docker build`/`docker run`. `DOCKER_HOST` is set automatically to `tcp://localhost:2375`. | Disabled |
+| `--dind` | Enable Docker-in-Docker: starts a `docker:dind` sidecar so the skill can run `docker build`/`docker run`. `DOCKER_HOST` is set automatically to `tcp://localhost:2375`. The job fails fast (BLOCKED) if the daemon is unreachable, and also when `--image`/`--compose` are used without it. | Disabled |
 | `-- <text>` | Additional instructions passed to the skill | None |
 
 ### Container Image (`RunImage`)

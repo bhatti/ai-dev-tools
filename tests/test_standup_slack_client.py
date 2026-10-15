@@ -470,40 +470,38 @@ def test_upload_file_no_thread_ts(mock_post, mock_put, mock_get, config_with_sla
 # post_report
 # ---------------------------------------------------------------------------
 
-@patch("scripts.standup.slack_client.upload_file", return_value=True)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
+@patch("scripts.standup.slack_client.upload_file")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_success(mock_post, mock_render, mock_upload, config_with_slack):
-    """post_report posts text, renders HTML, uploads file, returns True."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000005.000200"}
-    )
+def test_post_report_success(mock_post, mock_upload):
+    """post_report posts the text once with a single link to the job's #reports card; no file upload."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000005.000200"})
+    config = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_CHANNEL": "#test",
+        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
+        "JOB_ID": "job-abc-123",
+    }
 
-    ok = post_report(config_with_slack, "slack text", "# md text",
-                     title="My Report", filename="report.html")
+    ok = post_report(config, "slack text", "# md text", title="My Report", filename="report.html")
+
     assert ok is True
-    mock_render.assert_called_once_with("My Report", "# md text")
-    assert mock_upload.call_count == 1
-    # HTML must be threaded to the new message's ts (no existing thread)
-    _, upload_kwargs = mock_upload.call_args
-    assert upload_kwargs.get("thread_ts") == "1700000005.000200"
+    assert mock_post.call_count == 1
+    text = mock_post.call_args.kwargs["json"]["text"]
+    assert text.startswith("slack text")
+    assert "📎 <https://formicary.example.com/dashboard/jobs/requests/job-abc-123#reports|View reports>" in text
+    mock_upload.assert_not_called()
 
 
-@patch("scripts.standup.slack_client.upload_file", return_value=True)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_existing_thread_ts(mock_post, mock_render, mock_upload, config_with_slack):
-    """When an existing thread_ts is passed, the upload threads to that ts."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000009.000001"}
-    )
+def test_post_report_existing_thread_ts(mock_post, config_with_slack):
+    """An existing thread_ts is passed through to the Slack post."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000009.000001"})
 
-    ok = post_report(config_with_slack, "slack text", "# md",
-                     title="Report", filename="report.html",
+    ok = post_report(config_with_slack, "slack text", "# md", title="Report", filename="report.html",
                      thread_ts="1700000001.000001")
+
     assert ok is True
-    _, upload_kwargs = mock_upload.call_args
-    assert upload_kwargs.get("thread_ts") == "1700000001.000001"
+    assert mock_post.call_args.kwargs["json"]["thread_ts"] == "1700000001.000001"
 
 
 @patch("scripts.standup.slack_client.requests.post")
@@ -515,45 +513,14 @@ def test_post_report_text_fails_returns_false(mock_post, config_with_slack):
     assert ok is False
 
 
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
-@patch("scripts.standup.slack_client.requests.post")
-def test_post_report_upload_fails_is_nonfatal(mock_post, mock_render, mock_upload, config_with_slack):
-    """Upload failure is non-fatal — post_report still returns True."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000010.000001"}
-    )
-
-    ok = post_report(config_with_slack, "text", "# md",
-                     title="Report", filename="report.html")
-    assert ok is True  # text posted OK → True despite upload failure
-
-
-@patch("scripts.common.report_renderer.render_simple_html", side_effect=RuntimeError("render error"))
-@patch("scripts.standup.slack_client.requests.post")
-def test_post_report_render_exception_is_nonfatal(mock_post, mock_render, config_with_slack):
-    """HTML render exception is non-fatal — post_report still returns True."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000011.000001"}
-    )
-
-    ok = post_report(config_with_slack, "text", "# md",
-                     title="Report", filename="report.html")
-    assert ok is True
-
-
 # ---------------------------------------------------------------------------
-# post_report — fallback link when upload fails
+# post_report — the reports link
 # ---------------------------------------------------------------------------
 
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_uses_by_job_link(mock_post, mock_render, mock_upload):
-    """When Slack upload fails, fallback posts the by-job formicary artifact link."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000020.000001"}
-    )
+def test_post_report_link_ignores_legacy_filename_and_task_type(mock_post):
+    """filename/task_type are legacy arguments: the link always targets the job's #reports card."""
+    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000020.000001"})
     config = {
         "SLACK_BOT_TOKEN": "xoxb-test",
         "SLACK_CHANNEL": "#test",
@@ -561,76 +528,16 @@ def test_post_report_fallback_uses_by_job_link(mock_post, mock_render, mock_uplo
         "JOB_ID": "job-abc-123",
     }
 
-    post_report(config, "text", "# md",
-                title="PR Audit", filename="pr_audit_report.html")
+    post_report(config, "text", "# md", title="PR Audit", filename="pr_audit_report.html", task_type="audit-prs")
 
-    # Two posts: main message + fallback
-    assert mock_post.call_count == 2
-    fallback_text = mock_post.call_args_list[1].kwargs["json"].get("text", "")
-    # by-job endpoint in fallback
-    assert "by-job" in fallback_text
-    assert "pr_audit_report.html" in fallback_text
-    # Job page link for "All artifacts"
-    assert "dashboard/jobs/requests/job-abc-123" in fallback_text
+    assert mock_post.call_count == 1
+    text = mock_post.call_args.kwargs["json"]["text"]
+    assert "dashboard/jobs/requests/job-abc-123#reports" in text
+    assert "by-job" not in text and "task=" not in text and "pr_audit_report.html" not in text
 
 
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
 @patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_posts_by_job_link(mock_post, mock_render, mock_upload):
-    """Fallback posts the by-job artifact endpoint link."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000021.000001"}
-    )
-    config = {
-        "SLACK_BOT_TOKEN": "xoxb-test",
-        "SLACK_CHANNEL": "#test",
-        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
-        "JOB_ID": "job-xyz-456",
-    }
-
-    post_report(config, "text", "# md",
-                title="Standup", filename="standup_report.html")
-
-    assert mock_post.call_count == 2
-    fallback_text = mock_post.call_args_list[1].kwargs["json"].get("text", "")
-    # by-job endpoint with default task_type="post"
-    assert "by-job" in fallback_text
-    assert "task=post" in fallback_text
-    assert "file=reports/standup_report.html" in fallback_text
-    # Job page link for "All artifacts"
-    assert "dashboard/jobs/requests/job-xyz-456" in fallback_text
-
-
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
-@patch("scripts.standup.slack_client.requests.post")
-def test_post_report_fallback_uses_caller_task_type(mock_post, mock_render, mock_upload):
-    """Fallback uses the task_type passed by the caller, not a hardcoded default."""
-    mock_post.return_value = MagicMock(
-        ok=True, json=lambda: {"ok": True, "ts": "1700000025.000001"}
-    )
-    config = {
-        "SLACK_BOT_TOKEN": "xoxb-test",
-        "SLACK_CHANNEL": "#test",
-        "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
-        "JOB_ID": "job-audit-789",
-    }
-
-    post_report(config, "text", "# md",
-                title="PR Audit", filename="pr_audit_report.html",
-                task_type="audit-prs")
-
-    assert mock_post.call_count == 2
-    fallback_text = mock_post.call_args_list[1].kwargs["json"].get("text", "")
-    assert "task=audit-prs" in fallback_text
-    assert "file=reports/pr_audit_report.html" in fallback_text
-
-
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.common.report_renderer.render_simple_html", return_value="<html/>")
-@patch("scripts.standup.slack_client.requests.post")
-def test_post_report_no_fallback_when_no_job_id(mock_post, mock_render, mock_upload):
+def test_post_report_no_fallback_when_no_job_id(mock_post):
     """Fallback link is skipped when JOB_ID is absent."""
     mock_post.return_value = MagicMock(
         ok=True, json=lambda: {"ok": True, "ts": "1700000022.000001"}
@@ -692,52 +599,36 @@ def test_pr_group_fallback_approved_by_list():
 # upload_html_report
 # ---------------------------------------------------------------------------
 
-@patch("scripts.standup.slack_client.upload_file", return_value=True)
+@patch("scripts.standup.slack_client.upload_file")
 @patch("scripts.standup.slack_client.requests.post")
 def test_upload_html_report_success(mock_post, mock_upload, config_with_slack):
-    """Returns True and calls upload_file when html_content is provided."""
-    ok = upload_html_report(config_with_slack, "<html>hi</html>", "report.html",
-                            thread_ts="1700000001.000001")
-    assert ok is True
-    assert mock_upload.call_count == 1
-    _, upload_kwargs = mock_upload.call_args
-    assert upload_kwargs.get("thread_ts") == "1700000001.000001"
-
-
-def test_upload_html_report_empty_content(config_with_slack):
-    """Returns False immediately when html_content is empty — no upload attempted."""
-    ok = upload_html_report(config_with_slack, "", "report.html", thread_ts=None)
-    assert ok is False
-
-
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
-@patch("scripts.standup.slack_client.requests.post")
-def test_upload_html_report_fallback_to_formicary(mock_post, mock_upload, config_with_slack):
-    """Falls back to by-job formicary link when Slack upload fails."""
+    """Posts the #reports link into the thread instead of uploading the HTML file."""
     mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000002.000001"})
-    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
-              "JOB_ID": "job-1"}
-    ok = upload_html_report(config, "<html/>", "report.html", thread_ts="1700000001.0")
+    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com", "JOB_ID": "job-1"}
+
+    ok = upload_html_report(config, "<html>hi</html>", "report.html", thread_ts="1700000001.000001")
+
     assert ok is True
-    assert mock_post.call_count == 1
-    fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
-    assert "by-job" in fallback_text
-    assert "report.html" in fallback_text
+    mock_upload.assert_not_called()
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["thread_ts"] == "1700000001.000001"
+    assert "dashboard/jobs/requests/job-1#reports" in payload["text"]
 
 
-@patch("scripts.standup.slack_client.upload_file", return_value=False)
 @patch("scripts.standup.slack_client.requests.post")
-def test_upload_html_report_fallback_to_by_job_link(mock_post, mock_upload, config_with_slack):
-    """Falls back to by-job link when Slack upload fails."""
-    mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True, "ts": "1700000003.000001"})
-    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com",
-              "JOB_ID": "job-2"}
-    ok = upload_html_report(config, "<html/>", "report.html",
-                            thread_ts="1700000001.0", task_type="run")
-    assert ok is True
-    fallback_text = mock_post.call_args.kwargs["json"].get("text", "")
-    assert "by-job" in fallback_text
-    assert "task=run" in fallback_text
+def test_upload_html_report_without_job_id_posts_nothing(mock_post, config_with_slack):
+    """Without JOB_ID there is no link to post: returns False and sends nothing."""
+    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com"}
+    assert upload_html_report(config, "<html/>", "report.html", thread_ts="1700000001.0") is False
+    mock_post.assert_not_called()
+
+
+@patch("scripts.standup.slack_client.requests.post")
+def test_upload_html_report_post_fallback_false_posts_nothing(mock_post, config_with_slack):
+    """post_fallback=False disables the link entirely (legacy switch)."""
+    config = {**config_with_slack, "FORMICARY_PUBLIC_URL": "https://formicary.example.com", "JOB_ID": "job-2"}
+    assert upload_html_report(config, "<html/>", "report.html", thread_ts="1700000001.0", post_fallback=False) is False
+    mock_post.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -903,9 +794,8 @@ def test_slack_client_main_shows_artifact_link_when_report_exists(tmp_path):
         "WORKSPACE_DIR": str(tmp_path),
         "MESSAGE": ":white_check_mark: Skill done.",
     })
-    assert "View report.html" in posted_text
-    assert "task=run" in posted_text
-    assert "file=reports/report.html" in posted_text
+    assert "<https://formicary.example.com/dashboard/jobs/requests/job-abc#reports|View reports>" in posted_text
+    assert "by-job" not in posted_text
     assert "View job in Formicary" not in posted_text
 
 

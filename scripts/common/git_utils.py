@@ -112,6 +112,27 @@ def _redact_url(url: str) -> str:
     return re.sub(r"://[^@]*@", "://***@", url)
 
 
+_TOKEN_ENV = {"github.com": "${GH_TOKEN:-$GITHUB_TOKEN}", "bitbucket.org": "${BITBUCKET_TOKEN:-$BITBUCKET_APP_PASSWORD}"}
+
+
+def drop_stored_credentials(repo: Path, clean_url: str, username: str) -> None:
+    """Remove the token that ``clone_repo`` left in ``.git/config`` (the credential-bearing origin URL).
+
+    Anything that can read the checkout, such as a PR's tests or build scripts, could otherwise read the token. The
+    origin URL becomes ``clean_url`` and a repo-local credential helper supplies the token from the *environment of
+    the process that runs git*, so a command run with the platform's tokens scrubbed (``scripts.common.env_scrub``)
+    gets none, while later fetches by the skill itself still authenticate.
+    """
+    import shlex
+    from urllib.parse import urlparse
+
+    _run_git(["git", "remote", "set-url", "origin", clean_url], cwd=repo)
+    host = urlparse(clean_url).hostname or ""
+    if host in _TOKEN_ENV:
+        helper = (f'!f() {{ [ "$1" = get ] || exit 0; echo username={shlex.quote(username)}; echo "password={_TOKEN_ENV[host]}"; }}; f')
+        _run_git(["git", "config", "--local", f"credential.https://{host}.helper", helper], cwd=repo)
+
+
 def clone_repo(
     url: str,
     dest: Path,

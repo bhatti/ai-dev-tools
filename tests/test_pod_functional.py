@@ -2803,12 +2803,16 @@ def test_23b_skill_quoted_args(base_env: dict[str, str]) -> TestResult:
 
 
 def test_23c_skill_dind_flag(base_env: dict[str, str]) -> TestResult:
-    """Verify --dind flag is parsed correctly in the pod.
+    """--dind requested but no Docker daemon reachable must be BLOCKED, not a run that looks finished.
+
+    The previous version of this test faked DOCKER_HOST and only checked flag parsing, so it passed
+    while real jobs (no dind sidecar, or a sidecar that never came up) produced misleading reports.
+    The positive path with a real docker:dind sidecar is covered by `skill-dind-real`.
 
     Checks:
-      1. --dind sets DOCKER_ENABLED context marker
-      2. --dind is NOT forwarded as instructions or as an unknown flag
-      3. Other flags (--repo, --branch) are still parsed correctly alongside --dind
+      1. run_skill exits non-zero and writes skill_result.json with signal BLOCKED
+      2. the reason says the docker-dind sidecar is not reachable and names DOCKER_HOST
+      3. no Claude run was attempted (no SKILL_LOADED marker)
     """
     result = TestResult("skill-dind-flag")
 
@@ -2826,35 +2830,20 @@ def test_23c_skill_dind_flag(base_env: dict[str, str]) -> TestResult:
         env_test["RAW_ARGS"] = "qa-regression --repo https://github.com/bhatti/todo-sample.git --branch main --dind"
         step = exec_step(pod, "dind-flag",
                          f"mkdir -p {ws}/logs && "
-                         "python3 -m scripts.skill.run_skill 2>&1 || true",
-                         env_test, timeout=60)
+                         "python3 -m scripts.skill.run_skill 2>&1; "
+                         f"echo \"::add-task-context RUN_RC::$?\"; "
+                         f"echo \"::add-task-context SIGNAL::$(python3 -c \"import json;print(json.load(open('{ws}/skill_result.json')).get('signal'))\")\"; "
+                         f"echo \"::add-task-context REASON_OK::$(grep -c 'docker-dind sidecar' {ws}/skill_result.json)\"",
+                         env_test, timeout=180)
         result.steps.append(step)
 
-        combined = step.stdout + step.stderr
-        # Must not crash
-        if "traceback" in combined.lower() and "valueerror" in combined.lower():
-            return _fail(result, step, f"unexpected ValueError from flags parser: {combined[-400:]}")
-
-        # SKILL and BRANCH markers must be emitted
-        ctx_err = _check_keys(step, ["SKILL", "BRANCH", "DOCKER_ENABLED"])
-        if ctx_err:
-            return _fail(result, step, f"context markers missing: {ctx_err}")
-
-        val_err = _check_values(step, {
-            "SKILL": "qa-regression",
-            "BRANCH": "main",
-            "DOCKER_ENABLED": "true",
-        })
+        val_err = _check_values(step, {"RUN_RC": "1", "SIGNAL": "BLOCKED", "REASON_OK": "1"})
         if val_err:
             return _fail(result, step, val_err)
+        if "SKILL_LOADED" in step.context:
+            return _fail(result, step, "Claude/skill loading started even though Docker was unreachable")
 
-        # --dind must NOT appear in instructions forwarded to Claude
-        if "--dind" in combined and "instructions" in combined.lower():
-            # Only fail if --dind appears in the prompt/instructions block
-            if "instructions: --dind" in combined or "\"--dind\"" in combined:
-                return _fail(result, step, f"--dind leaked into instructions: {combined[-400:]}")
-
-    return _pass(result, "--dind parsed: DOCKER_ENABLED marker set, skill/branch correct, not leaked to instructions")
+    return _pass(result, "--dind with no reachable daemon -> BLOCKED with an actionable reason, nothing else ran")
 
 
 def test_24_skill_integ_tests(base_env: dict[str, str]) -> TestResult:
@@ -5220,6 +5209,10 @@ ALL_TESTS: dict[str, callable] = {
     "open-prs-gh":               test_44_open_prs_gh,
     "resync-prs-dry-run":        test_45_resync_prs_dry_run,
 }
+
+# Flaky-test and QA tooling pod tests live in their own module to keep this file manageable.
+from tests.pod_qa_flaky_tests import build_tests as _build_qa_flaky_tests  # noqa: E402
+ALL_TESTS.update(_build_qa_flaky_tests(sys.modules[__name__]))
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
 

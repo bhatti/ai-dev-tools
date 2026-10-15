@@ -95,6 +95,34 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_SAFE_URL = re.compile(r"^(?:https?://|/|\./|\.\./|#|[\w.-]+(?:/|$))", re.I)
+
+
+def _safe_url(url: str) -> str | None:
+    """Attribute-safe URL, or None when the scheme is not http(s)/relative (javascript:, data:, ...)."""
+    url = url.strip()
+    if not _SAFE_URL.match(url) or re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I) and not re.match(r"^https?:", url, re.I):
+        return None
+    return url.replace('"', "%22").replace("'", "%27").replace(" ", "%20")
+
+
+def _link(m: re.Match) -> str:
+    url = _safe_url(m.group(2))
+    return f'<a href="{url}">{m.group(1)}</a>' if url else m.group(1)
+
+
+def _image(m: re.Match) -> str:
+    url = _safe_url(m.group(2))
+    alt = m.group(1).replace('"', "&quot;")
+    return f'<img src="{url}" alt="{alt}" style="max-width:100%">' if url else alt
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Cells of a markdown table row; ``\\|`` inside a cell is a literal pipe, not a separator."""
+    cells = re.split(r"(?<!\\)\|", line.strip().strip("|"))
+    return [c.replace("\\|", "|").strip() for c in cells]
+
+
 def _inline_md_to_html(text: str) -> str:
     """Convert inline markdown (bold, italic, code, images, links) to HTML.
 
@@ -102,6 +130,14 @@ def _inline_md_to_html(text: str) -> str:
     to Unicode before any further processing so they render correctly in HTML.
     """
     text = convert_slack_emoji(text)
+    # Backslash-escaped markdown punctuation is literal text: park it before any markup is interpreted.
+    escapes: list[str] = []
+
+    def _park(m: re.Match) -> str:
+        escapes.append(m.group(1))
+        return f"\x00{len(escapes) - 1}\x00"
+
+    text = re.sub(r"\\([\[\]`<>|*_#])", _park, text)
     # Inline code first (prevents double-processing)
     parts: list[str] = []
     remainder = text
@@ -126,12 +162,12 @@ def _inline_md_to_html(text: str) -> str:
     # Italic * (not bold) — only word-boundary to avoid matching list bullets
     text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
     # Images ![alt](url) — before links so the ! prefix is consumed first
-    text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%">', text)
+    text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _image, text)
     # Standard markdown links [text](url)
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _link, text)
     # Slack mrkdwn links <url|text> — after HTML escaping appear as &lt;url|text&gt;
     text = re.sub(r'&lt;(https?://[^|&]+)\|([^&]+)&gt;', r'<a href="\1">\2</a>', text)
-    return text
+    return re.sub(r"\x00(\d+)\x00", lambda m: _escape_html(escapes[int(m.group(1))]), text)
 
 
 def render_simple_html(title: str, md_text: str) -> str:
@@ -197,7 +233,7 @@ def render_simple_html(title: str, md_text: str) -> str:
         # Table rows
         if line.startswith("|") and "|" in line[1:]:
             _flush_list()
-            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = _split_table_row(line)
             # Separator row (|---|---|)
             if all(re.match(r"^[:\-\s]+$", c) for c in cells if c):
                 if in_table and not table_header_done:

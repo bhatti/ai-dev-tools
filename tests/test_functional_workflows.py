@@ -757,7 +757,7 @@ def print_result(r: TestResult) -> None:
 # ── Infrastructure health check ──────────────────────────────────────────────
 
 def _check_infra_health() -> None:
-    """Verify Docker daemon and ant k8s cluster (kind-hedge) are reachable.
+    """Verify Docker daemon and ant k8s cluster are reachable.
 
     Fails fast with a clear error rather than submitting jobs that queue forever
     on an unavailable cluster.  Uses subprocess so no Python k8s client needed.
@@ -778,7 +778,7 @@ def _check_infra_health() -> None:
     # 2. Ant worker k8s cluster — look for a kind context first, then fall back to current context.
     kube_ctx = os.environ.get("KUBE_CONTEXT", "")
     if not kube_ctx:
-        # Prefer kind-hedge; fall back to whatever kubectl is currently using.
+        # No KUBE_CONTEXT: prefer a kind context, otherwise whatever kubectl is currently using.
         ctx_result = _sp.run(["kubectl", "config", "get-contexts", "-o", "name"],
                              capture_output=True, text=True, timeout=10)
         contexts = ctx_result.stdout.splitlines()

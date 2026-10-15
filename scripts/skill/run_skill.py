@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -32,7 +33,8 @@ from scripts.common.config import (
     load_config,
     validate_claude_config,
 )
-from scripts.common.git_utils import clone_repo, create_branch, resolve_clone_auth
+from scripts.common.git_utils import clone_repo, create_branch, drop_stored_credentials, resolve_clone_auth
+from scripts.common.docker_check import CLI_MISSING, CLI_NOT_EXECUTABLE, DIND_HINT, docker_preflight
 from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
 from scripts.common.slack_format import format_for_slack
 from scripts.standup.slack_client import notify as slack_notify
@@ -45,6 +47,34 @@ from scripts.adhoc.run_skill import (
     _strip_for_slack,
     _system_prompt_for_skill,
 )
+
+_DOCKER_USE_RE = re.compile(r"(?:^|\s)--(?:baseline-)?image(?=\s|=|$)|(?:^|\s)--compose(?:-file)?(?=\s|=|$)|(?:^|\s)--kind\s+(?:docker|compose)(?=\s|$)")
+
+
+def docker_required(instructions: str) -> bool:
+    """Do the skill instructions ask for container-based work (--image / --baseline-image / --compose)?"""
+    return bool(_DOCKER_USE_RE.search(instructions or ""))
+
+
+def docker_blocker(flags: SkillFlags) -> str | None:
+    """Return a BLOCKED message when the skill needs Docker (``--dind``, ``--image``, ``--compose``) and the daemon is unreachable.
+
+    Fails fast and says what to do, instead of letting the model run a whole skill that can only report
+    "Cannot connect to the Docker daemon" (a run that proved nothing but looked finished). With ``--dind`` the daemon
+    is probed at DOCKER_HOST (default ``tcp://localhost:2375``), as the sidecar listens there.
+    """
+    if not (flags.dind or docker_required(flags.instructions)):
+        return None
+    host = os.environ.get("DOCKER_HOST", "").strip() or ("tcp://localhost:2375" if flags.dind else "")
+    ok, msg = docker_preflight(timeout=90 if flags.dind else 10, host=host or None)
+    if ok:
+        return None
+    if msg in (CLI_MISSING, CLI_NOT_EXECUTABLE):
+        return msg
+    if flags.dind:
+        return (f"Docker-in-Docker was requested but the daemon at DOCKER_HOST={host} is not reachable. "
+                "Check that the docker-dind sidecar started (privileged, enough memory) in the job's pod.")
+    return f"{msg} The instructions use --image/--compose, which need Docker."
 
 
 def _clone_target_repo(
@@ -76,6 +106,12 @@ def _clone_target_repo(
     except Exception as e:
         print(f"[skill] branch checkout failed ({branch}): {e}", file=sys.stderr, flush=True)
 
+    if http_token:  # the checkout is read by code we did not write (tests, builds): keep the token out of .git/config
+        try:
+            drop_stored_credentials(dest, clone_url, http_username)
+        except Exception as e:
+            print(f"[skill] could not remove stored credentials from {dest}/.git/config: {e}", file=sys.stderr, flush=True)
+            return None
     return dest
 
 
@@ -180,6 +216,17 @@ def main() -> None:
     if not flags.skill:
         print("[skill] ERROR: no skill name in RAW_ARGS", file=sys.stderr, flush=True)
         _write_result(workspace, {"status": "ERROR", "reason": "no skill name provided"})
+        sys.exit(1)
+
+    # Fail fast when the skill needs Docker and there is no daemon (see docker_blocker).
+    blocker = docker_blocker(flags)
+    if blocker:
+        print(f"[skill] BLOCKED: {blocker}", file=sys.stderr, flush=True)
+        _write_result(workspace, {"status": "ERROR", "signal": "BLOCKED", "reason": blocker})
+        try:
+            slack_notify(config, f"⚠️ Skill `/{flags.skill}` blocked: {blocker[:500]}")
+        except Exception as e:  # noqa: BLE001 - the job still fails below; the notification is best effort
+            print(f"[skill] could not post the blocked notification: {type(e).__name__}", file=sys.stderr, flush=True)
         sys.exit(1)
 
     # Resolve tracker, repo, branch.

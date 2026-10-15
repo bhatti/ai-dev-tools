@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
+from scripts.skill.flags import SkillFlags, infer_repo_url, parse_skill_flags, resolve_repo, resolve_tracker
 
 
 # ─── parse_skill_flags ────────────────────────────────────────────────────────
@@ -497,3 +497,79 @@ class TestDindFlag:
         # --dind-extra is unknown → passthrough mode, dind must stay False
         assert f.dind is False
         assert "--dind-extra" in f.instructions
+
+
+class TestUrlInference:
+    """A PR/issue url names its repo: no --repo needed, and Slack's <url|label> wrapper is stripped."""
+
+    def test_github_pr_url_sets_repo_and_stays_in_instructions(self):
+        f = parse_skill_flags("ygs-qa https://github.com/org/repo/pull/12 --url http://staging")
+        assert f.repo == "https://github.com/org/repo.git"
+        assert "https://github.com/org/repo/pull/12" in f.instructions and "--url http://staging" in f.instructions
+
+    def test_bitbucket_pr_url_with_overview_suffix(self):
+        f = parse_skill_flags("ygs-qa https://bitbucket.org/ws/repo/pull-requests/12/overview")
+        assert f.repo == "https://bitbucket.org/ws/repo.git"
+        assert resolve_tracker(f, {"DEFAULT_TRACKER": "github"}) == "jira"
+
+    def test_slack_wrapped_link_is_unwrapped(self):
+        raw = ("ygs-qa <https://bitbucket.org/example-org/example-repo/pull-requests/12/overview|bitbucket.org/example-org/example-repo/pull-requests/12/overview> "
+               "--version 1.2.3-rc1 --branch feature/x")
+        f = parse_skill_flags(raw)
+        assert f.repo == "https://bitbucket.org/example-org/example-repo.git" and f.branch == "feature/x"
+        assert "<" not in f.instructions and "|" not in f.instructions
+        assert f.instructions.startswith("https://bitbucket.org/example-org/example-repo/pull-requests/12/overview")
+        assert "--version 1.2.3-rc1" in f.instructions
+
+    def test_explicit_repo_wins_over_the_url(self):
+        f = parse_skill_flags("ygs-qa https://github.com/org/repo/pull/12 --repo https://github.com/fork/other.git")
+        assert f.repo == "https://github.com/fork/other.git"
+
+    def test_github_issue_url(self):
+        assert parse_skill_flags("ygs-flaky-test https://github.com/org/repo/issues/42").repo == "https://github.com/org/repo.git"
+
+    def test_repo_flag_given_a_pr_url_is_normalised(self):
+        f = parse_skill_flags("ygs-qa --repo https://github.com/org/repo/pull/12 --url http://x")
+        assert f.repo == "https://github.com/org/repo.git" and "pull/12" in f.instructions
+
+    def test_jira_url_and_plain_text_infer_nothing(self):
+        assert parse_skill_flags("ygs-qa https://example.atlassian.net/browse/ABC-1 --url http://x").repo == ""
+        assert parse_skill_flags("ygs-qa -- review the changes in github.com/org/repo").repo == ""
+
+    def test_infer_repo_url_direct(self):
+        assert infer_repo_url("https://github.com/a/b.git/pull/3") == "https://github.com/a/b.git"
+        assert infer_repo_url("see https://github.com/a/b/pull/3 now") == ""  # must *be* the url, not contain one
+        assert infer_repo_url("") == ""
+
+
+class TestUrlInferenceIsConservative:
+    def test_a_link_inside_free_text_never_changes_the_repository(self):
+        """A reference link in prose must not make the runner clone another repo with the user's token."""
+        for raw in ("ygs-qa -- check https://github.com/evil/x/issues/1 and then", "ygs-qa --url http://staging https://github.com/evil/x/pull/1",
+                    "ygs-flaky-test -- the checkout test, see https://github.com/evil/x/issues/9"):
+            assert parse_skill_flags(raw).repo == "", raw
+
+    def test_only_the_first_argument_after_the_skill_name_counts(self):
+        assert parse_skill_flags("ygs-qa https://github.com/org/repo/pull/12 --url http://x").repo == "https://github.com/org/repo.git"
+        assert parse_skill_flags("ygs-qa --mode regression https://github.com/org/repo/pull/12").repo == ""
+
+
+class TestIssueKeyArgument:
+    def test_a_jira_key_is_an_identifier_not_a_repository(self):
+        f = parse_skill_flags("ygs-qa ABC-123")
+        assert f.identifier == "ABC-123" and f.repo == ""
+
+    def test_key_next_to_an_explicit_repo(self):
+        f = parse_skill_flags("ygs-flaky-test PLAT-9 --repo org/repo")
+        assert f.identifier == "PLAT-9" and f.repo == "org/repo"
+
+    def test_a_repo_named_like_a_key_with_lowercase_is_still_a_repo(self):
+        assert parse_skill_flags("ygs-analyze my-app-1").repo == "my-app-1"
+
+
+class TestInferenceIsAnchored:
+    @pytest.mark.parametrize("arg", ["https://evil.example/?u=https://github.com/a/b/pull/1", "http://github.com/a/b/pull/1",
+                                     "https://github.com.evil.example/a/b/pull/1", "xhttps://github.com/a/b/pull/1"])
+    def test_urls_that_merely_contain_a_pr_url_do_not_name_the_repo(self, arg):
+        assert parse_skill_flags(f"ygs-qa {arg}").repo != "https://github.com/a/b.git"
+        assert infer_repo_url(arg) == ""

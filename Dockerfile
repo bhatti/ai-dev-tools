@@ -115,9 +115,13 @@ RUN npm install -g \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Playwright + Chromium for browser-driven testing
+# Playwright + Chromium for browser-driven testing.
+# Browsers must live in a shared, world-readable path: this step runs as root, but the container
+# runs as `agent` (HOME=/home/agent), which would otherwise find no browsers ("Executable doesn't exist").
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN playwright install chromium \
-  && playwright install-deps chromium
+  && playwright install-deps chromium \
+  && chmod -R a+rX /opt/ms-playwright
 
 # Application scripts and project-level skills
 COPY scripts/ /app/scripts/
