@@ -194,6 +194,21 @@ def _find_report_content(workspace: Path, skill: str = "") -> str | None:
     return None
 
 
+def job_failure(final_status: str, status_data: dict) -> str | None:
+    """Why the job must fail, or None.
+
+    MAX_TURNS_REACHED and ERROR fail the job so Formicary triggers notify-error. So does a BLOCKED signal:
+    a skill that could not run its prerequisites (daemon, tooling, credentials) is never a green job,
+    whatever status word accompanies it.
+    """
+    if final_status in ("MAX_TURNS_REACHED", "ERROR"):
+        return final_status
+    if status_data.get("signal") == "BLOCKED":
+        detail = status_data.get("summary") or status_data.get("reason") or ""
+        return f"skill reported BLOCKED: {detail}"[:600]
+    return None
+
+
 def main() -> None:
     config = load_config()
     workspace = get_workspace_dir(config)
@@ -277,6 +292,8 @@ def main() -> None:
     docker_info = ""
     if flags.dind or docker_host:
         effective_host = docker_host or "tcp://localhost:2375"
+        # The prompt below promises this host, so the environment Claude inherits must carry it.
+        os.environ["DOCKER_HOST"] = effective_host
         docker_info = (
             f"\n\n## Docker Daemon\n\n"
             f"A Docker-in-Docker daemon is running as a sidecar.\n"
@@ -406,8 +423,9 @@ def main() -> None:
 
     # Treat MAX_TURNS_REACHED as a job failure so Formicary marks it failed
     # and triggers notify-error (the on_failed task).
-    if final_status in ("MAX_TURNS_REACHED", "ERROR"):
-        print(f"[skill] FAILURE: {final_status} — marking job failed", file=sys.stderr, flush=True)
+    failure = job_failure(final_status, status_data)
+    if failure:
+        print(f"[skill] FAILURE: {failure} — marking job failed", file=sys.stderr, flush=True)
         sys.exit(1)
 
     sys.exit(0)

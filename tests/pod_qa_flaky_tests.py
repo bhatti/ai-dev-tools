@@ -485,6 +485,13 @@ python3 -c "import pathlib;print('::add-task-context ENV_LOG::' + str(pathlib.Pa
 mkdir -p $WORKSPACE_DIR/logs
 python3 -m scripts.skill.run_skill 2>&1 | tail -25
 echo "::add-task-context DOCKER_INFO::$(docker info --format '{{.ServerVersion}}' 2>&1 | head -1)"
+# The model's Bash inherits only the whitelisted env: docker must work with exactly that environment.
+python3 - <<'PYEOF'
+import subprocess
+from scripts.common.claude_runner import build_claude_env
+r = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], env=build_claude_env(), capture_output=True, text=True)
+print("::add-task-context CLAUDE_ENV_DOCKER::" + ((r.stdout or r.stderr).strip().splitlines() or ["(none)"])[0])
+PYEOF
 ''', env, timeout=300)
             result.steps.append(step)
             bad = markers_ok(result, step, {"SKILL": "qa-regression", "BRANCH": "main", "DOCKER_ENABLED": "true"})
@@ -494,6 +501,9 @@ echo "::add-task-context DOCKER_INFO::$(docker info --format '{{.ServerVersion}}
                 return h._fail(result, step, "blocked even though a docker:dind sidecar is running")
             if not step.context.get("DOCKER_INFO") or "Cannot connect" in step.context["DOCKER_INFO"]:
                 return h._fail(result, step, f"docker not usable from the main container: {step.context.get('DOCKER_INFO')}")
+            claude_docker = step.context.get("CLAUDE_ENV_DOCKER", "")
+            if not claude_docker or "Cannot connect" in claude_docker or "docker.sock" in claude_docker:
+                return h._fail(result, step, f"docker not usable with the environment Claude receives: {claude_docker}")
         return h._pass(result, "real docker:dind sidecar: preflight passed, DOCKER_ENABLED marker set, docker CLI works from the skill container")
 
     def test_qa_worktree_env(base_env):

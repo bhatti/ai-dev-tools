@@ -441,6 +441,51 @@ def _ensure_extra_skills(skills_base: Path) -> None:
                 )
 
 
+# Vars passed to claude: avoids injecting the entire formicary job environment (50+ vars including
+# multi-line SSH keys) into the Bedrock system prompt, which has a strict size limit.
+CLAUDE_ENV_VARS = {
+    "HOME", "PATH", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
+    "TMPDIR", "TMP", "TEMP",
+    # Bedrock / API auth
+    "CLAUDE_CODE_USE_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "ANTHROPIC_API_KEY",
+    # Model selection
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # AWS SDK (needed when bedrock calls go through aws-sdk)
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    # Tracker credentials — needed by you-got-skills that call APIs via Bash
+    "GH_TOKEN", "GITHUB_TOKEN",
+    "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_HOST", "JIRA_API_TOKEN", "JIRA_AUTH",
+    "JIRA_PROJECT",
+    "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME",
+    # Slack — needed by skills that read standup channel signals
+    "SLACK_BOT_TOKEN", "SLACK_CHANNEL",
+    # Project context
+    "GH_ORG", "GH_REPO",
+    "STANDUP_TEAM_MEMBERS", "STANDUP_LOOKBACK_HOURS",
+    # Workspace
+    "WORKSPACE_DIR",
+    # Sidecars: the prompt tells the model where the Docker daemon / service is, so the env must agree
+    "DOCKER_HOST", "SERVICE_PORT", "SERVICE_NAME",
+}
+
+
+def build_claude_env(extra_env: dict | None = None) -> dict:
+    """Environment for the claude subprocess: the whitelist above plus `extra_env`."""
+    env = {k: v for k, v in os.environ.items() if k in CLAUDE_ENV_VARS}
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
 @dataclass
 class ClaudeResult:
     exit_code: int
@@ -687,43 +732,7 @@ def run_claude(
     cmd += ["--max-turns", str(max_turns)]
     # Prompt passed via stdin to avoid ARG_MAX limits on large prompts
 
-    # Pass only vars that claude itself needs — avoids injecting the entire
-    # formicary job environment (50+ vars including multi-line SSH keys) into
-    # the Bedrock system prompt, which has a strict size limit.
-    _CLAUDE_VARS = {
-        "HOME", "PATH", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-        "TMPDIR", "TMP", "TEMP",
-        # Bedrock / API auth
-        "CLAUDE_CODE_USE_BEDROCK",
-        "ANTHROPIC_BEDROCK_BASE_URL",
-        "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
-        "ANTHROPIC_API_KEY",
-        # Model selection
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        # AWS SDK (needed when bedrock calls go through aws-sdk)
-        "AWS_DEFAULT_REGION",
-        "AWS_REGION",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        # Tracker credentials — needed by you-got-skills that call APIs via Bash
-        "GH_TOKEN", "GITHUB_TOKEN",
-        "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_HOST", "JIRA_API_TOKEN", "JIRA_AUTH",
-        "JIRA_PROJECT",
-        "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME",
-        # Slack — needed by skills that read standup channel signals
-        "SLACK_BOT_TOKEN", "SLACK_CHANNEL",
-        # Project context
-        "GH_ORG", "GH_REPO",
-        "STANDUP_TEAM_MEMBERS", "STANDUP_LOOKBACK_HOURS",
-        # Workspace
-        "WORKSPACE_DIR",
-    }
-    env = {k: v for k, v in os.environ.items() if k in _CLAUDE_VARS}
-    if extra_env:
-        env.update(extra_env)
+    env = build_claude_env(extra_env)
 
     # Save prompt to log dir for debugging
     if log_file:

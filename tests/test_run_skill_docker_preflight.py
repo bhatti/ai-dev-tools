@@ -121,3 +121,20 @@ class TestRealPreflightPath:
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
         monkeypatch.delenv("DOCKER_HOST", raising=False)
         assert rs.docker_blocker(parse_skill_flags("ygs-qa x --dind")) is None
+
+
+from scripts.skill.run_skill import job_failure  # noqa: E402
+
+
+class TestJobFailure:
+    @pytest.mark.parametrize("status", ["ERROR", "MAX_TURNS_REACHED"])
+    def test_error_statuses_fail_the_job(self, status):
+        assert job_failure(status, {}) == status
+
+    def test_blocked_signal_fails_even_when_the_status_word_is_done(self):
+        why = job_failure("DONE", {"status": "DONE", "signal": "BLOCKED", "summary": "docker daemon unreachable"})
+        assert why and "docker daemon unreachable" in why
+
+    @pytest.mark.parametrize("data", [{"status": "DONE"}, {"status": "DONE", "signal": "DONE_WITH_CONCERNS"}])
+    def test_normal_completion_passes(self, data):
+        assert job_failure("DONE", data) is None

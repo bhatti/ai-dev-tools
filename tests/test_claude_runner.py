@@ -681,3 +681,30 @@ def test_inventory_header_unchanged_without_primary_skill(mock_popen, tmp_path, 
     cmd = mock_popen.call_args.args[0]
     sp = cmd[cmd.index("--system-prompt") + 1]
     assert _SKILLS_PICK_HEADER in sp
+
+
+# ---------------------------------------------------------------------------
+# Environment handed to the claude subprocess
+# ---------------------------------------------------------------------------
+
+def test_claude_env_carries_the_docker_daemon_the_prompt_promises(monkeypatch):
+    from scripts.common.claude_runner import build_claude_env
+    monkeypatch.setenv("DOCKER_HOST", "tcp://localhost:2375")
+    monkeypatch.setenv("SERVICE_PORT", "9000")
+    env = build_claude_env()
+    assert env["DOCKER_HOST"] == "tcp://localhost:2375" and env["SERVICE_PORT"] == "9000"
+
+
+def test_claude_env_still_drops_unlisted_job_variables(monkeypatch):
+    from scripts.common.claude_runner import build_claude_env
+    monkeypatch.setenv("SOME_JOB_SECRET_KEY", "x")
+    assert "SOME_JOB_SECRET_KEY" not in build_claude_env()
+    assert build_claude_env({"EXTRA": "1"})["EXTRA"] == "1"
+
+
+@patch("scripts.common.claude_runner.subprocess.Popen")
+def test_run_claude_launches_with_docker_host(mock_popen, tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCKER_HOST", "tcp://localhost:2375")
+    mock_popen.return_value = _make_proc(['{"status":"DONE"}\n'])
+    run_claude("go", working_dir=tmp_path)
+    assert mock_popen.call_args.kwargs["env"]["DOCKER_HOST"] == "tcp://localhost:2375"
