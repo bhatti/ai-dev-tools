@@ -490,7 +490,7 @@ def sparse_clone_repo(
     url: str,
     dest: Path,
     branch: str = "main",
-    sparse_dir: str = "",
+    sparse_dir: str | list[str] = "",
     http_token: str = "",
     http_username: str = "x-token-auth",
     timeout: int = 120,
@@ -526,7 +526,8 @@ def sparse_clone_repo(
     )
 
     if sparse_dir:
+        dirs = [sparse_dir] if isinstance(sparse_dir, str) else list(sparse_dir)
         _run_git(
-            ["git", "-C", str(dest), "sparse-checkout", "set", sparse_dir],
+            ["git", "-C", str(dest), "sparse-checkout", "set", *dirs],
             env=env, timeout=timeout,
         )

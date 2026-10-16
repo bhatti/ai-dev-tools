@@ -814,3 +814,60 @@ def test_extra_skills_clone_does_not_leave_the_token_in_git_config(tmp_path):
     assert "s3cr3t-token" not in config
     origin = sp.run(["git", "-C", str(tmp_path / "_extra_repo"), "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
     assert origin == "https://bitbucket.org/org/repo.git"
+
+
+class TestExtraSkillsSparseClone:
+    """A real git repository stands in for the remote (file:// URL): the sparse checkout must contain the skills."""
+
+    @staticmethod
+    def _repo(tmp_path, with_dir=".claude/skills"):
+        import subprocess as sp
+        repo = tmp_path / "remote"
+        (repo / with_dir / "my-skill").mkdir(parents=True)
+        (repo / with_dir / "my-skill" / "SKILL.md").write_text("# my skill\n")
+        (repo / "src").mkdir()
+        (repo / "src" / "big.txt").write_text("not needed\n")
+        (repo / "README.md").write_text("root\n")
+        for cmd in (["init", "-q", "-b", "main"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init"]):
+            sp.run(["git", "-C", str(repo), *cmd], check=True)
+        return repo
+
+    @pytest.mark.parametrize("skills_dir", [".claude/skills", "skills", ".skills"])
+    def test_installs_skills_from_any_conventional_dir_without_configuration(self, tmp_path, skills_dir):
+        repo = self._repo(tmp_path, skills_dir)
+        skills_base = tmp_path / "skills-home"
+        skills_base.mkdir()
+        raw = json.dumps([{"url": f"file://{repo}", "branch": "main"}])
+        with patch.dict(os.environ, {"EXTRA_SKILLS_REPOS": raw}, clear=False):
+            _ensure_extra_skills(skills_base)
+        assert (skills_base / "my-skill" / "SKILL.md").read_text() == "# my skill\n"
+        assert not (skills_base / "_extra_remote" / "src" / "big.txt").exists()    # sparse: the rest of the repo is not checked out
+
+    def test_explicit_skills_dir_is_honoured_over_auto_detection(self, tmp_path):
+        repo = self._repo(tmp_path, "custom/location")
+        skills_base = tmp_path / "skills-home"
+        skills_base.mkdir()
+        raw = json.dumps([{"url": f"file://{repo}", "branch": "main", "skills_dir": "custom/location"}])
+        with patch.dict(os.environ, {"EXTRA_SKILLS_REPOS": raw}, clear=False):
+            _ensure_extra_skills(skills_base)
+        assert (skills_base / "my-skill" / "SKILL.md").read_text() == "# my skill\n"
+
+    def test_a_repo_without_any_skills_dir_installs_nothing_and_does_not_fail(self, tmp_path):
+        repo = self._repo(tmp_path, "docs/other")
+        skills_base = tmp_path / "skills-home"
+        skills_base.mkdir()
+        raw = json.dumps([{"url": f"file://{repo}", "branch": "main"}])
+        with patch.dict(os.environ, {"EXTRA_SKILLS_REPOS": raw}, clear=False):
+            _ensure_extra_skills(skills_base)
+        assert not (skills_base / "my-skill").exists()
+
+
+def test_config_defaults_are_not_exported_as_if_they_were_configuration(monkeypatch):
+    """Exporting defaults (e.g. CLAUDE_CODE_USE_BEDROCK=1) would silently change how claude authenticates."""
+    from scripts.common.claude_runner import export_aliased_env
+    from scripts.common.config import DEFAULTS, load_config
+    for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "ANTHROPIC_BEDROCK_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    export_aliased_env(load_config())
+    for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "ANTHROPIC_BEDROCK_BASE_URL"):
+        assert name in DEFAULTS and name not in os.environ

@@ -300,3 +300,11 @@ def test_pr_risk_builds_the_gate_decision_before_the_report_in_one_task():
     assert "task_type: gate-check" not in text
     assert "./gate_result.json" in text and "./reports" in text
     assert 'APPROVAL_THRESHOLD: "{{.ApprovalThreshold}}"' in text
+
+
+def test_ai_skill_dind_service_shares_the_workspace_with_the_skill_container():
+    """Bind mounts resolve inside the dind container; a service does not inherit the main container's volumes."""
+    text = (EXAMPLES_DIR / "ai-skill.yaml").read_text()
+    block = text[text.index("- name: docker-dind"):]
+    block = block[:block.index("{{end}}")]
+    assert "empty_dir:" in block and "- name: workspace" in block and "mount_path: /workspace" in block

@@ -383,9 +383,10 @@ def _kubectl(*args: str, timeout: int = 30, check: bool = True) -> subprocess.Co
     )
 
 
-def _create_pod(name: str, image: str = IMAGE, manifest_template: str = "") -> None:
-    template = manifest_template or _POD_MANIFEST
-    manifest = template.format(name=name, namespace=NAMESPACE, image=image)
+def _create_pod(name: str, image: str = IMAGE, manifest_template: str = "", manifest: str = "") -> None:
+    """Create a pod from a complete ``manifest``, else from a ``manifest_template`` (or the default test pod)."""
+    if not manifest:
+        manifest = (manifest_template or _POD_MANIFEST).format(name=name, namespace=NAMESPACE, image=image)
     with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
         f.write(manifest)
         path = f.name

@@ -573,3 +573,22 @@ class TestInferenceIsAnchored:
     def test_urls_that_merely_contain_a_pr_url_do_not_name_the_repo(self, arg):
         assert parse_skill_flags(f"ygs-qa {arg}").repo != "https://github.com/a/b.git"
         assert infer_repo_url(arg) == ""
+
+
+class TestPrUrlSkillPrompt:
+    """The Slack prompt `skill <name> <pr url> --version <v> --branch <b> --dind` as the router hands it over."""
+    RAW = "qa-regression https://bitbucket.org/acme/widgets/pull-requests/7/overview --version 4.20.2-TC1 --branch my-branch --dind"
+
+    def test_flags(self):
+        f = parse_skill_flags(self.RAW)
+        assert (f.skill, f.branch, f.dind) == ("qa-regression", "my-branch", True)
+        assert "bitbucket.org/acme/widgets/pull-requests/7" in f.instructions
+        assert "--version 4.20.2-TC1" in f.instructions
+        assert "--dind" not in f.instructions and "--branch" not in f.instructions
+
+    def test_tracker_and_repo_are_inferred_from_the_pr_url(self):
+        flags = parse_skill_flags(self.RAW)
+        tracker = resolve_tracker(flags, {"DEFAULT_TRACKER": "github"})
+        assert tracker == "jira"  # Bitbucket repos are served by the jira/bitbucket tracker
+        url, branch = resolve_repo(flags, {"DEFAULT_TRACKER": "github"}, tracker)
+        assert (url, branch) == ("https://bitbucket.org/acme/widgets.git", "my-branch")

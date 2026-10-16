@@ -255,7 +255,7 @@ def _emit_test_health_insights(
     sections.append("")
 
 
-from scripts.common.pr_metrics import PR_TYPE_EMOJI as _PR_TYPE_EMOJI, RISK_EMOJI as _RISK_EMOJI, STACKED_COLUMNS, age_days, build_pr_table as _build_pr_table, build_single_pr_metrics as _build_single_pr_metrics
+from scripts.common.pr_metrics import RISK_EMOJI as _RISK_EMOJI, STACKED_COLUMNS, age_days, build_pr_table as _build_pr_table, build_single_pr_metrics as _build_single_pr_metrics
 from scripts.common.pr_signals import read_cached as _read_signals
 from scripts.common.severity import count_findings as _count_findings
 from scripts.common.pr_classify import (
@@ -265,7 +265,6 @@ from scripts.common.pr_classify import (
     build_metrics_dashboard as _build_metrics_dashboard,
     build_stale_pr_table as _build_stale_pr_table,
     compute_throughput_metrics as _compute_throughput_metrics,
-    format_pr_status as _format_pr_status,
 )
 
 _RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]

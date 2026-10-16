@@ -33,9 +33,13 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from scripts.common.config import DEFAULTS
 from scripts.common.git_utils import clone_repo, drop_stored_credentials, host_clone_auth, sparse_clone_repo
 from scripts.common.models import model_env
 from scripts.common.redact import redact
+
+# Where a skills repo keeps its skills when the config does not say (a sparse clone fetches exactly these).
+SKILL_DIR_CANDIDATES = (".claude/skills", "skills", ".skills")
 
 # Cached across multiple run_claude() calls in the same pod — YGS only cloned once.
 _YGS_INSTALLED: bool = False
@@ -376,7 +380,7 @@ def _ensure_extra_skills(skills_base: Path) -> None:
             try:
                 if sparse:
                     sparse_clone_repo(
-                        url, dest, branch=branch, sparse_dir=skills_dir,
+                        url, dest, branch=branch, sparse_dir=skills_dir or list(SKILL_DIR_CANDIDATES),
                         http_token=token, http_username=username or "x-token-auth",
                     )
                 else:
@@ -393,10 +397,9 @@ def _ensure_extra_skills(skills_base: Path) -> None:
         if skills_dir:
             src_skills = dest / skills_dir
         else:
-            _candidates = [".claude/skills", "skills", ".skills"]
-            src_skills = next((dest / c for c in _candidates if (dest / c).is_dir()), None)
+            src_skills = next((dest / c for c in SKILL_DIR_CANDIDATES if (dest / c).is_dir()), None)
             if src_skills is None:
-                print(f"[ygs] WARNING: no skills dir found in {dest} (tried {_candidates})", file=sys.stderr, flush=True)
+                print(f"[ygs] WARNING: no skills dir found in {dest} (tried {list(SKILL_DIR_CANDIDATES)})", file=sys.stderr, flush=True)
                 continue
         if not src_skills.is_dir():
             print(f"[ygs] WARNING: skills_dir '{skills_dir}' not found in {dest}", file=sys.stderr, flush=True)
@@ -486,9 +489,11 @@ def export_aliased_env(config: dict) -> None:
     The claude subprocess is built from os.environ, so a value that only exists in the config dict would
     never reach the skill's shell commands.
     """
+    # defaults are not credentials: only alias-resolved values are exported
     for name in CLAUDE_ENV_VARS:
-        if config.get(name) and not os.environ.get(name):
-            os.environ[name] = str(config[name])
+        value = config.get(name)
+        if value and not os.environ.get(name) and value != DEFAULTS.get(name):
+            os.environ[name] = str(value)
 
 
 def build_claude_env(extra_env: dict | None = None) -> dict:

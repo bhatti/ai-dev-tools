@@ -14,6 +14,9 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -91,57 +94,31 @@ python3 -m scripts.qa.ui_runner --spec /workspace/qa/ui-spec.json --out-dir "$QA
 python3 -c "import os; open(os.environ['QA_OUT'] + '/seen-env.txt', 'w').write(str(os.environ.get('GH_TOKEN')) + ' ' + str(os.environ.get('QA_BASE_URL')))"
 """
 
-# Mirrors the pod formicary builds for docs/examples/ai-skill.yaml when --dind is used: host network,
-# privileged main container, DOCKER_HOST/DOCKER_TLS_CERTDIR in the main env, and a docker:dind sidecar started
-# through `env -u DOCKER_HOST dockerd-entrypoint.sh` with the YAML's resource settings.
-_POD_MANIFEST_DIND = """\
-apiVersion: v1
-kind: Pod
-metadata:
-  name: {name}
-  namespace: {namespace}
-  labels:
-    app: ai-dev-pod-test
-spec:
-  restartPolicy: Never
-  hostNetwork: true
-  containers:
-  - name: main
-    image: {image}
-    imagePullPolicy: Always
-    command: ["sleep", "3600"]
-    envFrom:
-    - secretRef:
-        name: ai-dev-credentials
-    env:
-    - name: DOCKER_HOST
-      value: tcp://localhost:2375
-    - name: DOCKER_TLS_CERTDIR
-      value: ""
-    securityContext:
-      privileged: true
-    resources:
-      requests: {{memory: 1G, cpu: "2"}}
-      limits: {{memory: 24G}}
-    volumeMounts:
-    - name: workspace
-      mountPath: /workspace
-  - name: docker-dind
-    image: docker:dind
-    imagePullPolicy: IfNotPresent
-    command: ["env", "-u", "DOCKER_HOST", "dockerd-entrypoint.sh"]
-    env:
-    - name: DOCKER_TLS_CERTDIR
-      value: ""
-    securityContext:
-      privileged: true
-    resources:
-      requests: {{cpu: 500m}}
-      limits: {{memory: 8G}}
-  volumes:
-  - name: workspace
-    emptyDir: {{}}
-"""
+FORMICARY_DIR = Path(os.environ.get("FORMICARY_DIR", Path(__file__).resolve().parents[2] / "formicary"))
+DIND_JOB_ARGS = "qa-regression https://bitbucket.org/ws/repo/pull-requests/7 --dind"
+
+
+def workflow_pod_manifest(name: str, namespace: str, image: str) -> str:
+    """The pod formicary builds for docs/examples/ai-skill.yaml with --dind, produced by the production pod builder
+    (formicary `Test_ExportWorkflowPods`: job definition -> task options -> BuildPod). Only what a test pod must
+    differ in is changed: its name/namespace/image, and the main container idles so steps can be exec'd into it
+    (in a job the executor runs each command that way)."""
+    out_dir = Path(tempfile.mkdtemp(prefix="workflow-pod-"))
+    try:
+        r = subprocess.run(["go", "test", "./ants/executor/kubernetes", "-run", "Test_ExportWorkflowPods", "-count=1"],
+                           cwd=FORMICARY_DIR, env={**os.environ, "PODSPEC_OUT_DIR": str(out_dir)},
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError(f"could not build the workflow pod with formicary BuildPod:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
+        pod = json.loads((out_dir / "ai-skill-dind.json").read_text())
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    main = next(c for c in pod["spec"]["containers"] if c["name"] != "docker-dind")
+    main.update(image=image, command=["sleep", "3600"])
+    pod["metadata"] = {"name": name, "namespace": namespace, "labels": {"app": "ai-dev-pod-test"},
+                       "annotations": {"kubectl.kubernetes.io/default-container": main["name"]}}
+    pod.pop("status", None)
+    return json.dumps(pod)
 
 
 def build_tests(h: ModuleType) -> dict:
@@ -171,7 +148,7 @@ def build_tests(h: ModuleType) -> dict:
         assert_dind_port_free()
         name = f"ai-dev-{test_name.replace('_', '-')[:20]}-{uuid.uuid4().hex[:6]}"
         print(f"\n  [pod] creating {name} with docker:dind sidecar ...", flush=True)
-        h._create_pod(name, image=h.IMAGE, manifest_template=_POD_MANIFEST_DIND)
+        h._create_pod(name, manifest=workflow_pod_manifest(name, h.NAMESPACE, h.IMAGE))
         try:
             h._copy_scripts(name)
             yield name
@@ -483,7 +460,9 @@ python3 -c "import pathlib;print('::add-task-context ENV_LOG::' + str(pathlib.Pa
         with dind_pod("skill-dind-real") as pod:
             step = h.exec_step(pod, "run-skill-dind", r'''
 mkdir -p $WORKSPACE_DIR/logs
-python3 -m scripts.skill.run_skill 2>&1 | tail -25
+python3 -m scripts.skill.run_skill > /tmp/run_skill.out 2>&1
+grep -a '^::add-task-context' /tmp/run_skill.out
+tail -5 /tmp/run_skill.out
 echo "::add-task-context DOCKER_INFO::$(docker info --format '{{.ServerVersion}}' 2>&1 | head -1)"
 # The model's Bash inherits only the whitelisted env: docker must work with exactly that environment.
 python3 - <<'PYEOF'
@@ -504,7 +483,19 @@ PYEOF
             claude_docker = step.context.get("CLAUDE_ENV_DOCKER", "")
             if not claude_docker or "Cannot connect" in claude_docker or "docker.sock" in claude_docker:
                 return h._fail(result, step, f"docker not usable with the environment Claude receives: {claude_docker}")
-        return h._pass(result, "real docker:dind sidecar: preflight passed, DOCKER_ENABLED marker set, docker CLI works from the skill container")
+            # A bind mount of a /workspace path is resolved by the daemon, i.e. inside the dind container: both containers
+            # must see the same files (this is what a skill's `docker run -v`, compose files and kind mounts rely on).
+            share = h.exec_step(pod, "workspace-shared-with-dind", r'''
+mkdir -p /workspace/dind_share && echo from-main > /workspace/dind_share/hello
+echo "::add-task-context DAEMON_SEES_MAIN_FILE::$(docker run --rm -v /workspace/dind_share:/data alpine:3 cat /data/hello 2>&1 | tail -1)"
+docker run --rm -v /workspace/dind_share:/data alpine:3 sh -c 'echo from-container > /data/back && chmod 666 /data/back' > /dev/null 2>&1
+echo "::add-task-context MAIN_SEES_CONTAINER_FILE::$(cat /workspace/dind_share/back 2>&1)"
+''', env, timeout=240)
+            result.steps.append(share)
+            bad = markers_ok(result, share, {"DAEMON_SEES_MAIN_FILE": "from-main", "MAIN_SEES_CONTAINER_FILE": "from-container"})
+            if bad:
+                return bad
+        return h._pass(result, "real docker:dind sidecar: preflight passed, DOCKER_ENABLED marker set, docker CLI works, and /workspace is shared with the daemon (bind mounts see the skill's files)")
 
     def test_qa_worktree_env(base_env):
         result = h.TestResult("qa-worktree-env")

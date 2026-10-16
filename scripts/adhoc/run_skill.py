@@ -33,7 +33,7 @@ from scripts.common.pr_metrics import QUEUE_COLUMNS, build_pr_table
 from scripts.common.report_utils import write_report
 from scripts.standup.slack_client import (
     build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
-    PR_GROUP_ORDER, PR_CI_EMOJI, PR_PRIORITY_EMOJI, PR_GROUP_BADGE, pr_group,
+    PR_GROUP_ORDER, PR_GROUP_BADGE, pr_group,
 )
 
 # Maximum chars of Claude output to post back to Slack
