@@ -127,26 +127,6 @@ def test_validate_claude_config_bedrock_default_url(capsys):
     assert "mode=bedrock" in out
 
 
-# --- COMPLEXITY_MODEL_MAP ---
-
-def test_complexity_model_map_has_required_tiers():
-    from scripts.common.config import COMPLEXITY_MODEL_MAP, MODEL_BEDROCK_HAIKU, MODEL_BEDROCK_SONNET, MODEL_BEDROCK_OPUS
-    assert COMPLEXITY_MODEL_MAP["low"] == MODEL_BEDROCK_HAIKU
-    assert COMPLEXITY_MODEL_MAP["medium"] == MODEL_BEDROCK_SONNET
-    assert COMPLEXITY_MODEL_MAP["high"] == MODEL_BEDROCK_OPUS
-
-
-def test_complexity_model_map_covers_all_tiers():
-    from scripts.common.config import COMPLEXITY_MODEL_MAP
-    assert set(COMPLEXITY_MODEL_MAP.keys()) == {"low", "medium", "high"}
-
-
-def test_complexity_model_map_values_are_nonempty_strings():
-    from scripts.common.config import COMPLEXITY_MODEL_MAP
-    for tier, model_id in COMPLEXITY_MODEL_MAP.items():
-        assert isinstance(model_id, str) and model_id, f"tier={tier!r} has empty model ID"
-
-
 # --- .env file loading ---
 
 def test_load_config_reads_dotenv_when_present(tmp_path, monkeypatch):

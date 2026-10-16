@@ -209,10 +209,11 @@ class TestBuildContext:
         assert ctx["pr_acceptance_criteria"] == ["returns 429 over quota", "logs a warning"]
         assert ctx["ac_source"] == "pr_description"
 
-    def test_bitbucket_missing_credentials_is_actionable_and_leaks_nothing(self):
+    def test_bitbucket_missing_credentials_is_actionable_and_leaks_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(tmp_path))  # no acli on this PATH
         with pytest.raises(ValueError) as e:
             pc.build_context(BB_URL, {})
-        assert "BITBUCKET_USERNAME" in str(e.value) and "BITBUCKET_TOKEN" in str(e.value)
+        assert "BITBUCKET_USERNAME" in str(e.value) and "BITBUCKET_TOKEN" in str(e.value) and "acli" in str(e.value)
 
     def test_pr_not_found(self):
         with pytest.raises(ValueError, match="not found"):
@@ -395,3 +396,57 @@ class TestScopeAndBareNumbers:
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old)
+
+
+FAKE_ACLI = r'''#!/bin/sh
+# canned acli: prints JSON by sub-command; exits 1 for anything else
+args="$*"
+case "$args" in
+  *"bitbucket whoami"*|*"jira user me"*) echo '{"ok":true}' ;;
+  *"bitbucket pr get acme widgets 7"*) cat <<'J'
+{"id":7,"title":"Limit carts","description":"Fixes ABC-12\n\n## Acceptance Criteria\n- returns 409 over the limit","state":"OPEN","author":{"display_name":"Ada"},"source":{"branch":{"name":"feat/cart"}},"destination":{"branch":{"name":"main"}},"links":{"html":{"href":"https://bitbucket.org/acme/widgets/pull-requests/7"}}}
+J
+;;
+  *"bitbucket pr diff acme widgets 7"*) printf 'diff --git a/cart.py b/cart.py\n--- a/cart.py\n+++ b/cart.py\n@@ -1 +1 @@\n-x\n+y\n' ;;
+  *"jira issue get --json ABC-12"*) cat <<'J'
+{"key":"ABC-12","fields":{"summary":"Cart limit","description":"## Acceptance Criteria\n- UI shows Cart limit reached","labels":["qa"]}}
+J
+;;
+  *) echo "unexpected: $args" >&2; exit 1 ;;
+esac
+'''
+
+
+class TestAcliFallback:
+    """acli is used only when REST tokens are absent. A real executable on PATH stands in for the CLI."""
+
+    def _install(self, tmp_path, monkeypatch, script=FAKE_ACLI):
+        acli = tmp_path / "acli"
+        acli.write_text(script)
+        acli.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+    CFG = {"BITBUCKET_WORKSPACE": "acme", "BITBUCKET_REPO": "widgets", "JIRA_PROJECT": "ABC"}
+    URL = "https://bitbucket.org/acme/widgets/pull-requests/7"
+
+    def test_pr_diff_and_linked_issue_come_through_acli_when_no_tokens(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch)
+        ctx = pc.build_context(self.URL, self.CFG, tmp_path / "d")
+        assert ctx["pr"]["title"] == "Limit carts" and ctx["pr"]["source_branch"] == "feat/cart" and ctx["pr"]["destination_branch"] == "main"
+        assert ctx["changed_files"] == ["cart.py"] and ctx["diff_error"] == ""
+        assert [i["key"] for i in ctx["issues"]] == ["ABC-12"]
+        assert ctx["issues"][0]["acceptance_criteria"] == ["UI shows Cart limit reached"]
+        assert "pr_description" in ctx["ac_source"]
+
+    def test_rest_tokens_win_over_acli(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch, "#!/bin/sh\necho must-not-run >&2; exit 1\n")
+        cfg = {**self.CFG, "BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t"}
+        with patch.object(pc, "fetch_prs_by_numbers", return_value=[_pr()]) as rest, \
+                patch.object(pc, "fetch_pr_diff", return_value=("", "")), patch.object(pc, "fetch_issue_details", return_value=None):
+            pc.build_context(self.URL, cfg)
+        assert rest.called
+
+    def test_unauthenticated_acli_means_no_fallback(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch, "#!/bin/sh\necho 'not logged in' >&2; exit 1\n")
+        with pytest.raises(ValueError, match="missing credentials"):
+            pc.build_context(self.URL, self.CFG)

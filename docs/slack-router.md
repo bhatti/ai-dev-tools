@@ -305,35 +305,16 @@ make install-skills
 
 ## Changing the AI Model
 
-Models are configured as Formicary org configs, not env vars.  This lets you change
-models without redeploying the image.
+Model defaults live in one file, `scripts/common/models.json` (default, tiers `low`/`default`/`high`, and aliases such as `sonnet`, `opus`, `haiku`). Workflows and org configs do not define models.
 
 ```bash
-# Change the main implementation model (Sonnet)
-python -m scripts.slack.deploy_workflows \
-  --server http://localhost:7777 \
-  --set-config AnthropicSonnetModel us.anthropic.claude-sonnet-5
-
-# Change the planner model (Opus)
-python -m scripts.slack.deploy_workflows \
-  --server http://localhost:7777 \
-  --set-config AnthropicOpusModel us.anthropic.claude-opus-5
-
-# Change the intent-classification model (Haiku — used by the router)
-python -m scripts.slack.deploy_workflows \
-  --server http://localhost:7777 \
-  --set-config AnthropicHaikuModel claude-haiku-4-5-20251001
+python3 -m scripts.common.models --table      # what is configured
+# edit scripts/common/models.json, push to main; pods with AI_DEV_TOOLS_DEBUG=1 pick it up on start
 ```
 
-Or set them in one call via `deploy-ai-workflows.sh --set-configs` (see that script's `--help`).
+Per-run override from Slack: `skill <name> --model opus|high|low|<full id>`, or `--model ...` on the pr-audit routes. A name that is not an alias or a model id fails the job at start-up and lists the valid aliases.
 
-The values flow as:
-1. Org config `AnthropicSonnetModel` → Formicary job variable `AnthropicSonnetModel`
-2. Injected as `ANTHROPIC_DEFAULT_SONNET_MODEL` env var in each container
-3. `config.get("AI_MODEL")` → `scripts/common/config.py` → passed to `claude --model`
-
-For the router's Haiku classifier specifically, the env var is `ANTHROPIC_DEFAULT_HAIKU_MODEL`
-(read from org config `AnthropicHaikuModel`).
+The value flows as: `--model` / `AiModel` job parameter > `AI_MODEL` env > `AI_MODEL_TIER` > the file's `default`, resolved by `scripts/common/models.py` and passed to `claude --model`. The router's classifier uses `AI_MODEL_TIER=low`.
 
 ---
 
@@ -404,9 +385,6 @@ connectivity and posts results to your Slack thread.
 | `FormicaryUrl` | Internal Formicary URL (for job links) | `http://formicary:7777` |
 | `FormicaryPublicUrl` | Public URL for clickable job links | `http://host:7777` |
 | `UserTag` | Route jobs to user's ant worker | `alice` |
-| `AnthropicSonnetModel` | Model for implement/review tasks | `us.anthropic.claude-sonnet-4-6` |
-| `AnthropicOpusModel` | Model for planning tasks | `us.anthropic.claude-opus-4-6-v1` |
-| `AnthropicHaikuModel` | Model for intent classification | `claude-haiku-4-5-20251001-v1:0` |
 | `ClaudeUseBedrock` | Use AWS Bedrock proxy | `1` |
 | `AnthropicBedrockBaseUrl` | Bedrock proxy URL | `http://ai/bedrock` |
 | `ExtraWorkflows` | YAML blob of custom workflow entries | see above |

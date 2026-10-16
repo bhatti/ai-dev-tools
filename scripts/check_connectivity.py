@@ -247,12 +247,12 @@ def check_claude() -> None:
     if proxy_base.endswith("/bedrock"):
         proxy_base = proxy_base[: -len("/bedrock")]
 
-    from scripts.common.config import MODEL_BEDROCK_SONNET, MODEL_SONNET
-    model = (
-        os.environ.get("AI_MODEL")
-        or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        or (MODEL_BEDROCK_SONNET if use_bedrock else MODEL_SONNET)
-    )
+    from scripts.common.models import ModelError, resolve_model
+    try:
+        model = resolve_model(env_model=os.environ.get("AI_MODEL", ""), tier=os.environ.get("AI_MODEL_TIER", ""))
+    except ModelError as e:
+        _record("claude", False, str(e))
+        return
 
     if use_bedrock:
         # Check proxy reachability and list available models via /v1/models

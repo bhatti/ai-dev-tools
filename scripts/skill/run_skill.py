@@ -25,16 +25,17 @@ from pathlib import Path
 
 from scripts.common.claude_runner import (
     ensure_ygs_skills,
+    export_aliased_env,
     run_claude,
 )
 from scripts.common.config import (
-    MODEL_SHORTNAMES,
     get_workspace_dir,
     load_config,
     validate_claude_config,
 )
+from scripts.common.models import ModelError, resolve_model
 from scripts.common.git_utils import clone_repo, create_branch, drop_stored_credentials, resolve_clone_auth
-from scripts.common.docker_check import CLI_MISSING, CLI_NOT_EXECUTABLE, DIND_HINT, docker_preflight
+from scripts.common.docker_check import CLI_MISSING, CLI_NOT_EXECUTABLE, docker_preflight
 from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
 from scripts.common.slack_format import format_for_slack
 from scripts.standup.slack_client import notify as slack_notify
@@ -115,21 +116,9 @@ def _clone_target_repo(
     return dest
 
 
-def _resolve_model(config: dict, flags: SkillFlags) -> str | None:
-    """Resolve model from flags, AI_MODEL_OVERRIDE env, or AI_MODEL config."""
-    model = config.get("AI_MODEL")
-
-    override = flags.model or os.getenv("AI_MODEL_OVERRIDE", "").strip()
-    if override and override not in ("<no value>", "{{.AiModel}}"):
-        shortnames = {
-            "haiku": config.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", MODEL_SHORTNAMES["haiku"]),
-            "sonnet": config.get("ANTHROPIC_DEFAULT_SONNET_MODEL", MODEL_SHORTNAMES["sonnet"]),
-            "opus": config.get("ANTHROPIC_DEFAULT_OPUS_MODEL", MODEL_SHORTNAMES["opus"]),
-            **{k: v for k, v in MODEL_SHORTNAMES.items() if k not in ("haiku", "sonnet", "opus")},
-        }
-        model = shortnames.get(override.lower(), override)
-
-    return model
+def _resolve_model(config: dict, flags: SkillFlags) -> str:
+    """Model for this run: --model flag or AI_MODEL_OVERRIDE (alias or id), else the configured AI_MODEL."""
+    return resolve_model(requested=flags.model or os.getenv("AI_MODEL_OVERRIDE", ""), env_model=config.get("AI_MODEL", ""))
 
 
 def _write_result(workspace: Path, data: dict) -> None:
@@ -227,6 +216,7 @@ def main() -> None:
         elif skill_name:
             raw_args = skill_name
 
+    export_aliased_env(config)
     flags = parse_skill_flags(raw_args)
     if not flags.skill:
         print("[skill] ERROR: no skill name in RAW_ARGS", file=sys.stderr, flush=True)
@@ -242,6 +232,14 @@ def main() -> None:
             slack_notify(config, f"⚠️ Skill `/{flags.skill}` blocked: {blocker[:500]}")
         except Exception as e:  # noqa: BLE001 - the job still fails below; the notification is best effort
             print(f"[skill] could not post the blocked notification: {type(e).__name__}", file=sys.stderr, flush=True)
+        sys.exit(1)
+
+    # A mistyped --model fails here, before the clone, instead of as a model-not-found error mid-job.
+    try:
+        model = _resolve_model(config, flags)
+    except ModelError as e:
+        print(f"[skill] ERROR: {e}", file=sys.stderr, flush=True)
+        _write_result(workspace, {"status": "ERROR", "reason": str(e)})
         sys.exit(1)
 
     # Resolve tracker, repo, branch.
@@ -278,7 +276,7 @@ def main() -> None:
         print(f"[skill] no SKILL.md found for {flags.skill} — using fallback prompt", flush=True)
 
     # Emit task context markers.
-    model_val = config.get("AI_MODEL") or ""
+    model_val = model or ""
     print(f"::add-task-context SELECTED_TRACKER::{tracker}", flush=True)
     print(f"::add-task-context SKILL::{flags.skill}", flush=True)
     print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
@@ -363,8 +361,7 @@ def main() -> None:
     # Validate Claude credentials.
     validate_claude_config(config)
 
-    # Resolve model and turns.
-    model = _resolve_model(config, flags)
+    # Turns (the model was resolved above).
     default_turns = int(config.get("MAX_TURNS_ADHOC", config.get("MAX_TURNS_IMPLEMENT", "100")))
     if flags.turns:
         try:

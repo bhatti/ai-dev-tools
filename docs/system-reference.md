@@ -486,7 +486,7 @@ plan (15m)  →  implement (90m)  →  self-review (15m)  →  create-pr (10m)  
 
 **self-review task:** runs `scripts/review/run.py --mode self-review`. Claude diffs `BASE...HEAD`, writes `self_review.json` (`APPROVED`/`NEEDS_FIX`/`BLOCKED`). Exit code 2 = BLOCKED → Formicary pauses job for human review before the PR is created.
 
-**Complexity-tiered models:** the `plan` task writes `plan_complexity.txt` (`low`/`medium`/`high`). The `implement` task reads it and selects the model tier: `AnthropicComplexityLowModel` (Haiku), default Sonnet, `AnthropicComplexityHighModel` (Opus). Override via org configs pushed by `deploy-ai-workflows.sh --set-configs`.
+**Complexity-tiered models:** the `plan` task writes `plan_complexity.txt` (`low`/`medium`/`high`). The `implement` task exports it as `AI_MODEL_TIER`; `scripts/common/models.json` maps tiers to models (Haiku / Sonnet / Opus by default). Change a tier by editing that file.
 
 ### Task sub-steps (each shows as a named step in Formicary's task log)
 

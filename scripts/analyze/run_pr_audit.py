@@ -37,6 +37,7 @@ import click
 
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
+from scripts.common.models import ModelError, resolve_model
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
 from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution, build_pr_metrics_table, build_metrics_dashboard, build_stale_pr_table
 from scripts.common.report_renderer import render_simple_html
@@ -778,6 +779,19 @@ Or on failure:
 
 # -- Main entry ----------------------------------------------------------------
 
+def _apply_model_override(config: dict, slack_flags: dict) -> None:
+    """Set config["AI_MODEL"]: --model in the Slack text wins; the route's AiModel parameter (queen turns the
+    flag into it) is the fallback. Exits 1 on an unknown name."""
+    requested = slack_flags["model"] or os.getenv("AI_MODEL_OVERRIDE", "")
+    try:
+        config["AI_MODEL"] = resolve_model(requested=requested, env_model=config.get("AI_MODEL", ""))
+    except ModelError as e:
+        print(f"[pr-audit] ERROR: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    if requested.strip() and requested.strip() not in ("<no value>", "{{.AiModel}}"):
+        print(f"[pr-audit] Slack override: model={requested}", flush=True)
+
+
 @click.command()
 @click.option("--repo-url", default=None, help="Git clone URL or HTTPS repo URL to audit")
 @click.option("--branch", default=None, help="Branch to audit (default: BB_REPO_BRANCH or GH_REPO_BRANCH)")
@@ -814,9 +828,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     if slack_flags["focus"] is not None:
         focus = slack_flags["focus"]
         print(f"[pr-audit] Slack override: focus={focus}", flush=True)
-    if slack_flags["model"]:
-        config["AI_MODEL"] = slack_flags["model"]
-        print(f"[pr-audit] Slack override: model={slack_flags['model']}", flush=True)
+    _apply_model_override(config, slack_flags)
     if slack_flags["team_members"]:
         os.environ["PR_AUDIT_TEAM_MEMBERS"] = slack_flags["team_members"]
         config["PR_AUDIT_TEAM_MEMBERS"] = slack_flags["team_members"]

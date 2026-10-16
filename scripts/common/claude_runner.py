@@ -33,12 +33,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts.common.config import (
-    MODEL_BEDROCK_HAIKU as _MODEL_BEDROCK_HAIKU,
-    MODEL_BEDROCK_OPUS as _MODEL_BEDROCK_OPUS,
-    MODEL_BEDROCK_SONNET as _MODEL_BEDROCK_SONNET,
-)
-from scripts.common.git_utils import clone_repo
+from scripts.common.git_utils import clone_repo, drop_stored_credentials
+from scripts.common.models import model_env
 
 # Cached across multiple run_claude() calls in the same pod — YGS only cloned once.
 _YGS_INSTALLED: bool = False
@@ -159,37 +155,39 @@ def ensure_ygs_skills() -> None:
     # Write ~/.claude/settings.json if missing — entrypoint.sh does this but
     # Formicary overrides the ENTRYPOINT so it never runs in task pods.
     settings_path = home / ".claude" / "settings.json"
-    if not settings_path.exists() and os.environ.get("CLAUDE_CODE_USE_BEDROCK", "0") == "1":
-        import json as _json
-        settings = {
-            "claudeCodeLocalNetworkingEnabled": True,
-            "apiKeyHelper": "echo '-'",
-            "env": {
-                "ANTHROPIC_BEDROCK_BASE_URL": os.environ.get(
-                    "ANTHROPIC_BEDROCK_BASE_URL", "http://ai/bedrock"
-                ),
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "CLAUDE_CODE_SKIP_BEDROCK_AUTH": os.environ.get(
-                    "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "1"
-                ),
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ.get(
-                    "ANTHROPIC_DEFAULT_OPUS_MODEL", _MODEL_BEDROCK_OPUS
-                ),
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ.get(
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL", _MODEL_BEDROCK_SONNET
-                ),
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ.get(
-                    "ANTHROPIC_DEFAULT_HAIKU_MODEL", _MODEL_BEDROCK_HAIKU
-                ),
-            },
-            "skipWorkflowUsageWarning": True,
-            "permissions": {"allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)"]},
-        }
-        settings_path.write_text(_json.dumps(settings, indent=2), encoding="utf-8")
+    if os.environ.get("CLAUDE_CODE_USE_BEDROCK", "0") == "1":
+        write_bedrock_settings(settings_path)
         print("[ygs] wrote ~/.claude/settings.json (Bedrock)", flush=True)
 
     _ensure_extra_skills(skills_base)
     _YGS_INSTALLED = True
+
+
+def write_bedrock_settings(settings_path: Path) -> None:
+    """Write ~/.claude/settings.json for Bedrock; the model ids always come from models.json.
+
+    An existing file keeps its other keys (permissions, plugins...) but its model env is
+    refreshed, so editing models.json takes effect on the next run.
+    """
+    import json as _json
+    try:
+        settings = _json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    except (OSError, ValueError):
+        settings = {}
+    settings.setdefault("claudeCodeLocalNetworkingEnabled", True)
+    settings.setdefault("apiKeyHelper", "echo '-'")
+    settings.setdefault("skipWorkflowUsageWarning", True)
+    settings.setdefault("model", "sonnet")  # the CLI maps the alias through the env below
+    settings.setdefault("permissions", {"allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)"]})
+    env = settings.setdefault("env", {})
+    env.update({
+        "ANTHROPIC_BEDROCK_BASE_URL": os.environ.get("ANTHROPIC_BEDROCK_BASE_URL", "http://ai/bedrock"),
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH": os.environ.get("CLAUDE_CODE_SKIP_BEDROCK_AUTH", "1"),
+        **model_env(),
+    })
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(_json.dumps(settings, indent=2), encoding="utf-8")
 
 
 def _install_via_skills_cli(repo_ref: str, skills_base: Path) -> None:
@@ -352,20 +350,16 @@ def _ensure_extra_skills(skills_base: Path) -> None:
         skills_dir = repo.get("skills_dir", "")  # empty = auto-detect
         # sparse=True by default — only download skills_dir, not the whole repo
         sparse = bool(repo.get("sparse", True))
-        token_env = repo.get("token_env", "")
 
-        # Resolve credentials — passed to clone helpers which embed them safely.
-        # Explicit token_env/username_env fields take precedence; otherwise auto-detect
-        # from well-known env vars for bitbucket.org and github.com.
+        # Credentials: explicit token_env/username_env win; otherwise the host's well-known variables,
+        # resolved exactly as the target-repo clone does (ATATT tokens need the x-token-auth username).
         token_env = repo.get("token_env", "")
-        username_env = repo.get("username_env", "")
-        if not token_env:
-            if "bitbucket.org" in url:
-                token_env, username_env = "BITBUCKET_TOKEN", "BITBUCKET_USERNAME"
-            elif "github.com" in url:
-                token_env = "GH_TOKEN"
-        token = os.environ.get(token_env, "") if token_env else ""
-        username = os.environ.get(username_env, "") if username_env else ""
+        if token_env:
+            token = os.environ.get(token_env, "")
+            username = os.environ.get(repo.get("username_env", ""), "")
+        else:
+            from scripts.common.git_utils import host_clone_auth
+            token_env, token, username = host_clone_auth(url, dict(os.environ))
 
         slug = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
         dest = skills_base / f"_extra_{slug}"
@@ -388,6 +382,8 @@ def _ensure_extra_skills(skills_base: Path) -> None:
                     )
                 else:
                     clone_repo(url, dest, depth=1, http_token=token, http_username=username or "x-token-auth")
+                if token:  # the clone left the token in .git/config; code run later must not be able to read it
+                    drop_stored_credentials(dest, url, username or "x-token-auth")
                 print(f"[ygs] {label} of {url} done in {_time.monotonic() - _t0:.0f}s", flush=True)
             except Exception as exc:
                 msg = getattr(exc, "stderr", "") or str(exc)
@@ -451,10 +447,6 @@ CLAUDE_ENV_VARS = {
     "ANTHROPIC_BEDROCK_BASE_URL",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
     "ANTHROPIC_API_KEY",
-    # Model selection
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     # AWS SDK (needed when bedrock calls go through aws-sdk)
     "AWS_DEFAULT_REGION",
     "AWS_REGION",
@@ -465,7 +457,8 @@ CLAUDE_ENV_VARS = {
     "GH_TOKEN", "GITHUB_TOKEN",
     "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_HOST", "JIRA_API_TOKEN", "JIRA_AUTH",
     "JIRA_PROJECT",
-    "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME",
+    "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD",
+    "DEFAULT_TRACKER",
     # Slack — needed by skills that read standup channel signals
     "SLACK_BOT_TOKEN", "SLACK_CHANNEL",
     # Project context
@@ -478,9 +471,33 @@ CLAUDE_ENV_VARS = {
 }
 
 
+# Families passed through without listing each name (QA_USERNAME / QA_PASSWORD / QA_AUTH_HEADER: the app under test).
+CLAUDE_ENV_PREFIXES = ("QA_",)
+
+
+def _passthrough_names() -> set[str]:
+    """Extra variable names an operator wants the model's Bash to see: SKILL_ENV_PASSTHROUGH="NPM_TOKEN,FOO"."""
+    raw = os.environ.get("SKILL_ENV_PASSTHROUGH", "")
+    return {n for n in re.split(r"[\s,]+", raw) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n or "")}
+
+
+def export_aliased_env(config: dict) -> None:
+    """Make credentials that load_config resolved from org-config aliases (BitbucketUsername...) real env vars.
+
+    The claude subprocess is built from os.environ, so a value that only exists in the config dict would
+    never reach the skill's shell commands.
+    """
+    for name in CLAUDE_ENV_VARS:
+        if config.get(name) and not os.environ.get(name):
+            os.environ[name] = str(config[name])
+
+
 def build_claude_env(extra_env: dict | None = None) -> dict:
-    """Environment for the claude subprocess: the whitelist above plus `extra_env`."""
-    env = {k: v for k, v in os.environ.items() if k in CLAUDE_ENV_VARS}
+    """Environment for the claude subprocess: the whitelist, QA_* and SKILL_ENV_PASSTHROUGH names, the models.json
+    model ids, then `extra_env`."""
+    allowed = CLAUDE_ENV_VARS | _passthrough_names()
+    env = {k: v for k, v in os.environ.items() if k in allowed or k.startswith(CLAUDE_ENV_PREFIXES)}
+    env.update(model_env())
     if extra_env:
         env.update(extra_env)
     return env

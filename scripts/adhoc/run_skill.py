@@ -24,8 +24,10 @@ import re
 import click
 import requests
 
-from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills, _KNOWN_SKILLS
-from scripts.common.config import get_workspace_dir, load_config, validate_claude_config, MODEL_SHORTNAMES
+from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills, export_aliased_env, _KNOWN_SKILLS
+from scripts.common.atlassian_cli import write_cli_configs
+from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
+from scripts.common.models import ModelError, resolve_model
 from scripts.common.report_utils import write_report
 from scripts.standup.slack_client import (
     build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
@@ -465,6 +467,9 @@ def _setup_environment(config: dict) -> list[str]:
         auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
         os.environ["JIRA_AUTH"] = auth
 
+    # acli / jira CLI profiles (entrypoint.sh does not run in Formicary task pods)
+    write_cli_configs(config)
+
     # Resolve sprint team (needs JIRA_AUTH set above)
     sprint_team = _resolve_sprint_team(config)
     if sprint_team:
@@ -608,6 +613,7 @@ def _system_prompt_for_skill(skill: str, default: str = "adhoc") -> str:
 @click.option("--prompt", "prompt_text", required=True, help="Free-form instruction")
 def main(skill: str, prompt_text: str) -> None:
     config = load_config()
+    export_aliased_env(config)
     # NOTE: validate_claude_config is called AFTER the ygs-pr-queue early-exit branch
     # so skills that never invoke Claude don't fail on missing credentials.
     sprint_team = _setup_environment(config)
@@ -689,20 +695,12 @@ def main(skill: str, prompt_text: str) -> None:
     full_prompt = _build_prompt(skill, prompt_text, skill_md,
                                 sprint_team=sprint_team or None)
 
-    # Resolve model: AI_MODEL_OVERRIDE (from router model-override parsing) >
-    # AI_MODEL config (from Formicary job variable) > default (claude picks).
-    model = config.get("AI_MODEL")
-    model_override = os.getenv("AI_MODEL_OVERRIDE", "").strip()
-    if model_override and model_override not in ("<no value>", "{{.AiModel}}"):
-        # Resolve short names ("haiku", "sonnet", "opus", "sonnet-5", …) to full model IDs.
-        # config values (from env/job params) take precedence over the module constants.
-        _shortnames = {
-            "haiku":  config.get("ANTHROPIC_DEFAULT_HAIKU_MODEL",  MODEL_SHORTNAMES["haiku"]),
-            "sonnet": config.get("ANTHROPIC_DEFAULT_SONNET_MODEL", MODEL_SHORTNAMES["sonnet"]),
-            "opus":   config.get("ANTHROPIC_DEFAULT_OPUS_MODEL",   MODEL_SHORTNAMES["opus"]),
-            **{k: v for k, v in MODEL_SHORTNAMES.items() if k not in ("haiku", "sonnet", "opus")},
-        }
-        model = _shortnames.get(model_override.lower(), model_override)
+    # Model: AI_MODEL_OVERRIDE (router/--model, alias or id) > configured AI_MODEL (models.json default).
+    try:
+        model = resolve_model(requested=os.getenv("AI_MODEL_OVERRIDE", ""), env_model=config.get("AI_MODEL", ""))
+    except ModelError as e:
+        print(f"ERROR: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
     max_turns = int(config.get("MAX_TURNS_ADHOC", config.get("MAX_TURNS_IMPLEMENT", "50")))
     log_path = logs_dir / "adhoc.log"

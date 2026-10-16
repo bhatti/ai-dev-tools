@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.common.config import MODEL_SONNET
+from scripts.common.models import resolve_model
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def sample_issue():
 def sample_config(tmp_workspace):
     return {
         "WORKSPACE_DIR": str(tmp_workspace),
-        "AI_MODEL": MODEL_SONNET,
+        "AI_MODEL": resolve_model(),
         "MAX_TURNS_PLAN": "30",
         "MAX_TURNS_IMPLEMENT": "100",
         "PICKUP_LABEL": "ai-ready",

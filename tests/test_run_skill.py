@@ -8,9 +8,6 @@ import pytest
 import pytest
 from scripts.common.claude_runner import SYSTEM_PROMPTS
 from scripts.adhoc.run_skill import _system_prompt_for_skill, _SKILL_SYSTEM_PROMPT_MAP, _detect_intent
-from scripts.common.config import (
-    MODEL_BEDROCK_HAIKU, MODEL_BEDROCK_SONNET, MODEL_BEDROCK_OPUS,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -107,62 +104,6 @@ def test_turns_empty_uses_config():
 
 def test_turns_empty_uses_hardcoded_default():
     assert _resolve_max_turns("", {}) == 100
-
-
-# ---------------------------------------------------------------------------
-# Model short-name resolution via AI_MODEL_OVERRIDE
-# ---------------------------------------------------------------------------
-
-def _resolve_model_override(model_override: str, config: dict) -> str:
-    """Replicate the shortname resolution logic from run_skill.main() for testing."""
-    from scripts.common.config import MODEL_SHORTNAMES
-    _shortnames = {
-        "haiku":  config.get("ANTHROPIC_DEFAULT_HAIKU_MODEL",  MODEL_SHORTNAMES["haiku"]),
-        "sonnet": config.get("ANTHROPIC_DEFAULT_SONNET_MODEL", MODEL_SHORTNAMES["sonnet"]),
-        "opus":   config.get("ANTHROPIC_DEFAULT_OPUS_MODEL",   MODEL_SHORTNAMES["opus"]),
-        **{k: v for k, v in MODEL_SHORTNAMES.items() if k not in ("haiku", "sonnet", "opus")},
-    }
-    return _shortnames.get(model_override.lower(), model_override)
-
-
-def test_model_override_haiku_resolves_to_full_id():
-    config = {"ANTHROPIC_DEFAULT_HAIKU_MODEL": MODEL_BEDROCK_HAIKU}
-    resolved = _resolve_model_override("haiku", config)
-    assert resolved == MODEL_BEDROCK_HAIKU
-
-
-def test_model_override_sonnet_resolves_to_full_id():
-    config = {"ANTHROPIC_DEFAULT_SONNET_MODEL": MODEL_BEDROCK_SONNET}
-    resolved = _resolve_model_override("sonnet", config)
-    assert resolved == MODEL_BEDROCK_SONNET
-
-
-def test_model_override_case_insensitive():
-    config = {"ANTHROPIC_DEFAULT_HAIKU_MODEL": MODEL_BEDROCK_HAIKU}
-    assert _resolve_model_override("HAIKU", config) == MODEL_BEDROCK_HAIKU
-    assert _resolve_model_override("Sonnet", config) is not None
-
-
-def test_model_override_full_id_passthrough():
-    """Full model IDs (not shortnames) are passed through unchanged."""
-    resolved = _resolve_model_override(MODEL_BEDROCK_HAIKU, {})
-    assert resolved == MODEL_BEDROCK_HAIKU
-
-
-def test_model_override_unknown_name_passthrough():
-    """Unknown shortnames are passed through as-is (forward-compat with new models)."""
-    resolved = _resolve_model_override("claude-future-model", {})
-    assert resolved == "claude-future-model"
-
-
-def test_model_shortnames_include_newer_models():
-    """MODEL_SHORTNAMES must include the newer model aliases for Aperture proxy."""
-    from scripts.common.config import MODEL_SHORTNAMES
-    assert "sonnet-5" in MODEL_SHORTNAMES
-    assert "opus-5" in MODEL_SHORTNAMES
-    assert "fable" in MODEL_SHORTNAMES
-    assert MODEL_SHORTNAMES["sonnet-5"].startswith("us.anthropic.claude-sonnet-5")
-    assert MODEL_SHORTNAMES["opus-5"].startswith("us.anthropic.claude-opus-5")
 
 
 # ---------------------------------------------------------------------------

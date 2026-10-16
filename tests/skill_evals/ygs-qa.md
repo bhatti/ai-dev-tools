@@ -2,7 +2,7 @@
 
 ## Should trigger
 - "QA this PR against its acceptance criteria: <pr-url> --url https://staging.example.com"
-- "did this change regress anything compared to prod? <pr-url> --mode regression --baseline-url ..."
+- "did this change regress anything compared to prod? <pr-url> --baseline-url ..."
 - "ready for QA" with a local diff (Local mode)
 
 ## Should NOT trigger

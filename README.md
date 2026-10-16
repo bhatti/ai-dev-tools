@@ -68,7 +68,8 @@ The simplest approach is to export env vars in your shell — no `.env` file nee
 export GH_ORG=bhatti
 export GH_REPO=todo-sample
 export GH_TOKEN=ghp_your_token_here
-export AI_MODEL=claude-sonnet-4-6
+# Optional: the default model lives in scripts/common/models.json
+# export AI_MODEL=opus   # alias or full id
 
 # If using Anthropic API directly:
 export ANTHROPIC_API_KEY=sk-ant-your_key_here
@@ -346,10 +347,9 @@ The implement workflow (`ai-gh-implement` / `ai-jira-implement`) runs a self-rev
 
 ### Complexity-tiered model selection
 
-The `plan` step writes a `plan_complexity.txt` file (`low`, `medium`, or `high`). The `implement` step reads it and selects the model tier automatically:
+The `plan` step writes a `plan_complexity.txt` file (`low`, `medium`, or `high`). The `implement` step exports it as `AI_MODEL_TIER`, and `scripts/common/models.json` maps the tier to a model (`low` = Haiku, `medium` = Sonnet, `high` = Opus). Edit the JSON to change a tier; pass `--model` or `AI_MODEL` to override a single run.
 
-| Complexity | Model |
-|------------|-------|
+------------|-------|
 | `low` | Claude Haiku (fast, cheap) |
 | `medium` | Claude Sonnet (balanced) |
 | `high` | Claude Opus (most capable) |
@@ -494,8 +494,8 @@ Run **any** YGS skill against **any** repo with full flag parsing, smart default
 @bot skill ygs-investigate -- investigate flaky test JIRA-123 and update Jira
 @bot skill ygs-qa myapp -- run E2E tests
 @bot skill ygs-qa https://github.com/org/repo/pull/12 --url https://staging.example.com
-@bot skill ygs-qa https://github.com/org/repo/pull/12 --mode regression --baseline-url https://prod.example.com --url https://pr-12.example.com
-@bot skill ygs-qa https://github.com/org/repo/pull/12 --mode regression --baseline-image app:1.4 --image app:pr-12 --dind
+@bot skill ygs-qa https://github.com/org/repo/pull/12 --baseline-url https://prod.example.com --url https://pr-12.example.com
+@bot skill ygs-qa https://github.com/org/repo/pull/12 --baseline-image app:1.4 --image app:pr-12 --dind
 @bot skill ygs-flaky-test --repo org/repo -- tests/cart.test.js
 @bot skill ygs-flaky-test https://github.com/org/repo/issues/42
 ```
@@ -541,9 +541,9 @@ curl -sk -X POST "${FORMICARY_URL}/api/jobs/requests" \
 | `--repo <url\|name>` | Explicit repo (full URL, `org/repo`, or bare name expanded via org config) | Org config default |
 | `--branch <name>` | Branch to check out | `main` (GitHub) / `dev` (Bitbucket) |
 | `--tracker github\|jira` | Override tracker auto-detection | Auto-detected from URL or `DEFAULT_TRACKER` |
-| `--model <id>` | Model override (shortnames: `haiku`, `sonnet`, `opus`) | Org config default |
+| `--model <alias\|id>` | Model override: any alias in `scripts/common/models.json` (`sonnet`, `opus`, `haiku`, `high`, `low`, `default`, ...) or a full model id | `models.json` default |
 | `--service <image:tag>` | Service sidecar image (requires API submission with `ServiceImage` param) | None |
-| `--service-port <port>` | Port the sidecar listens on; skill accesses it at `localhost:<port>` | `8080` |
+| `--service-port <port>` | Port the sidecar listens on; skill accesses it at `localhost:<port>` | `9000` |
 | `--service-cmd <cmd>` | Documents the sidecar command in the prompt; actual command must be set via `ServiceCommand` job variable at submission time | Image default |
 | `--service-args <args>` | Extra args described in the prompt; actual args via `ServiceArgs` job variable | None |
 | `--dind` | Enable Docker-in-Docker: starts a `docker:dind` sidecar so the skill can run `docker build`/`docker run`. `DOCKER_HOST` is set automatically to `tcp://localhost:2375`. The job fails fast (BLOCKED) if the daemon is unreachable, and also when `--image`/`--compose` are used without it. | Disabled |
@@ -768,7 +768,7 @@ Key variables:
 | `GH_ORG` | Yes | — | GitHub org or user |
 | `GH_REPO` | Yes | — | GitHub repo name |
 | `GH_TOKEN` | Yes | — | PAT with `repo` + `issues` scope |
-| `AI_MODEL` | No | `claude-sonnet-4-6` | Claude model |
+| `AI_MODEL` | No | `models.json` default | Claude model override (alias or id) |
 | `PICKUP_LABEL` | No | `ai-ready` | Label that triggers pickup |
 | `ANTHROPIC_API_KEY` | Yes* | — | Anthropic API key (direct) |
 | `ANTHROPIC_BEDROCK_BASE_URL` | Yes* | `http://ai/bedrock` | Bedrock endpoint |
@@ -790,7 +790,7 @@ Key variables:
 | `audit last 30 prs` | Audit last 30 PRs |
 | `focus skills` / `--focus design` | Set audit focus dimension |
 | `https://github.com/org/repo/pull/123` | Audit specific PR(s) instead of last N |
-| `--model claude-opus-5` / `model: <id>` | Override AI model for this run |
+| `--model opus` / `model: <alias\|id>` | Override AI model for this run (aliases from `models.json`) |
 
 ---
 

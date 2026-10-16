@@ -165,7 +165,7 @@ def main() -> None:
         improvements_summary=improvements_summary,
     )
 
-    model = config.get("AI_MODEL", config.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ""))
+    model = config.get("AI_MODEL", "")
     max_turns = int(config.get("MAX_TURNS_PLAN", "30"))
     print(f"[plan-skill-updates] org={org} repo={repo} model={model} max_turns={max_turns}", flush=True)
 

@@ -133,7 +133,7 @@ Scripts invoke Claude Code via the `claude` CLI:
 ```bash
 claude --print \
        --dangerously-skip-permissions \
-       --model claude-sonnet-4-6 \
+       --model "$AI_MODEL" \
        --max-turns 30 \
        "<prompt>"
 ```

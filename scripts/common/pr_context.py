@@ -29,6 +29,7 @@ from scripts.analyze.pr_fetcher import (
     fetch_issue_details,
     fetch_prs_by_numbers,
 )
+from scripts.common import acli_fallback
 from scripts.common.bitbucket_api import _BASE as BB_BASE
 from scripts.common.config import load_config
 from scripts.mq._shared import _strip_slack_url, apply_repo_override, parse_pr_ref
@@ -283,6 +284,9 @@ def _issue_record(ref: dict, config: dict) -> dict:
     if ref["source"] == "github" and ref.get("repo"):
         cfg["GH_ORG"], _, cfg["GH_REPO"] = ref["repo"].partition("/")
     details = fetch_issue_details(ref, cfg)
+    if details is None and ref["source"] == "jira" and not (cfg.get("JIRA_EMAIL") and cfg.get("JIRA_API_TOKEN")) \
+            and acli_fallback.acli_ready("jira", "jira"):
+        details = acli_fallback.jira_issue(ref["key"])
     rec: dict = {"key": ref["key"], "source": ref["source"], "url": ref.get("url", "")}
     if details is None:
         return {**rec, "fetch_error": "not found or credentials missing", "acceptance_criteria": [],
@@ -346,15 +350,24 @@ def build_context(ref: str, config: dict, diff_dir: Path | None = None,
     apply_repo_override(config, clone_url)
     tracker = "bitbucket" if "bitbucket.org" in clone_url else "github"
     missing = missing_credentials(tracker, config)
-    if missing:
-        raise ValueError(f"missing credentials: {', '.join(missing)}")
+    # REST tokens are the primary path; a working acli profile is used only when they are absent.
+    use_acli = bool(missing) and tracker == "bitbucket" and acli_fallback.acli_ready("bitbucket", "bitbucket")
+    if missing and not use_acli:
+        raise ValueError(f"missing credentials: {', '.join(missing)} (or a working acli 'bitbucket' profile)")
 
-    prs = fetch_prs_by_numbers(config, [int(number)])
+    if use_acli:
+        pr = acli_fallback.bitbucket_pr(config.get("BITBUCKET_WORKSPACE", ""), config.get("BITBUCKET_REPO", ""), number)
+        prs = [pr] if pr else []
+    else:
+        prs = fetch_prs_by_numbers(config, [int(number)])
     if not prs:
         raise ValueError(f"PR {number} not found or not accessible on {tracker} (check token scope and repo)")
     pr = prs[0]
 
-    diff, diff_err = fetch_pr_diff(config, tracker, number, max_diff_bytes)
+    if use_acli:
+        diff, diff_err = acli_fallback.bitbucket_diff(config.get("BITBUCKET_WORKSPACE", ""), config.get("BITBUCKET_REPO", ""), number, max_diff_bytes + 1)
+    else:
+        diff, diff_err = fetch_pr_diff(config, tracker, number, max_diff_bytes)
     raw = diff.encode("utf-8", "replace")
     truncated = len(raw) > max_diff_bytes
     if truncated:

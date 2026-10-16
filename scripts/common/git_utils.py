@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 
 _TRANSIENT_PUSH_ERRORS = (
@@ -92,6 +93,22 @@ def get_bitbucket_git_username(config: dict) -> str:
     return config.get("BITBUCKET_USERNAME", "x-token-auth")
 
 
+def host_clone_auth(url: str, env: dict) -> tuple[str, str, str]:
+    """Credentials for cloning *url* from bitbucket.org or github.com: ``(token_var, token, username)``.
+
+    Same rules as ``resolve_clone_auth`` (Atlassian ATATT tokens need the ``x-token-auth`` username, not the
+    email; app passwords are accepted as a fallback), keyed on the URL's host instead of the tracker so a
+    skills repo on another host than the job's tracker still authenticates. Unknown hosts get no credentials.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if host == "bitbucket.org":
+        token = env.get("BITBUCKET_TOKEN") or env.get("BITBUCKET_APP_PASSWORD", "")
+        return "BITBUCKET_TOKEN", token, get_bitbucket_git_username({**env, "BITBUCKET_TOKEN": token}) if token else "x-token-auth"
+    if host == "github.com":
+        return "GH_TOKEN", env.get("GH_TOKEN") or env.get("GITHUB_TOKEN", ""), "x-access-token"
+    return "", "", ""
+
+
 def _embed_credentials(url: str, username: str, token: str) -> str:
     """Return URL with credentials embedded: https://user:token@host/path.
 
@@ -124,7 +141,6 @@ def drop_stored_credentials(repo: Path, clean_url: str, username: str) -> None:
     gets none, while later fetches by the skill itself still authenticate.
     """
     import shlex
-    from urllib.parse import urlparse
 
     _run_git(["git", "remote", "set-url", "origin", clean_url], cwd=repo)
     host = urlparse(clean_url).hostname or ""

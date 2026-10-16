@@ -46,7 +46,8 @@ All configuration is via environment variables. Set them in a `.env` file for lo
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AI_MODEL` | `claude-sonnet-4-6` | Default Claude model |
+| `AI_MODEL` | *(from `models.json`)* | Optional per-job model (alias or full id). Normally unset: the default lives in `scripts/common/models.json` |
+| `AI_MODEL_TIER` | *(unset)* | Optional role tier `low` \| `default` \| `high` (e.g. `low` for classification). `AI_MODEL` wins over it |
 | `MAX_TURNS_PLAN` | `50` | Max claude turns for planning step |
 | `MAX_TURNS_IMPLEMENT` | `200` | Max claude turns for implementation step |
 | `CLAUDE_EFFORT_LEVEL` | `medium` | Claude effort level (`low`, `medium`, `high`) |
@@ -60,9 +61,8 @@ These are written to `~/.claude/settings.json` by the entrypoint.
 | `ANTHROPIC_BEDROCK_BASE_URL` | `http://ai/bedrock` | AWS Bedrock proxy URL |
 | `CLAUDE_CODE_USE_BEDROCK` | `1` | Enable Bedrock backend |
 | `CLAUDE_CODE_SKIP_BEDROCK_AUTH` | `1` | Skip Bedrock auth (for internal proxies) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `us.anthropic.claude-opus-4-6-v1` | Opus model ID |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-4-6` | Sonnet model ID |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Haiku model ID |
+
+Model ids are **not** environment variables. Edit `scripts/common/models.json` (default, tiers `low`/`default`/`high`, aliases such as `sonnet`/`opus`/`haiku`); see [Choosing the model](#choosing-the-model).
 
 ## Slack Router Variables
 
@@ -218,3 +218,26 @@ By default the GitHub pipeline branches from `main`. Set `BASE_BRANCH` to overri
 ```bash
 export BASE_BRANCH=develop
 ```
+
+
+## Choosing the model
+
+`scripts/common/models.json` is the only place model defaults live (workflows and org configs do not define them). Edit it and push to `main`; with `AI_DEV_TOOLS_DEBUG=1` pods pick it up without an image rebuild. Check it with `python3 -m scripts.common.models --table`.
+
+Precedence, first match wins: per-run `--model <alias|id>` (Slack `skill ... --model high`) or the `AiModel` job parameter > `AI_MODEL` on the job > `AI_MODEL_TIER` (`low`, `default`, `high`) > the file's `default`. A name that is neither an alias in the file nor a full model id fails the job at start-up with the list of valid aliases.
+
+
+## Credentials in ai-skill pods
+
+Credentials reach every `ai-skill` task as environment variables from the `ai-dev-credentials` Kubernetes secret (`env_from`), created by `deploy-ai-workflows.sh --create-k8s-secret`. The secret holds the tracker, Slack, Anthropic and SSH credentials, plus whatever you add:
+
+| Set before running the deploy script | Stored as |
+|--------------------------------------|-----------|
+| `BITBUCKET_APP_PASSWORD` | fallback for `BITBUCKET_TOKEN` |
+| `QA_USERNAME`, `QA_PASSWORD`, `QA_AUTH_HEADER` | credentials of the app `ygs-qa` tests |
+| `EXTRA_SECRET_VARS="NPM_TOKEN FOO"` | each listed variable, under its own name |
+| `SKILL_ENV_PASSTHROUGH="NPM_TOKEN,FOO"` | the allow-list described below |
+
+The skill's shell (the Claude subprocess) does not inherit the whole pod environment: it gets the platform credentials listed in `claude_runner.CLAUDE_ENV_VARS`, every `QA_*` variable, and the names in `SKILL_ENV_PASSTHROUGH`. Credentials resolved from org-config aliases (for example `BitbucketUsername`) are exported as real variables at start-up. Code under test never receives the platform tokens: `scripts.common.env_scrub` strips them, keeping only `QA_*` when asked.
+
+`acli` and the jira CLI are configured automatically from the same variables (`scripts/common/atlassian_cli.py`), because Formicary does not run `entrypoint.sh`.

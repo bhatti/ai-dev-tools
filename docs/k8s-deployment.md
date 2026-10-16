@@ -172,10 +172,9 @@ python -m scripts.slack.deploy_workflows \
   --server "$FORMICARY_URL" \
   --set-config BASE_BRANCH stage
 
-# Change AI model without rebuilding
-python -m scripts.slack.deploy_workflows \
-  --server "$FORMICARY_URL" \
-  --set-config AnthropicSonnetModel us.anthropic.claude-sonnet-5
+# Change the AI model without rebuilding: edit scripts/common/models.json and push to main
+# (pods with AI_DEV_TOOLS_DEBUG=1 pull it on start); verify with
+python3 -m scripts.common.models --table
 ```
 
 ---

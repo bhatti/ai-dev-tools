@@ -647,3 +647,34 @@ class TestDesignMetricsRows:
         assert "SOLID Violation Rate" in dashboard
         assert "Hotspot Coupling" in dashboard
         assert "Avg Readability Score" in dashboard
+
+
+class TestModelOverride:
+    def test_slack_text_beats_the_route_parameter(self, monkeypatch):
+        from scripts.analyze.run_pr_audit import _apply_model_override
+        monkeypatch.setenv("AI_MODEL_OVERRIDE", "low")
+        config = {"AI_MODEL": "us.anthropic.claude-sonnet-5-5"}
+        _apply_model_override(config, {"model": "high"})
+        assert config["AI_MODEL"] == "us.anthropic.claude-opus-4-6-v1"
+
+    def test_route_parameter_alone_is_enough(self, monkeypatch):
+        from scripts.analyze.run_pr_audit import _apply_model_override
+        monkeypatch.setenv("AI_MODEL_OVERRIDE", "low")
+        config = {"AI_MODEL": "us.anthropic.claude-sonnet-5-5"}
+        _apply_model_override(config, {"model": ""})
+        assert config["AI_MODEL"] == "anthropic.claude-haiku-4-5"
+
+    def test_nothing_requested_keeps_the_configured_model(self, monkeypatch):
+        from scripts.analyze.run_pr_audit import _apply_model_override
+        monkeypatch.setenv("AI_MODEL_OVERRIDE", "{{.AiModel}}")
+        config = {"AI_MODEL": "us.anthropic.claude-sonnet-5-5"}
+        _apply_model_override(config, {"model": ""})
+        assert config["AI_MODEL"] == "us.anthropic.claude-sonnet-5-5"
+
+    def test_unknown_name_exits_1(self, monkeypatch, capsys):
+        import pytest
+        from scripts.analyze.run_pr_audit import _apply_model_override
+        monkeypatch.delenv("AI_MODEL_OVERRIDE", raising=False)
+        with pytest.raises(SystemExit) as e:
+            _apply_model_override({"AI_MODEL": "x.claude-y"}, {"model": "opuss"})
+        assert e.value.code == 1 and "unknown model" in capsys.readouterr().err

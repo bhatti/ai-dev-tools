@@ -5,44 +5,9 @@ set -euo pipefail
 # --------------------------------------------------------------------------
 # 1. Configure Jira/Atlassian CLI tools from environment variables
 # --------------------------------------------------------------------------
-if [ -n "${JIRA_BASE_URL:-}" ]; then
-  # jira CLI (ankitpokhrel/jira-cli)
-  mkdir -p ~/.config/jira
-  export JIRA_API_TOKEN="${JIRA_API_TOKEN:-}"
-  export JIRA_AUTH_TYPE="${JIRA_AUTH_TYPE:-bearer}"
-  cat > ~/.config/jira/.config.yml <<EOF
-installation: cloud
-base-url: "${JIRA_BASE_URL:-}"
-login: "${JIRA_EMAIL:-}"
-project: "${JIRA_PROJECT:-}"
-EOF
-  echo "Generated ~/.config/jira/.config.yml"
-
-  # acli (Atlassian CLI) — same token, same URL
-  mkdir -p ~/.config/acli
-  cat > ~/.config/acli/config.json <<EOF
-{
-  "default_profile": "jira",
-  "profiles": {
-    "jira": {
-      "name": "jira",
-      "atlassian_url": "${JIRA_BASE_URL:-}",
-      "email": "${JIRA_EMAIL:-}",
-      "api_token": "${JIRA_API_TOKEN:-}",
-      "defaults": { "project": "${JIRA_PROJECT:-}" }
-    },
-    "bitbucket": {
-      "name": "bitbucket",
-      "atlassian_url": "${JIRA_BASE_URL:-}",
-      "email": "${BITBUCKET_USERNAME:-${BB_USERNAME:-${JIRA_EMAIL:-}}}",
-      "api_token": "${BITBUCKET_TOKEN:-${BB_TOKEN:-${JIRA_API_TOKEN:-}}}",
-      "defaults": { "workspace": "${BITBUCKET_WORKSPACE:-${BB_WORKSPACE:-}}" }
-    }
-  }
-}
-EOF
-  echo "Generated ~/.config/acli/config.json"
-fi
+# One definition of the files, shared with scripts.skill.run_skill (Formicary tasks bypass this entrypoint).
+[ -n "${JIRA_BASE_URL:-}" ] && export JIRA_AUTH_TYPE="${JIRA_AUTH_TYPE:-bearer}"
+python3 -c "import os; from scripts.common.atlassian_cli import write_cli_configs; print('Generated', *write_cli_configs(os.environ))"
 
 # --------------------------------------------------------------------------
 # 2. Write ~/.claude/settings.json — always overwrite from env vars
@@ -50,23 +15,8 @@ fi
 mkdir -p ~/.claude
 
 if [ "${CLAUDE_CODE_USE_BEDROCK:-0}" = "1" ]; then
-  cat > ~/.claude/settings.json <<EOF
-{
-  "claudeCodeLocalNetworkingEnabled": true,
-  "apiKeyHelper": "echo '-'",
-  "env": {
-    "ANTHROPIC_BEDROCK_BASE_URL": "${ANTHROPIC_BEDROCK_BASE_URL:-http://ai/bedrock}",
-    "CLAUDE_CODE_USE_BEDROCK": "1",
-    "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-1}",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "${ANTHROPIC_DEFAULT_OPUS_MODEL:-us.anthropic.claude-opus-4-6-v1}",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "${ANTHROPIC_DEFAULT_SONNET_MODEL:-us.anthropic.claude-sonnet-4-6}",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${ANTHROPIC_DEFAULT_HAIKU_MODEL:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"
-  },
-  "model": "${AI_MODEL:-sonnet}",
-  "skipWorkflowUsageWarning": true,
-  "permissions": { "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)"] }
-}
-EOF
+  # Model ids come from scripts/common/models.json (the single source), not from this script.
+  python3 -c "from pathlib import Path; from scripts.common.claude_runner import write_bedrock_settings; write_bedrock_settings(Path.home() / '.claude' / 'settings.json')"
   echo "Wrote ~/.claude/settings.json (Bedrock)"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   cat > ~/.claude/settings.json <<EOF

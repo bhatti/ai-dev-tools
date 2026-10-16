@@ -5214,6 +5214,10 @@ ALL_TESTS: dict[str, callable] = {
 from tests.pod_qa_flaky_tests import build_tests as _build_qa_flaky_tests  # noqa: E402
 ALL_TESTS.update(_build_qa_flaky_tests(sys.modules[__name__]))
 
+# Model-default pod tests (scripts/common/models.json).
+from tests.pod_model_tests import build_tests as _build_model_tests  # noqa: E402
+ALL_TESTS.update(_build_model_tests(sys.modules[__name__]))
+
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
 
 

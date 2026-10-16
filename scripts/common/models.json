@@ -1,0 +1,26 @@
+{
+  "default": "sonnet",
+  "tiers": {
+    "default": "sonnet",
+    "medium": "sonnet",
+    "high": "opus",
+    "low": "haiku"
+  },
+  "aliases": {
+    "sonnet": "us.anthropic.claude-sonnet-5-5",
+    "opus": "us.anthropic.claude-opus-4-6-v1",
+    "haiku": "anthropic.claude-haiku-4-5",
+    "fable": "anthropic.claude-fable-5",
+    "fable-5": "anthropic.claude-fable-5",
+    "sonnet-5-5": "us.anthropic.claude-sonnet-5-5",
+    "sonnet-5": "us.anthropic.claude-sonnet-5",
+    "sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+    "opus-5-5": "anthropic.claude-opus-5-5",
+    "opus-5": "us.anthropic.claude-opus-5",
+    "opus-4-8": "us.anthropic.claude-opus-4-8",
+    "opus-4-6": "us.anthropic.claude-opus-4-6-v1",
+    "haiku-4-5": "anthropic.claude-haiku-4-5",
+    "sonnet-5-mantle": "anthropic.claude-sonnet-5",
+    "opus-5-mantle": "anthropic.claude-opus-5"
+  }
+}

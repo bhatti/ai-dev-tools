@@ -43,8 +43,6 @@ spec:
               value: "your-repo"
             - name: WORKSPACE_DIR
               value: "/workspace"
-            - name: AI_MODEL
-              value: "claude-sonnet-4-6"
           volumeMounts: &common-mounts
             - name: workspace
               mountPath: /workspace

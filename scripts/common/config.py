@@ -17,50 +17,10 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-# ---------------------------------------------------------------------------
-# Model ID constants — single source of truth for all scripts and YAML defaults.
-# Update these to roll to a new model version; no other files need changing.
-# Callers may still override at runtime via ANTHROPIC_DEFAULT_*_MODEL env vars.
-# ---------------------------------------------------------------------------
-MODEL_BEDROCK_SONNET = "us.anthropic.claude-sonnet-4-6"
-MODEL_BEDROCK_OPUS   = "us.anthropic.claude-opus-4-6-v1"
-MODEL_BEDROCK_HAIKU  = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-MODEL_SONNET         = "claude-sonnet-4-6"              # direct Anthropic API (non-Bedrock)
-MODEL_HAIKU          = "claude-haiku-4-5-20251001-v1:0" # direct Anthropic API (non-Bedrock)
-
-# Short name → full model ID, used by "using <name> model" message syntax.
-# Covers Bedrock versions and common Aperture proxy aliases.
-# Unknown names are passed through as-is, so full model IDs always work.
-# Complexity-tiered model selection — used by the implement pipeline.
-# The plan task writes plan_complexity.txt (low/medium/high); the implement task
-# reads it and selects the corresponding model.  Override via org configs
-# (AnthropicComplexityLowModel / AnthropicComplexityHighModel) or models.env.
-COMPLEXITY_MODEL_MAP: dict[str, str] = {
-    "low":    MODEL_BEDROCK_HAIKU,   # simple tasks — fast and cheap
-    "medium": MODEL_BEDROCK_SONNET,  # default
-    "high":   MODEL_BEDROCK_OPUS,    # complex architecture changes
-}
-
-MODEL_SHORTNAMES: dict[str, str] = {
-    # Current defaults (resolved from env vars at runtime in run_skill.py)
-    "haiku":     MODEL_BEDROCK_HAIKU,
-    "sonnet":    MODEL_BEDROCK_SONNET,
-    "opus":      MODEL_BEDROCK_OPUS,
-    # Newer Bedrock versions available through Aperture proxy
-    "sonnet-5":  "us.anthropic.claude-sonnet-5",
-    "opus-5":    "us.anthropic.claude-opus-5",
-    "opus-4-8":  "us.anthropic.claude-opus-4-8",
-    "fable":     "anthropic.claude-fable-5",
-    "fable-5":   "anthropic.claude-fable-5",
-    "haiku-4-5": MODEL_BEDROCK_HAIKU,
-    # Mantle variants (no us. prefix)
-    "sonnet-5-mantle": "anthropic.claude-sonnet-5",
-    "opus-5-mantle":   "anthropic.claude-opus-5",
-}
+from scripts.common.models import ModelError, resolve_model
 
 DEFAULTS: dict[str, str] = {
     "WORKSPACE_DIR": "/workspace",
-    "AI_MODEL": MODEL_SONNET,
     "MAX_TURNS_PLAN": "50",
     "MAX_TURNS_IMPLEMENT": "100",
     "PICKUP_LABEL": "ai-ready",
@@ -74,9 +34,6 @@ DEFAULTS: dict[str, str] = {
     "ANTHROPIC_BEDROCK_BASE_URL": "http://ai/bedrock",
     "CLAUDE_CODE_USE_BEDROCK": "1",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL":   MODEL_BEDROCK_OPUS,
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": MODEL_BEDROCK_SONNET,
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL":  MODEL_BEDROCK_HAIKU,
     "BB_REPO_BRANCH":                 "main",
     "GH_REPO_BRANCH":                 "main",
     "N_COMMITS":                      "1000",
@@ -135,11 +92,6 @@ _ALIASES: list[tuple[str, str]] = [
     ("ClaudeUseBedrock",            "CLAUDE_CODE_USE_BEDROCK"),
     ("ClaudeSkipBedrockAuth",       "CLAUDE_CODE_SKIP_BEDROCK_AUTH"),
     ("AnthropicBedrockBaseUrl",     "ANTHROPIC_BEDROCK_BASE_URL"),
-    ("AnthropicSonnetModel",        "ANTHROPIC_DEFAULT_SONNET_MODEL"),
-    ("AnthropicOpusModel",          "ANTHROPIC_DEFAULT_OPUS_MODEL"),
-    ("AnthropicHaikuModel",         "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-    ("AnthropicComplexityLowModel", "ANTHROPIC_COMPLEXITY_LOW_MODEL"),
-    ("AnthropicComplexityHighModel","ANTHROPIC_COMPLEXITY_HIGH_MODEL"),
     ("MaxClaudeProcessTimeout",     "MAX_CLAUDE_PROCESS_TIMEOUT"),
     ("ExtraSkillsRepos",            "EXTRA_SKILLS_REPOS"),
     ("GitUserName",                 "GIT_USER_NAME"),
@@ -221,6 +173,14 @@ def load_config(required: list[str] | None = None) -> dict[str, str]:
     _load_dotenv(config)   # .env values fill gaps before OS env overrides
     config.update(os.environ)
     _apply_aliases(config)
+
+    # Models are never defined by workflows: scripts/common/models.json holds the defaults,
+    # AI_MODEL (optional, alias or id) and AI_MODEL_TIER (low|default|high) only select among them.
+    try:
+        config["AI_MODEL"] = resolve_model(env_model=config.get("AI_MODEL", ""), tier=config.get("AI_MODEL_TIER", ""))
+    except ModelError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if required:
         missing = [k for k in required if not config.get(k)]

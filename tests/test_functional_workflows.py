@@ -97,7 +97,7 @@ import sys
 import time
 import zipfile
 
-from scripts.common.config import MODEL_BEDROCK_HAIKU
+from scripts.common.models import resolve_model
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,7 +143,7 @@ FORMICARY_URL = os.environ.get("FORMICARY_URL", f"https://{EC2_IP}.nip.io" if EC
 TOKEN = os.environ.get("FORMICARY_TOKEN", "")
 TLS_VERIFY = os.environ.get("FORMICARY_TLS_VERIFY", "false").lower() not in ("false", "0", "no")
 
-HAIKU = MODEL_BEDROCK_HAIKU
+HAIKU = resolve_model(tier="low")
 # Only override the complexity-tier models used by scripts for task routing.
 # AnthropicSonnetModel/OpusModel/HaikuModel are display-only tier labels in the UI
 # and must not be overridden (they would show all tiers as haiku, which is misleading).

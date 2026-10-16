@@ -551,7 +551,7 @@ class TestUrlInferenceIsConservative:
 
     def test_only_the_first_argument_after_the_skill_name_counts(self):
         assert parse_skill_flags("ygs-qa https://github.com/org/repo/pull/12 --url http://x").repo == "https://github.com/org/repo.git"
-        assert parse_skill_flags("ygs-qa --mode regression https://github.com/org/repo/pull/12").repo == ""
+        assert parse_skill_flags("ygs-qa --baseline-url http://x https://github.com/org/repo/pull/12").repo == ""
 
 
 class TestIssueKeyArgument:

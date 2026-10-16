@@ -10,7 +10,8 @@ export GH_ORG=bhatti
 export GH_REPO=todo-sample
 export GH_TOKEN=ghp_your_token_here
 export ANTHROPIC_API_KEY=sk-ant-your_key_here
-export AI_MODEL=claude-sonnet-4-6
+# Optional model override (alias or id); the default lives in scripts/common/models.json
+# export AI_MODEL=opus
 # Then run docker compose or make commands as normal
 ```
 

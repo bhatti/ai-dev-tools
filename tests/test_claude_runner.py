@@ -281,6 +281,32 @@ class TestEnsureExtraSkillsUrlExpansion:
         assert kwargs.get("http_token") == "secret"
         assert kwargs.get("http_username") == "user@example.com"
 
+    def test_atatt_token_uses_x_token_auth_not_the_email(self, tmp_path):
+        """Atlassian ATATT tokens fail git auth with the account email as username (the target-repo clone already special-cases this)."""
+        raw = json.dumps([{"url": "https://bitbucket.org/org/repo.git", "sparse": False}])
+        env = {"BITBUCKET_TOKEN": "ATATT3xFfGF0abc=", "BITBUCKET_USERNAME": "user@example.com", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.clone_repo") as mock_clone:
+                _ensure_extra_skills(tmp_path)
+        assert mock_clone.call_args.kwargs["http_username"] == "x-token-auth"
+        assert mock_clone.call_args.kwargs["http_token"] == "ATATT3xFfGF0abc="
+
+    def test_bitbucket_app_password_is_the_fallback_token(self, tmp_path):
+        raw = json.dumps([{"url": "https://bitbucket.org/org/repo.git", "sparse": False}])
+        env = {"BITBUCKET_TOKEN": "", "BITBUCKET_APP_PASSWORD": "apppw", "BITBUCKET_USERNAME": "user@example.com", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.clone_repo") as mock_clone:
+                _ensure_extra_skills(tmp_path)
+        assert (mock_clone.call_args.kwargs["http_token"], mock_clone.call_args.kwargs["http_username"]) == ("apppw", "user@example.com")
+
+    def test_github_token_falls_back_to_github_token_var(self, tmp_path):
+        raw = json.dumps([{"url": "https://github.com/org/repo.git", "sparse": False}])
+        env = {"GH_TOKEN": "", "GITHUB_TOKEN": "ghtok", "EXTRA_SKILLS_REPOS": raw}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("scripts.common.claude_runner.clone_repo") as mock_clone:
+                _ensure_extra_skills(tmp_path)
+        assert mock_clone.call_args.kwargs["http_token"] == "ghtok"
+
     def test_comma_separated_plain_urls(self, tmp_path):
         """Comma-separated list of plain URLs must expand to two repos."""
         raw = "https://github.com/org/repo1.git,https://github.com/org/repo2.git"
@@ -320,7 +346,7 @@ class TestEnsureExtraSkillsUrlExpansion:
     def test_empty_bitbucket_token_warns(self, tmp_path, capsys):
         """When BITBUCKET_TOKEN is unset/empty, a clear warning is printed before clone."""
         raw = json.dumps([{"url": "https://bitbucket.org/org/repo.git", "sparse": True}])
-        env = {"BITBUCKET_TOKEN": "", "DEFAULT_TRACKER": "jira", "EXTRA_SKILLS_REPOS": raw}
+        env = {"BITBUCKET_TOKEN": "", "BITBUCKET_APP_PASSWORD": "", "DEFAULT_TRACKER": "jira", "EXTRA_SKILLS_REPOS": raw}
         with patch.dict(os.environ, env, clear=False):
             with patch("scripts.common.claude_runner.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
@@ -332,7 +358,7 @@ class TestEnsureExtraSkillsUrlExpansion:
     def test_empty_gh_token_warns(self, tmp_path, capsys):
         """When GH_TOKEN is unset/empty, a clear warning is printed before clone."""
         raw = json.dumps([{"url": "https://github.com/org/repo.git", "sparse": True}])
-        env = {"GH_TOKEN": "", "DEFAULT_TRACKER": "github", "EXTRA_SKILLS_REPOS": raw}
+        env = {"GH_TOKEN": "", "GITHUB_TOKEN": "", "DEFAULT_TRACKER": "github", "EXTRA_SKILLS_REPOS": raw}
         with patch.dict(os.environ, env, clear=False):
             with patch("scripts.common.claude_runner.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
@@ -708,3 +734,83 @@ def test_run_claude_launches_with_docker_host(mock_popen, tmp_path, monkeypatch)
     mock_popen.return_value = _make_proc(['{"status":"DONE"}\n'])
     run_claude("go", working_dir=tmp_path)
     assert mock_popen.call_args.kwargs["env"]["DOCKER_HOST"] == "tcp://localhost:2375"
+
+
+def test_claude_env_has_every_variable_pr_context_and_the_tracker_need(monkeypatch):
+    """The model's Bash runs scripts.common.pr_context, which reads these (see _bitbucket_auth / tracker detection)."""
+    from scripts.common.claude_runner import build_claude_env
+    wanted = {"BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t", "BITBUCKET_APP_PASSWORD": "p", "DEFAULT_TRACKER": "jira",
+              "JIRA_BASE_URL": "https://x", "JIRA_EMAIL": "e", "JIRA_API_TOKEN": "j", "GH_TOKEN": "g"}
+    for k, v in wanted.items():
+        monkeypatch.setenv(k, v)
+    env = build_claude_env()
+    assert {k: env.get(k) for k in wanted} == wanted
+
+
+class TestCredentialsReachTheModelShell:
+    def test_qa_prefix_and_named_passthrough_are_forwarded(self, monkeypatch):
+        from scripts.common.claude_runner import build_claude_env
+        monkeypatch.setenv("QA_USERNAME", "u")
+        monkeypatch.setenv("QA_AUTH_HEADER", "Authorization: Bearer x")
+        monkeypatch.setenv("NPM_TOKEN", "n")
+        monkeypatch.setenv("OTHER_SECRET", "o")
+        monkeypatch.setenv("SKILL_ENV_PASSTHROUGH", "NPM_TOKEN, MISSING_ONE ,bad name;rm")
+        env = build_claude_env()
+        assert env["QA_USERNAME"] == "u" and env["QA_AUTH_HEADER"] == "Authorization: Bearer x" and env["NPM_TOKEN"] == "n"
+        assert "OTHER_SECRET" not in env and "MISSING_ONE" not in env and "SKILL_ENV_PASSTHROUGH" not in env
+
+    def test_org_config_aliases_become_real_env_vars(self, monkeypatch):
+        from scripts.common.claude_runner import build_claude_env, export_aliased_env
+        from scripts.common.config import load_config
+        monkeypatch.delenv("BITBUCKET_USERNAME", raising=False)
+        monkeypatch.setenv("BitbucketUsername", "me@example.com")
+        export_aliased_env(load_config())
+        assert build_claude_env()["BITBUCKET_USERNAME"] == "me@example.com"
+
+    def test_an_existing_env_var_is_never_overwritten(self, monkeypatch):
+        from scripts.common.claude_runner import export_aliased_env
+        monkeypatch.setenv("GH_TOKEN", "from-secret")
+        export_aliased_env({"GH_TOKEN": "from-config"})
+        assert __import__("os").environ["GH_TOKEN"] == "from-secret"
+
+
+from scripts.common.git_utils import host_clone_auth  # noqa: E402
+
+
+class TestHostCloneAuth:
+    def test_bitbucket_atatt_uses_x_token_auth(self):
+        assert host_clone_auth("https://bitbucket.org/a/b.git", {"BITBUCKET_TOKEN": "ATATT3x", "BITBUCKET_USERNAME": "me@x.io"}) == (
+            "BITBUCKET_TOKEN", "ATATT3x", "x-token-auth")
+
+    def test_bitbucket_app_password_fallback_uses_the_username(self):
+        assert host_clone_auth("https://bitbucket.org/a/b.git", {"BITBUCKET_APP_PASSWORD": "pw", "BITBUCKET_USERNAME": "me"}) == (
+            "BITBUCKET_TOKEN", "pw", "me")
+
+    def test_github_regardless_of_the_jobs_tracker(self):
+        assert host_clone_auth("https://github.com/a/b.git", {"GITHUB_TOKEN": "g", "DEFAULT_TRACKER": "jira"}) == ("GH_TOKEN", "g", "x-access-token")
+
+    @pytest.mark.parametrize("url", ["https://example.com/a/b.git", "https://bitbucket.org.evil.example/a/b.git",
+                                     "https://evil.example/bitbucket.org/a/b.git"])
+    def test_other_hosts_get_no_credentials(self, url):
+        assert host_clone_auth(url, {"BITBUCKET_TOKEN": "t", "GH_TOKEN": "g"}) == ("", "", "")
+
+    def test_no_token_means_the_anonymous_username(self):
+        assert host_clone_auth("https://bitbucket.org/a/b.git", {}) == ("BITBUCKET_TOKEN", "", "x-token-auth")
+
+
+def test_extra_skills_clone_does_not_leave_the_token_in_git_config(tmp_path):
+    """The clone embeds credentials in the origin URL; code run later (PR tests) must not find them there."""
+    import subprocess as sp
+    raw = json.dumps([{"url": "https://bitbucket.org/org/repo.git", "sparse": False}])
+
+    def fake_clone(url, dest, depth=1, http_token="", http_username=""):
+        sp.run(["git", "init", "-q", str(dest)], check=True)
+        sp.run(["git", "-C", str(dest), "remote", "add", "origin", f"https://{http_username}:{http_token}@bitbucket.org/org/repo.git"], check=True)
+
+    env = {"BITBUCKET_TOKEN": "s3cr3t-token", "BITBUCKET_USERNAME": "me@example.com", "EXTRA_SKILLS_REPOS": raw}
+    with patch.dict(os.environ, env, clear=False), patch("scripts.common.claude_runner.clone_repo", side_effect=fake_clone):
+        _ensure_extra_skills(tmp_path)
+    config = (tmp_path / "_extra_repo" / ".git" / "config").read_text()
+    assert "s3cr3t-token" not in config
+    origin = sp.run(["git", "-C", str(tmp_path / "_extra_repo"), "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    assert origin == "https://bitbucket.org/org/repo.git"

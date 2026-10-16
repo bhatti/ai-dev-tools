@@ -11,8 +11,8 @@ Related: [architecture](architecture.md), [formicary integration](formicary-inte
 @bot skill ygs-flaky-test --repo org/repo -- tests/cart.test.js         # explicit test (a bare path or ticket text goes after --)
 @bot skill ygs-flaky-test https://github.com/org/repo/issues/42         # ticket with a failure excerpt
 @bot skill ygs-qa https://bitbucket.org/ws/repo/pull-requests/12 --url https://staging.example.com
-@bot skill ygs-qa <pr-url> --mode regression --baseline-url https://prod.example.com --url https://pr-12.example.com
-@bot skill ygs-qa <pr-url> --mode regression --baseline-image app:1.4 --image app:pr-12 --dind
+@bot skill ygs-qa <pr-url> --baseline-url https://prod.example.com --url https://pr-12.example.com
+@bot skill ygs-qa <pr-url> --baseline-image app:1.4 --image app:pr-12 --dind
 ```
 A GitHub PR/issue URL or Bitbucket PR URL as the first argument names the repo; a bare Jira key becomes the identifier. Container tiers (`--image`, `--compose`) need a Docker daemon: add `--dind`. Without one the run stops with BLOCKED and says so.
 
