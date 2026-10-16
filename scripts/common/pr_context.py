@@ -30,8 +30,9 @@ from scripts.analyze.pr_fetcher import (
     fetch_prs_by_numbers,
 )
 from scripts.common import acli_fallback
-from scripts.common.bitbucket_api import _BASE as BB_BASE
+from scripts.common.bitbucket_api import api_base
 from scripts.common.config import load_config
+from scripts.common.jira_api import extract_adf_text
 from scripts.mq._shared import _strip_slack_url, apply_repo_override, parse_pr_ref
 
 DEFAULT_MAX_DIFF_BYTES = 400_000
@@ -221,7 +222,7 @@ def fetch_pr_diff(config: dict, tracker: str, number: str, max_bytes: int = DEFA
     if tracker == "bitbucket":
         ws, repo = config.get("BITBUCKET_WORKSPACE", ""), config.get("BITBUCKET_REPO", "")
         try:
-            with requests.get(f"{BB_BASE}/repositories/{ws}/{repo}/pullrequests/{number}/diff", auth=_bb_auth(config),
+            with requests.get(f"{api_base()}/repositories/{ws}/{repo}/pullrequests/{number}/diff", auth=_bb_auth(config),
                               timeout=60, allow_redirects=True, stream=True) as resp:
                 if not resp.ok:
                     return "", f"bitbucket diff HTTP {resp.status_code}"
@@ -279,13 +280,13 @@ def changed_files_from_diff(diff: str) -> list[str]:
     return files
 
 
-def _issue_record(ref: dict, config: dict) -> dict:
+def _issue_record(ref: dict, config: dict, jira_acli_ready=lambda: False) -> dict:
     cfg = dict(config)
     if ref["source"] == "github" and ref.get("repo"):
         cfg["GH_ORG"], _, cfg["GH_REPO"] = ref["repo"].partition("/")
     details = fetch_issue_details(ref, cfg)
     if details is None and ref["source"] == "jira" and not (cfg.get("JIRA_EMAIL") and cfg.get("JIRA_API_TOKEN")) \
-            and acli_fallback.acli_ready("jira", "jira"):
+            and jira_acli_ready():
         details = acli_fallback.jira_issue(ref["key"])
     rec: dict = {"key": ref["key"], "source": ref["source"], "url": ref.get("url", "")}
     if details is None:
@@ -295,7 +296,6 @@ def _issue_record(ref: dict, config: dict) -> dict:
         return {**rec, "access_denied": True, "acceptance_criteria": [], "has_acceptance_criteria": None}
     body = details.get("body", "")
     if not isinstance(body, str):  # ADF document from a v3 endpoint
-        from scripts.common.jira_api import extract_adf_text
         body = extract_adf_text(body)
     ac, hints = extract_ac_items(body)
     return {**rec, "title": details.get("title", ""), "body": body, "labels": details.get("labels", []),
@@ -380,7 +380,14 @@ def build_context(ref: str, config: dict, diff_dir: Path | None = None,
     files = changed_files_from_diff(diff) or list(pr.get("file_paths", []))
 
     ignored: list[str] = []
-    issues = [_issue_record(r, config) for r in collect_issue_refs(pr, config, tracker, ignored)]
+    probe: list[bool] = []   # acli is probed at most once per context, however many issues are linked
+
+    def jira_acli_ready() -> bool:
+        if not probe:
+            probe.append(acli_fallback.acli_ready("jira", "jira"))
+        return probe[0]
+
+    issues = [_issue_record(r, config, jira_acli_ready) for r in collect_issue_refs(pr, config, tracker, ignored)]
     pr_items, pr_hints = extract_ac_items(pr.get("body", "") or "")
     sources = [f"issue:{i['key']}" for i in issues if i.get("acceptance_criteria")]
     if pr_items:

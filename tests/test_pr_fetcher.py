@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scripts.analyze.pr_fetcher import (
-    KNOWN_BOTS,
     _fetch_single_bb_pr,
     _fetch_single_gh_pr,
     _filter_by_team,

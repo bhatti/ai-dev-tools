@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(os.environ.get("YGS_SKILLS_DIR") or Path(__file__).resolve().parents[2] / "you-got-skills")
-SKILLS = ["ygs-flaky-test", "ygs-qa"]
-SHARED = ["pr-context.md", "evidence-rules.md"]
+SKILLS = ["ygs-flaky-test", "ygs-qa", "ygs-pr-risk"]
+SHARED = ["pr-context.md", "evidence-rules.md", "pr-metrics.md"]
 MAX_SKILL_LINES = 260
 
 pytestmark = pytest.mark.skipif(not (ROOT / "skills").is_dir(), reason="you-got-skills checkout not found")

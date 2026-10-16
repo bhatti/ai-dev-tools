@@ -6,20 +6,25 @@ Required config keys:
     BITBUCKET_TOKEN     — BitBucket App Password
 """
 
+import os
 import sys
 from typing import Any
 
 import requests
 
-_BASE = "https://api.bitbucket.org/2.0"
+# BITBUCKET_API_BASE points the client at a proxy or gateway; the default is Bitbucket Cloud.
+def api_base() -> str:
+    """Bitbucket REST base URL, read from the environment at call time."""
+    return os.environ.get("BITBUCKET_API_BASE", "https://api.bitbucket.org/2.0").rstrip("/")
 
 
-def _auth(config: dict) -> tuple[str, str]:
-    return (config["BITBUCKET_USERNAME"], config["BITBUCKET_TOKEN"])
+def auth(config: dict) -> tuple[str, str]:
+    token = config.get("BITBUCKET_TOKEN") or config.get("BITBUCKET_APP_PASSWORD") or ""
+    return (config["BITBUCKET_USERNAME"], token)
 
 
 def _repo(workspace: str, repo: str) -> str:
-    return f"{_BASE}/repositories/{workspace}/{repo}"
+    return f"{api_base()}/repositories/{workspace}/{repo}"
 
 
 # --------------------------------------------------------------------------
@@ -45,7 +50,7 @@ def create_pr(
         "destination": {"branch": {"name": dest_branch}},
         "close_source_branch": close_source_branch,
     }
-    resp = requests.post(url, auth=_auth(config), json=payload, timeout=30)
+    resp = requests.post(url, auth=auth(config), json=payload, timeout=30)
     if not resp.ok:
         print(f"BitBucket create_pr error {resp.status_code}: {resp.text}", file=sys.stderr)
         return None
@@ -60,7 +65,7 @@ def get_pr(config: dict, workspace: str, repo: str, pr_id: int | str) -> dict | 
     """Fetch a single PR by ID. Raises BitbucketNetworkError on timeout/connection failure."""
     url = f"{_repo(workspace, repo)}/pullrequests/{pr_id}"
     try:
-        resp = requests.get(url, auth=_auth(config), timeout=30)
+        resp = requests.get(url, auth=auth(config), timeout=30)
     except requests.exceptions.Timeout as exc:
         raise BitbucketNetworkError(f"Bitbucket API timed out fetching PR {pr_id}") from exc
     except requests.exceptions.ConnectionError as exc:
@@ -90,7 +95,7 @@ def list_pr_comments(config: dict, workspace: str, repo: str, pr_id: int | str) 
     for _ in range(max_pages):
         if not url:
             break
-        resp = requests.get(url, auth=_auth(config), timeout=30)
+        resp = requests.get(url, auth=auth(config), timeout=30)
         if not resp.ok:
             break
         data = resp.json()
@@ -108,7 +113,7 @@ def add_pr_comment(
     payload: dict = {"content": {"raw": body}}
     if parent_id:
         payload["parent"] = {"id": int(parent_id)}
-    resp = requests.post(url, auth=_auth(config), json=payload, timeout=30)
+    resp = requests.post(url, auth=auth(config), json=payload, timeout=30)
     if not resp.ok:
         print(f"BitBucket add_comment error {resp.status_code}: {resp.text}", file=sys.stderr)
         return False

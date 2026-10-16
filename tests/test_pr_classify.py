@@ -5,11 +5,10 @@ Exercises both BB-style and GH-style PR dicts to verify tracker-agnostic behavio
 """
 import pytest
 
+from scripts.common.pr_metrics import PR_TYPE_EMOJI, RISK_EMOJI
 from scripts.common.pr_classify import (
     SENSITIVE_PATHS,
     HIGH_BLAST_CATEGORIES,
-    PR_TYPE_EMOJI,
-    RISK_EMOJI,
     apply_blast_cap,
     build_category_breakdown,
     build_metrics_dashboard,

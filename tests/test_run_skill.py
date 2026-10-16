@@ -315,13 +315,14 @@ def _sample_pr_data():
 
 def test_pr_queue_markdown_has_expanded_columns():
     md = _pr_queue_to_markdown(_sample_pr_data(), "Test PR Queue")
-    assert "| Cat |" in md
+    assert "| Category |" in md
     assert "| Type |" in md
     assert "| Blast |" in md
     assert "| Risk |" in md
     assert "| LOC |" in md
     assert "| Files |" in md
     assert "| Cx |" in md
+    assert "| Comments |" in md and "| Tasks |" in md and "| Major/Critical |" in md and "| Commits |" in md
 
 
 def test_pr_queue_markdown_has_summary_tables():
@@ -332,7 +333,7 @@ def test_pr_queue_markdown_has_summary_tables():
 
 def test_pr_queue_markdown_hotspot_emoji():
     md = _pr_queue_to_markdown(_sample_pr_data(), "Test PR Queue")
-    assert "🔥 security" in md
+    assert "🔥 ⚠️ security" in md
 
 
 def test_pr_queue_markdown_empty_prs():
@@ -370,7 +371,7 @@ def test_pr_queue_markdown_gh_style_pr():
         }],
     }
     md = _pr_queue_to_markdown(data, "GH Queue")
-    assert "PR #55" in md
+    assert "[#55]" in md
     assert "🔥 auth" in md
     assert "feature" in md
     assert "120" in md

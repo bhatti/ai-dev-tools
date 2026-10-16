@@ -1,6 +1,7 @@
 """Tests for scripts/mq/report.py"""
 
 import json
+import pytest
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -298,7 +299,7 @@ class TestBuildReport:
             "shards": 1, "wall_clock_s": 12.3, "status": "PASS",
         }))
         md, ctx = _build_report(tmp_path, "42", "Pipeline")
-        assert "## Scope" in md
+        assert "## PR Metrics" in md and "## Scope" not in md
         assert "## Risk Score" in md
         assert "## Test Impact Analysis" in md
         assert "## Test Results" in md
@@ -625,7 +626,7 @@ class TestRiskHeatmapHtml:
 
 
 class TestPROverviewSection:
-    """PR Overview section appears in gate-review (single-PR) mode only."""
+    """PR Overview section appears in pr-risk (single-PR) mode only."""
 
     def test_shows_title_and_description_when_present(self, tmp_path):
         (tmp_path / "scope.json").write_text(json.dumps({
@@ -673,8 +674,8 @@ class TestPROverviewSection:
         assert "## PR Overview" not in md
 
 
-class TestGateReviewMetricsDashboard:
-    """Gate-review single-PR report shows 5-column Metrics Dashboard."""
+class TestPrRiskMetricsDashboard:
+    """PR-risk single-PR report shows exactly one 5-column metrics table."""
 
     def _scope(self, **kw):
         base = {
@@ -691,8 +692,9 @@ class TestGateReviewMetricsDashboard:
         (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
         (tmp_path / "risk_score.json").write_text(json.dumps({"tier": "MEDIUM", "score": 30, "requires_human_approval": False}))
         md, _ = _build_report(tmp_path, "42", "Scope & Blast Radius")
-        assert "## Metrics Dashboard" in md
-        assert "| Metric | Value | Benchmark | Signal | Description |" in md
+        assert "## PR Metrics" in md
+        assert md.count("| Metric | Value | Benchmark | Signal | Description |") == 1   # one table, not Scope + Dashboard
+        assert "## Scope" not in md and "## Metrics Dashboard" not in md
 
     def test_loc_changed_row_present(self, tmp_path):
         (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
@@ -710,6 +712,28 @@ class TestGateReviewMetricsDashboard:
         (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
         md, _ = _build_report(tmp_path, "10", "Scope & Blast Radius")
         assert "PR Age" in md
+
+    def test_review_signals_and_findings_appear_in_the_same_table(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        (tmp_path / "pr_signals.json").write_text(json.dumps({"tracker": "github", "prs": {"42": {
+            "groups": ["comments", "reviewers", "tasks", "commits"], "truncated": [], "error": "",
+            "comments_human": 4, "comments_bot": 2, "major_comments_human": 1, "major_comments_bot": 0,
+            "reviewers": [], "reviewers_human": 2, "reviewers_bot": 1, "approvers": ["bob"],
+            "tasks_human": 3, "tasks_bot": 1, "tasks_unresolved": 2, "commits": 6}}}))
+        (tmp_path / "findings.json").write_text(json.dumps({"findings": [{"severity": "CRITICAL"}, {"severity": "HIGH"}, {"severity": "LOW"}]}))
+        md, _ = _build_report(tmp_path, "42", "PR risk")
+        assert md.count("| Metric | Value | Benchmark |") == 1
+        assert "| Comments (human · bot) | 4 👤 · 2 🤖 |" in md
+        assert "| Tasks (human · bot) | 3 👤 · 1 🤖 (2 open) |" in md
+        assert "| Commits | 6 |" in md
+        assert "| Major/Critical Issues | 3 (ai 2 · human 1) |" in md
+        assert "| Reviewers | 1/2 ✅ · 1 🤖 |" in md
+
+    def test_failed_signal_fetch_is_not_zero(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps(self._scope()))
+        (tmp_path / "pr_signals.json").write_text(json.dumps({"tracker": "github", "prs": {"42": {"error": "rate limit", "groups": []}}}))
+        md, _ = _build_report(tmp_path, "42", "PR risk")
+        assert "| Comments (human · bot) | n/a |" in md
 
     def test_dashboard_absent_without_pr_number(self, tmp_path):
         # Aggregate mode (no PR number) → no single-PR metrics dashboard
@@ -766,3 +790,18 @@ class TestBuildMqSlackSummary:
         text = _build_mq_slack_summary(ctx, prs, lanes)
         assert "Defect rate: 0.0%" in text
         assert "Batch success" not in text
+
+
+class TestCorruptSignalsFile:
+    @pytest.mark.parametrize("content", ["[]", "null", "42", "{\"prs\": []}", "{\"prs\": {\"42\": []}}", "{not json"])
+    def test_report_renders_without_signals(self, tmp_path, content):
+        (tmp_path / "scope.json").write_text(json.dumps({"scope": "api", "blast_radius": "low", "changed_files": 1, "additions": 1, "deletions": 0}))
+        (tmp_path / "pr_signals.json").write_text(content)
+        md, _ = _build_report(tmp_path, "42", "PR risk")
+        assert "| Comments (human · bot) | — |" in md
+
+    def test_a_record_missing_its_counts_does_not_crash(self, tmp_path):
+        (tmp_path / "scope.json").write_text(json.dumps({"scope": "api", "blast_radius": "low", "changed_files": 1, "additions": 1, "deletions": 0}))
+        (tmp_path / "pr_signals.json").write_text(json.dumps({"prs": {"42": {"groups": ["comments", "tasks", "commits"]}}}))
+        md, _ = _build_report(tmp_path, "42", "PR risk")
+        assert "| Comments (human · bot) | 0 👤 · 0 🤖 |" in md

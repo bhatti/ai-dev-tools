@@ -37,8 +37,9 @@ import click
 
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
-from scripts.common.models import ModelError, resolve_model
+from scripts.common.models import ModelError, resolve_run_model
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
+from scripts.common.pr_signals import collect_signals, pr_number, enabled as pr_signals_enabled, from_classified_comments, tracker_name
 from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution, build_pr_metrics_table, build_metrics_dashboard, build_stale_pr_table
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.report_utils import write_report
@@ -62,35 +63,76 @@ def _filter_prs_by_state(prs: list[dict], pr_states: list[str]) -> list[dict]:
 
 
 def _build_metrics_summary(prs: list[dict]) -> str:
-    """Build pre-computed PR metrics summary markdown for prompt and report appendix."""
+    """Pre-computed PR metrics summary markdown for the prompt (tables only; the report gets the same via the pipeline)."""
+    return _build_metrics_summary_with_claude(prs, [])
+
+
+def _build_metrics_summary_with_claude(prs: list[dict], extra_rows: list[tuple]) -> str:
+    """Category breakdown, work types, per-PR table, stale PRs and the single Metrics Dashboard (with ``extra_rows``)."""
     lines = ["## Pre-Computed PR Metrics Summary", ""]
     lines += build_category_breakdown(prs)
     lines += build_work_type_distribution(prs)
     lines += build_pr_metrics_table(prs)
     lines += build_stale_pr_table(prs, threshold_days=7)
-    dashboard = build_metrics_dashboard(prs)
+    dashboard = build_metrics_dashboard(prs, extra_rows=extra_rows)
     if dashboard:
         lines.append(dashboard)
     return "\n".join(lines) if len(lines) > 2 else ""
 
 
-def _build_metrics_summary_with_claude(prs: list[dict], claude_extra_rows: list[tuple], *,
-                                        include_dashboard: bool = True) -> str:
-    """Build pre-computed PR metrics + optional Claude-assessed rows in one dashboard.
+_DASHBOARD_HEADING = r"(?:metrics dashboard|process metrics|claude-assessed[^\n]*)"
+_DASHBOARD_SECTION_RE = re.compile(rf"^#{{1,6}}[^\n]*{_DASHBOARD_HEADING}[^\n]*\n.*?(?=^#{{1,6}} |\Z)", re.IGNORECASE | re.MULTILINE | re.DOTALL)
+_PRECOMPUTED_HEADING = "## Pre-Computed PR Metrics Summary"
 
-    When include_dashboard=False, omits the inner ### Metrics Dashboard sub-section
-    (used when Claude already wrote its own dashboard to avoid DORA duplication).
+
+def _extract_and_strip_metrics_tables(md: str) -> tuple[str, list[tuple]]:
+    """Remove the metrics tables of an audit report and return the model-written rows.
+
+    The pipeline appends one regenerated summary with one dashboard, so what is removed here is (a) a previously
+    appended summary (a re-run) and (b) dashboard-style sections the model wrote ("Metrics Dashboard",
+    "Process Metrics", "Claude-Assessed ..."). Rows are ``(metric, value, benchmark, signal, description)`` from (b)
+    only: (a) is recomputed. Other sections that merely mention metrics (design metrics, discussion) stay.
     """
-    lines = ["## Pre-Computed PR Metrics Summary", ""]
-    lines += build_category_breakdown(prs)
-    lines += build_work_type_distribution(prs)
-    lines += build_pr_metrics_table(prs)
-    lines += build_stale_pr_table(prs, threshold_days=7)
-    if include_dashboard:
-        dashboard = build_metrics_dashboard(prs, extra_rows=claude_extra_rows)
-        if dashboard:
-            lines.append(dashboard)
-    return "\n".join(lines) if len(lines) > 2 else ""
+    cut = md.find(_PRECOMPUTED_HEADING)
+    if cut != -1:
+        md = md[:cut].rstrip() + "\n"
+    rows: list[tuple] = []
+
+    def take(m: re.Match) -> str:
+        found = []
+        for line in m.group(0).splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if line.lstrip().startswith("|") and len(cells) == 5 and cells[0].lower() != "metric" and not set(cells[0]) <= set("-: "):
+                found.append(tuple(cells))
+        if not found:
+            return m.group(0)
+        rows.extend(found)
+        return ""
+
+    return _DASHBOARD_SECTION_RE.sub(take, md), rows
+
+
+def _attach_review_signals(prs: list[dict], config: dict, workspace: Path) -> None:
+    """Attach review signals to each PR: comments and reviewers come from the comments the audit already fetched
+    (no extra calls); tasks and commits come from the batched ``pr_signals`` fetch."""
+    failure = ""
+    try:
+        extra = collect_signals(prs, tracker_name(config.get("DEFAULT_TRACKER", "")), config, ("tasks", "commits"), workspace=workspace)
+    except Exception as e:  # noqa: BLE001 - enrichment only
+        failure = f"{type(e).__name__}: {e}"
+        print(f"[pr-audit] review signals unavailable: {failure}", flush=True)
+        extra = {}
+    for pr in prs:
+        rec = from_classified_comments(pr)
+        fetched = extra.get(pr_number(pr), {})
+        if fetched and not fetched.get("error"):
+            rec.update({k: v for k, v in fetched.items() if k not in ("groups", "error", "truncated")})
+            rec["groups"] = sorted(set(rec["groups"]) | set(fetched.get("groups", [])))
+            rec["truncated"] = fetched.get("truncated", [])
+        elif pr_signals_enabled():   # a failed fetch is "n/a", not "not collected"
+            reason = fetched.get("error") or failure or "not fetched"
+            rec["group_errors"] = {"tasks": reason, "commits": reason}
+        pr["signals"] = rec
 
 
 # Mapping from pr_audit_findings.json metrics keys to (display_name, benchmark, description)
@@ -708,7 +750,7 @@ Write these files using relative paths from the repo root (the `reports/` symlin
      - File path in `.claude/skills/`
      - Which PRs motivated it (minimum 3)
      - What the skill file currently says (if it exists) vs what needs to change
-   - **Metrics Dashboard**: spec coverage %, CI catch rate, review-bot catch rate, human review burden %
+   - **Metrics Dashboard**: spec coverage %, CI catch rate, review-bot catch rate, human review burden % (the pipeline merges your rows with the computed rows into the report's single dashboard)
    - **Single-PR observations** appendix: one-off issues that don't warrant skill changes
    - **Checked — No Issues Found** section (proves thoroughness)
    - Minimum 2000 chars. If you write less, you did not analyze enough PRs.
@@ -784,7 +826,7 @@ def _apply_model_override(config: dict, slack_flags: dict) -> None:
     flag into it) is the fallback. Exits 1 on an unknown name."""
     requested = slack_flags["model"] or os.getenv("AI_MODEL_OVERRIDE", "")
     try:
-        config["AI_MODEL"] = resolve_model(requested=requested, env_model=config.get("AI_MODEL", ""))
+        config["AI_MODEL"] = resolve_run_model(config, slack_flags["model"])
     except ModelError as e:
         print(f"[pr-audit] ERROR: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
@@ -1039,6 +1081,8 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         print(f"::add-task-context SKILL::{actual_skill}", flush=True)
         print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
 
+        _attach_review_signals(prs, config, reports_dir.parent)
+
         # -- Build prompt ------------------------------------------------------
         if skill_md:
             state_summary = compute_pr_state_summary(prs)
@@ -1177,36 +1221,19 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         #    and must not be skipped when Claude already wrote its own dashboard.
         report_md_path = reports_dir / "pr_audit_report.md"
         if report_md_path.exists() and prs:
-            md_content = report_md_path.read_text(encoding="utf-8")
-            claude_extra_rows = _read_all_claude_metrics(reports_dir)
-            claude_dashboard_written = "Metrics Dashboard" in md_content
-
-            if claude_dashboard_written and claude_extra_rows:
-                # Claude already wrote a dashboard — append Claude-assessed rows as a supplement
-                supplement_lines = ["\n\n### Claude-Assessed Process Metrics\n",
-                                    "| Metric | Value | Benchmark | Signal | Description |",
-                                    "|--------|-------|-----------|--------|-------------|"]
-                for row in claude_extra_rows:
-                    supplement_lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} |")
-                supplement_lines.append("")
-                md_content += "\n".join(supplement_lines) + "\n"
-                report_md_path.write_text(md_content, encoding="utf-8")
-                print(f"[pr-audit] appended {len(claude_extra_rows)} Claude-assessed metric rows", flush=True)
-
-            # Always append the pre-computed section (category breakdown, per-PR table,
-            # stale PRs, and 5-col metrics dashboard including DORA rows).
-            # When Claude wrote its own dashboard, skip the inner ### Metrics Dashboard
-            # sub-section to avoid duplicating DORA rows; include it only when Claude
-            # did not write one so we get the full table.
-            if "Pre-Computed PR Metrics" not in md_content:
-                pre_rows = [] if claude_dashboard_written else claude_extra_rows
-                _append_text = _build_metrics_summary_with_claude(
-                    prs, pre_rows, include_dashboard=not claude_dashboard_written
-                )
-                if len(_append_text.strip()) > 10:
-                    md_content += f"\n\n{_append_text}\n"
-                    report_md_path.write_text(md_content, encoding="utf-8")
-                    print(f"[pr-audit] appended pre-computed metrics summary ({len(pre_rows)} Claude rows)", flush=True)
+            md_content, written_rows = _extract_and_strip_metrics_tables(report_md_path.read_text(encoding="utf-8"))
+            # ONE dashboard: computed rows + review-signal rows + the model's rows (report table and findings JSON, by name).
+            rows: list[tuple] = []
+            seen: set[str] = set()
+            for row in written_rows + _read_all_claude_metrics(reports_dir):
+                if row[0].lower() not in seen:
+                    seen.add(row[0].lower())
+                    rows.append(row)
+            _append_text = _build_metrics_summary_with_claude(prs, rows)
+            if len(_append_text.strip()) > 10:
+                md_content += f"\n\n{_append_text}\n"
+                print(f"[pr-audit] appended pre-computed metrics summary ({len(rows)} extra dashboard rows)", flush=True)
+            report_md_path.write_text(md_content, encoding="utf-8")
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "pr_audit_report.html"

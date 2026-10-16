@@ -13,10 +13,12 @@ model-tiers      implement-style tier export + settings.json written from the JS
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import ModuleType
 
 from scripts.common.models import resolve_model
 
+YAML_DIR = Path(__file__).resolve().parents[2] / "formicary" / "docs" / "examples"
 MODEL_SCRIPTS = [
     "scripts/common/models.py", "scripts/common/models.json", "scripts/common/claude_runner.py", "scripts/common/config.py",
     "scripts/skill/run_skill.py", "scripts/skill/flags.py", "scripts/adhoc/run_skill.py", "scripts/analyze/run_pr_audit.py",
@@ -87,21 +89,30 @@ def build_tests(h: ModuleType) -> dict:
                 return h._fail(result, step, "a bad --model must fail before the clone")
         return h._pass(result, "typo in --model -> exit 1 before cloning, message lists the valid aliases")
 
+    def implement_block() -> str:
+        """The tier-selection shell lines of the real ai-gh-implement.yaml (so the test follows the workflow, not a copy)."""
+        lines = (YAML_DIR / "ai-gh-implement.yaml").read_text().splitlines()
+        start = next(i for i, l in enumerate(lines) if "COMPLEXITY=$(cat /workspace/plan_complexity.txt" in l)
+        end = next(i for i in range(start, len(lines)) if 'echo "[implement] complexity=' in lines[i])
+        block = lines[start:end + 1]
+        indent = len(block[0]) - len(block[0].lstrip())
+        return "\n".join(l[indent:] for l in block)
+
     def test_tiers(base_env):
         result = h.TestResult("model-tiers")
         env = {k: v for k, v in base_env.items() if k not in _CLEAR}
+        block = implement_block()
         with h.pod_fixture("model-tiers") as pod:
-            step = h.exec_step(pod, "tiers", r'''
-# the implement task: tier from the plan, model from models.json
+            step = h.exec_step(pod, "tiers", f"""
+# the implement task: tier from the plan (the YAML's own lines), model from models.json
+mkdir -p /workspace
 for c in low medium high bogus; do
-  echo "$c" > /tmp/plan_complexity.txt
-  COMPLEXITY=$(cat /tmp/plan_complexity.txt)
-  case "$COMPLEXITY" in low|medium|high) ;; *) COMPLEXITY=medium ;; esac
-  export AI_MODEL_TIER="$COMPLEXITY"
-  echo "::add-task-context TIER_$c::$(python3 -c "from scripts.common.config import load_config; print(load_config()['AI_MODEL'])" 2>&1 | tail -1)"
+  echo "$c" > /workspace/plan_complexity.txt
+  ( {block}
+    echo "::add-task-context TIER_$c::$(python3 -c "from scripts.common.config import load_config; print(load_config()['AI_MODEL'])" 2>&1 | tail -1)" )
 done
 unset AI_MODEL_TIER
-export HOME=/tmp/home-models; mkdir -p $HOME/.claude; echo '{"enabledPlugins":{"x":true},"env":{"ANTHROPIC_DEFAULT_OPUS_MODEL":"stale"}}' > $HOME/.claude/settings.json
+export HOME=/tmp/home-models; mkdir -p $HOME/.claude; echo '{{"enabledPlugins":{{"x":true}},"env":{{"ANTHROPIC_DEFAULT_OPUS_MODEL":"stale"}}}}' > $HOME/.claude/settings.json
 python3 -c "
 from pathlib import Path; from scripts.common.claude_runner import write_bedrock_settings
 write_bedrock_settings(Path.home() / '.claude' / 'settings.json')"
@@ -109,9 +120,9 @@ python3 - <<'PYEOF'
 import json, os
 s = json.load(open(os.path.expanduser("~/.claude/settings.json")))
 print("::add-task-context SETTINGS_OPUS::" + s["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"])
-print("::add-task-context SETTINGS_KEPT::" + str(s.get("enabledPlugins") == {"x": True}))
+print("::add-task-context SETTINGS_KEPT::" + str(s.get("enabledPlugins") == {{"x": True}}))
 PYEOF
-''', env, timeout=120)
+""", env, timeout=120)
             result.steps.append(step)
             err = h._check_values(step, {
                 "TIER_low": resolve_model(tier="low"), "TIER_medium": resolve_model(tier="medium"),
@@ -119,7 +130,7 @@ PYEOF
                 "SETTINGS_OPUS": resolve_model(requested="opus"), "SETTINGS_KEPT": "True"})
             if err:
                 return h._fail(result, step, err)
-        return h._pass(result, "plan complexity -> tier -> model through load_config; settings.json refreshed from models.json, other keys kept")
+        return h._pass(result, "the workflow's own tier lines: plan complexity -> tier -> model through load_config; settings.json refreshed from models.json, other keys kept")
 
     def test_cli_config(base_env):
         """Formicary bypasses entrypoint.sh: run_skill must create the acli profiles itself."""

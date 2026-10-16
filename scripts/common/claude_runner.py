@@ -33,8 +33,9 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts.common.git_utils import clone_repo, drop_stored_credentials
+from scripts.common.git_utils import clone_repo, drop_stored_credentials, host_clone_auth, sparse_clone_repo
 from scripts.common.models import model_env
+from scripts.common.redact import redact
 
 # Cached across multiple run_claude() calls in the same pod — YGS only cloned once.
 _YGS_INSTALLED: bool = False
@@ -358,7 +359,6 @@ def _ensure_extra_skills(skills_base: Path) -> None:
             token = os.environ.get(token_env, "")
             username = os.environ.get(repo.get("username_env", ""), "")
         else:
-            from scripts.common.git_utils import host_clone_auth
             token_env, token, username = host_clone_auth(url, dict(os.environ))
 
         slug = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
@@ -374,7 +374,6 @@ def _ensure_extra_skills(skills_base: Path) -> None:
             label = "sparse-clone" if sparse else "clone"
             print(f"[ygs] {label} extra skills repo {url} ({skills_dir or 'full'})...", flush=True)
             try:
-                from scripts.common.git_utils import sparse_clone_repo
                 if sparse:
                     sparse_clone_repo(
                         url, dest, branch=branch, sparse_dir=skills_dir,
@@ -387,7 +386,7 @@ def _ensure_extra_skills(skills_base: Path) -> None:
                 print(f"[ygs] {label} of {url} done in {_time.monotonic() - _t0:.0f}s", flush=True)
             except Exception as exc:
                 msg = getattr(exc, "stderr", "") or str(exc)
-                print(f"[ygs] WARNING: {label} of {url} failed: {msg.strip()}", file=sys.stderr, flush=True)
+                print(f"[ygs] WARNING: {label} of {url} failed: {redact(msg.strip())}", file=sys.stderr, flush=True)
                 continue
 
         # Resolve skills_dir: explicit value wins; otherwise try common conventions

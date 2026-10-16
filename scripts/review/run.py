@@ -327,6 +327,7 @@ def _run_pr_review(config: dict, pr_url: str, skill: str) -> None:
             "pr_url": pr_url,
             "verdict": verdict,
             "findings": [],
+            "findings_available": False,   # the model wrote no findings file: an empty list here is not "nothing found"
             "summary": summary,
         })
 
@@ -465,6 +466,7 @@ def _ensure_findings_stub(path: Path, pr_url: str) -> None:
             "pr_url": pr_url,
             "verdict": "COMMENT",
             "findings": [],
+            "findings_available": False,
             "summary": "Review did not complete — see review.log for details.",
         })
 

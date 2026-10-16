@@ -25,6 +25,10 @@ import requests
 
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.design_metrics import render_design_metrics_table
+from scripts.common.pr_metrics import REVIEW_ROWS, build_single_pr_metrics
+from scripts.common.pr_signals import collect_signals
+from scripts.common.severity import count_findings
+from scripts.mq._shared import apply_repo_override, parse_pr_ref, resolve_tracker
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.report_utils import write_report
 from scripts.common.slack_format import build_artifact_links
@@ -40,8 +44,10 @@ _SEVERITY_EMOJI = {
 _VERDICT_EMOJI = {"APPROVE": "✅", "REQUEST_CHANGES": "🔄", "COMMENT": "💬"}
 
 
-def render_report_md(findings: dict) -> str:
-    """Render findings as a full Markdown report suitable for artifacts."""
+def render_report_md(findings: dict, metrics_pr: dict | None = None) -> str:
+    """Render findings as a full Markdown report suitable for artifacts.
+
+    ``metrics_pr`` (review signals + finding counts) adds the one PR metrics table after the summary."""
     pr_url = findings.get("pr_url", "")
     verdict = findings.get("verdict", "COMMENT")
     summary = findings.get("summary", "")
@@ -58,6 +64,9 @@ def render_report_md(findings: dict) -> str:
         summary,
         "",
     ]
+
+    if metrics_pr:
+        lines += ["## PR Metrics", "", *build_single_pr_metrics(metrics_pr, REVIEW_ROWS), ""]
 
     # Design Quality Metrics table — emitted before findings when present
     lines += render_design_metrics_table(findings.get("design_metrics", {}))
@@ -174,6 +183,21 @@ def _build_slack_text(findings: dict) -> str:
     return "\n".join(lines)
 
 
+def _review_metrics_pr(findings: dict, config: dict, workspace: Path) -> dict:
+    """PR dict for the metrics table: the review's own finding counts plus the PR's review activity when it can be read."""
+    pr: dict = {"ai_findings": count_findings(findings.get("findings", []))}
+    try:
+        number, repo_url = parse_pr_ref(findings.get("pr_url", ""))
+        if number.isdigit():
+            cfg = dict(config)
+            apply_repo_override(cfg, repo_url or "")
+            signals = collect_signals([{"number": int(number)}], resolve_tracker(cfg, repo_url or ""), cfg, workspace=workspace)
+            pr["signals"] = signals.get(int(number))
+    except Exception as e:  # noqa: BLE001 - activity is optional; the review report must still render
+        print(f"[post_findings] review activity unavailable: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+    return pr
+
+
 @click.command()
 @click.option("--findings", "findings_path", default="reports/findings.json", show_default=True,
               help="Path to findings.json written by run.py")
@@ -198,7 +222,7 @@ def main(findings_path: str) -> None:
         findings = json.loads(fpath.read_text(encoding="utf-8"))
 
     # --- Always render Markdown + HTML reports regardless of Slack ---
-    md_text = render_report_md(findings)
+    md_text = render_report_md(findings, _review_metrics_pr(findings, config, workspace))
     html_text = render_report_html(findings, md_text)
     md_path = reports_dir / "report.md"
     html_path = reports_dir / "report.html"

@@ -4036,9 +4036,9 @@ def test_43_mq_report_permissions(base_env: dict[str, str]) -> TestResult:
     return _pass(result, f"report.md written ({lines} lines), permission fix confirmed")
 
 
-def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
+def _run_pr_risk_pipeline(base_env: dict[str, str], pr_url: str,
                                pod_label: str) -> TestResult:
-    """Shared read-only gate-review pipeline: clone → scope → risk → report.
+    """Shared read-only pr-risk pipeline: clone → scope → risk → report.
 
     Does NOT run review.run (requires Claude) or gate-check/merge/approve (write ops).
     Validates:
@@ -4049,7 +4049,7 @@ def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
       - report.html is rendered
     """
     result = TestResult(pod_label)
-    ws = f"/workspace/gate_review_{pod_label.replace('-', '_')}"
+    ws = f"/workspace/pr_risk_{pod_label.replace('-', '_')}"
 
     env = dict(base_env)
     env["WORKSPACE_DIR"] = ws
@@ -4103,50 +4103,44 @@ def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
         if err:
             return _fail(result, risk_step, err)
 
-        # Inject mock review_result.json + gate_result.json so report includes all sections.
-        # review.run (Claude) is not run in pod tests — too slow/costly.  The mock has a
-        # realistic schema with critical + high findings so we can assert the report renders them.
-        mock_review = json.dumps({
-            "verdict": "DONE_WITH_CONCERNS",
+        # review.run (Claude) is not run in pod tests — too slow/costly. Write the two files it leaves behind in
+        # their real shapes: review_result.json is only the status line; the findings are in reports/findings.json.
+        findings = json.dumps({
+            "pr_url": pr_url, "verdict": "REQUEST_CHANGES", "summary": "SQL injection in the login handler",
             "findings": [
-                {"severity": "critical", "category": "security",
-                 "file": "auth/login.py", "line": 45,
-                 "summary": "SQL injection via unsanitized user input in login handler",
-                 "short_summary": "SQL injection in login handler",
-                 "failure_scenario": "User passes ' OR 1=1 -- causing full table scan"},
-                {"severity": "high", "category": "correctness",
-                 "file": "api/handler.py", "line": 123,
-                 "summary": "Off-by-one in pagination loop skips last result",
-                 "short_summary": "Off-by-one in pagination"},
-                {"severity": "medium", "category": "test-coverage",
-                 "file": "billing/charge.py", "line": 0,
-                 "summary": "No tests for the charge refund path",
-                 "short_summary": "Missing refund path tests"},
+                {"severity": "CRITICAL", "confidence": "HIGH", "title": "SQL injection in login handler", "file": "auth/login.py", "line": 45,
+                 "domain": "security", "description": "SQL injection via unsanitized user input in login handler", "fix": "parameterize"},
+                {"severity": "HIGH", "confidence": "MEDIUM", "title": "Off-by-one in pagination", "file": "api/handler.py", "line": 123,
+                 "domain": "correctness", "description": "Off-by-one in pagination loop skips last result", "fix": "use <="},
+                {"severity": "MEDIUM", "confidence": "MEDIUM", "title": "Missing refund path tests", "file": "billing/charge.py", "line": 1,
+                 "domain": "quality", "description": "No tests for the charge refund path", "fix": "add tests"},
             ],
         })
-        # gate_result.json: mirrors what gate-check task writes
-        mock_gate = json.dumps({
-            "risk_score": 41.5,
-            "risk_tier": "HIGH",
-            "has_critical_findings": True,
-            "findings_count": 3,
-            "needs_approval": True,
-            "reason": "critical findings",
-        })
+        status = json.dumps({"status": "DONE", "findings_count": 3, "verdict": "REQUEST_CHANGES", "summary": "SQL injection in the login handler"})
         inject_cmd = (
             f"python3 - <<'PYEOF'\n"
             f"import os\n"
             f"ws = {ws!r}\n"
-            f"open(os.path.join(ws, 'review_result.json'), 'w').write({mock_review!r})\n"
-            f"open(os.path.join(ws, 'gate_result.json'), 'w').write({mock_gate!r})\n"
-            f"print('injected review_result.json and gate_result.json')\n"
+            f"open(os.path.join(ws, 'reports', 'findings.json'), 'w').write({findings!r})\n"
+            f"open(os.path.join(ws, 'review_result.json'), 'w').write({status!r})\n"
+            f"print('wrote reports/findings.json and review_result.json')\n"
             f"PYEOF"
         )
-        inject_step = exec_step(pod, "inject-mock-review",
-                                inject_cmd, env, timeout=15)
+        inject_step = exec_step(pod, "inject-review-output", inject_cmd, env, timeout=15)
         result.steps.append(inject_step)
         if not inject_step.ok:
             return _fail(result, inject_step, f"inject failed: {inject_step.stderr[-200:]}")
+
+        # gate-check — the real script the workflow runs (needs risk_score.json + reports/findings.json)
+        gate_step = exec_step(pod, "gate-check", "python3 -m scripts.mq.gate_check", env, timeout=30)
+        result.steps.append(gate_step)
+        if not gate_step.ok:
+            return _fail(result, gate_step, f"gate_check exit {gate_step.returncode}: {gate_step.stderr[-300:]}")
+        err = _check_keys(gate_step, ["GATE_LABEL", "GATE_REASON"])
+        if err:
+            return _fail(result, gate_step, err)
+        if gate_step.context.get("GATE_REASON") != "critical findings":
+            return _fail(result, gate_step, f"gate must see the CRITICAL finding, got reason={gate_step.context.get('GATE_REASON')!r}")
 
         # report — read-only, no Slack
         report_step = exec_step(pod, "report",
@@ -4181,7 +4175,7 @@ def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
             f"        if k not in d: issues.append(f'risk_score.json missing {{k}}')\n"
             f"    print(f'::add-task-context RISK_TIER::{{d.get(\"tier\",\"?\")}}')\n"
             f"    print(f'::add-task-context RISK_SCORE::{{d.get(\"score\",\"?\")}}')\n"
-            f"# report.md — must contain all gate-review sections\n"
+            f"# report.md — must contain all pr-risk sections\n"
             f"md = os.path.join(ws, 'reports', 'report.md')\n"
             f"if not os.path.exists(md): issues.append('reports/report.md missing')\n"
             f"else:\n"
@@ -4193,12 +4187,18 @@ def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
             f"    if 'PR #http' in content:\n"
             f"        issues.append('report.md title contains full URL — parse_pr_ref not called')\n"
             f"    print(f'::add-task-context PR_URL_NORMALISED::{{\"no\" if \"PR #http\" in content else \"yes\"}}')\n"
-            f"    # All gate-review sections must be present\n"
-            f"    for section in ('## Risk Score', '## Review Findings', '## Gate Decision'):\n"
+            f"    # All pr-risk sections must be present\n"
+            f"    for section in ('## Risk Score', '## Review Findings', '## Gate Decision', '## PR Metrics'):\n"
             f"        if section not in content:\n"
             f"            issues.append(f'report.md missing section: {{section}}')\n"
+            f"    # One metrics table: no separate Scope / Metrics Dashboard, and the review-activity rows are present\n"
+            f"    if content.count('| Metric | Value | Benchmark | Signal | Description |') != 1 or '## Scope' in content:\n"
+            f"        issues.append('report.md must have exactly one metrics table')\n"
+            f"    for row in ('Comments (human', 'Tasks (human', 'Commits', 'Reviewers', 'Major/Critical Issues'):\n"
+            f"        if row not in content:\n"
+            f"            issues.append(f'PR Metrics missing row: {{row}}')\n"
             f"    # Review findings table must contain the critical finding\n"
-            f"    if 'critical' not in content:\n"
+            f"    if 'CRITICAL' not in content:\n"
             f"        issues.append('report.md Review Findings missing critical severity')\n"
             f"    if 'SQL injection' not in content:\n"
             f"        issues.append('report.md Review Findings missing expected finding summary')\n"
@@ -4243,8 +4243,8 @@ def _run_gate_review_pipeline(base_env: dict[str, str], pr_url: str,
                  f"elapsed={total_s:.0f}s")
 
 
-def test_35_gate_review_gh(base_env: dict[str, str]) -> TestResult:
-    """Gate-review read-only pipeline against a GitHub PR full URL.
+def test_35_pr_risk_gh(base_env: dict[str, str]) -> TestResult:
+    """PR-risk read-only pipeline against a GitHub PR full URL.
 
     Exercises parse_pr_ref + apply_repo_override end-to-end in a pod:
       clone_pr → scope_router → risk_score → report
@@ -4258,11 +4258,11 @@ def test_35_gate_review_gh(base_env: dict[str, str]) -> TestResult:
     # Clear any Bitbucket vars so GitHub path is clean
     for k in ("BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "DEFAULT_TRACKER"):
         env.pop(k, None)
-    return _run_gate_review_pipeline(env, pr_url, "gate-review-gh")
+    return _run_pr_risk_pipeline(env, pr_url, "pr-risk-gh")
 
 
-def test_36_gate_review_bb(base_env: dict[str, str]) -> TestResult:
-    """Gate-review read-only pipeline against a Bitbucket PR full URL.
+def test_36_pr_risk_bb(base_env: dict[str, str]) -> TestResult:
+    """PR-risk read-only pipeline against a Bitbucket PR full URL.
 
     Exercises parse_pr_ref + apply_repo_override end-to-end in a pod:
       clone_pr → scope_router → risk_score → report
@@ -4273,7 +4273,7 @@ def test_36_gate_review_bb(base_env: dict[str, str]) -> TestResult:
     Override via BB_PR_URL env var.
     Skipped when BITBUCKET_TOKEN not set.
     """
-    result = TestResult("gate-review-bb")
+    result = TestResult("pr-risk-bb")
     if not base_env.get("BITBUCKET_TOKEN") and not base_env.get("BITBUCKET_APP_PASSWORD"):
         result.passed = True
         result.message = "SKIPPED — BITBUCKET_TOKEN/BITBUCKET_APP_PASSWORD not set"
@@ -4285,15 +4285,15 @@ def test_36_gate_review_bb(base_env: dict[str, str]) -> TestResult:
     # Unset GitHub vars and pre-set tracker vars to ensure apply_repo_override drives config
     for k in ("GH_ORG", "GH_REPO", "DEFAULT_TRACKER", "BITBUCKET_WORKSPACE", "BITBUCKET_REPO"):
         env.pop(k, None)
-    return _run_gate_review_pipeline(env, pr_url, "gate-review-bb")
+    return _run_pr_risk_pipeline(env, pr_url, "pr-risk-bb")
 
 
 def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
-    """Pod test for the gate-check inline Python + bash URL-parsing used in auto-merge/reject.
+    """Pod test for the gate-check script (scripts.mq.gate_check), read-only.
 
-    Tests (read-only — no actual merge/approve):
-      1. gate-check exits 0 when needs_approval=True (critical finding)
-      2. gate-check exits 3 when needs_approval=False (low risk, no critical)
+      1. needs-approval when a CRITICAL finding exists in reports/findings.json
+      2. safe-to-merge for low risk with no critical finding
+      3. needs-approval when the review left no usable findings
       3. Bash URL parser correctly extracts PR num + org/repo from GitHub URL
       4. Bash URL parser correctly extracts PR num + workspace/repo from Bitbucket URL
       5. Bash URL parser falls back to bare number when given a plain number
@@ -4318,33 +4318,20 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
             f"import json, os\n"
             f"ws = {ws!r}\n"
             f"open(f'{{ws}}/risk_score.json','w').write(json.dumps({{'score':25,'tier':'LOW','dimensions':{{}},'requires_human_approval':False}}))\n"
-            f"open(f'{{ws}}/review_result.json','w').write(json.dumps({{'verdict':'BLOCKED','findings':[{{'severity':'critical','summary':'SQL injection'}}]}}))\n"
+            f"os.makedirs(f'{{ws}}/reports', exist_ok=True)\n"
+            f"open(f'{{ws}}/reports/findings.json','w').write(json.dumps({{'verdict':'REQUEST_CHANGES','findings':[{{'severity':'CRITICAL','title':'SQL injection'}}]}}))\n"
             f"PYEOF",
             env, timeout=15)
         result.steps.append(inject1)
         if not inject1.ok:
             return _fail(result, inject1, f"inject: {inject1.stderr[-200:]}")
 
-        gate_critical_cmd = (
-            f"python3 -c \"\n"
-            f"import json, os, sys\n"
-            f"risk = json.load(open('{ws}/risk_score.json'))\n"
-            f"review = json.load(open('{ws}/review_result.json'))\n"
-            f"threshold = int(os.environ.get('APPROVAL_THRESHOLD', '70'))\n"
-            f"score = risk['score']\n"
-            f"has_critical = any(f.get('severity') == 'critical' for f in review.get('findings', []))\n"
-            f"needs_approval = score >= threshold or has_critical\n"
-            f"gate = {{'risk_score':score,'risk_tier':risk['tier'],'has_critical_findings':has_critical,'findings_count':len(review.get('findings',[])),'needs_approval':needs_approval,'reason':'critical findings' if has_critical else f'score {{score}}'}}\n"
-            f"json.dump(gate, open('{ws}/gate_result.json','w'))\n"
-            f"print(f'gate: approval={{needs_approval}} critical={{has_critical}}')\n"
-            f"sys.exit(0 if needs_approval else 3)\n"
-            f"\""
-        )
+        gate_critical_cmd = "python3 -m scripts.mq.gate_check"
         gate1 = exec_step(pod, "gate-critical", gate_critical_cmd, env, timeout=15)
         result.steps.append(gate1)
-        if gate1.returncode != 0:
+        if gate1.returncode != 0 or gate1.context.get("GATE_LABEL") != "needs-approval":
             return _fail(result, gate1,
-                         f"gate-check should exit 0 (needs approval) for critical finding — got {gate1.returncode}")
+                         f"gate-check must label needs-approval for a CRITICAL finding — got rc={gate1.returncode} label={gate1.context.get('GATE_LABEL')!r}")
 
         # --- Test 2: gate-check exits 3 when low risk, no critical ---
         inject2 = exec_step(pod, "inject-low-risk",
@@ -4352,7 +4339,7 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
             f"import json\n"
             f"ws = {ws!r}\n"
             f"open(f'{{ws}}/risk_score.json','w').write(json.dumps({{'score':10,'tier':'LOW','dimensions':{{}},'requires_human_approval':False}}))\n"
-            f"open(f'{{ws}}/review_result.json','w').write(json.dumps({{'verdict':'DONE','findings':[{{'severity':'medium','summary':'minor style'}}]}}))\n"
+            f"open(f'{{ws}}/reports/findings.json','w').write(json.dumps({{'verdict':'APPROVE','findings':[{{'severity':'MEDIUM','title':'minor style'}}]}}))\n"
             f"PYEOF",
             env, timeout=15)
         result.steps.append(inject2)
@@ -4361,116 +4348,29 @@ def test_37_gate_check_logic(base_env: dict[str, str]) -> TestResult:
 
         gate2 = exec_step(pod, "gate-low-risk", gate_critical_cmd, env, timeout=15)
         result.steps.append(gate2)
-        if gate2.returncode != 3:
+        if gate2.returncode != 0 or gate2.context.get("GATE_LABEL") != "safe-to-merge":
             return _fail(result, gate2,
-                         f"gate-check should exit 3 (auto-merge) for low risk — got {gate2.returncode}")
+                         f"gate-check must label safe-to-merge for low risk — got rc={gate2.returncode} label={gate2.context.get('GATE_LABEL')!r}")
 
-        # --- Tests 3-5: bash URL parser used in auto-merge/merge/reject ---
-        url_parse_cmd = (
-            "python3 - <<'PYEOF'\n"
-            "import subprocess, sys\n"
-            "cases = [\n"
-            "    ('https://github.com/bhatti/todo-sample/pull/9',  'github', 'bhatti', 'todo-sample', '9'),\n"
-            "    ('https://bitbucket.org/example-org/example-repo/pull-requests/48776', 'bitbucket', 'example-org', 'example-repo', '48776'),\n"
-            "    ('42', 'bare', '', '', '42'),\n"
-            "]\n"
-            "errors = []\n"
-            "for url, tracker, org, repo, pr in cases:\n"
-            "    script = f'''\n"
-            "PR_URL=\"{url}\"\n"
-            "if echo \"$PR_URL\" | grep -q \"bitbucket.org\"; then\n"
-            "  PR_NUM=$(echo \"$PR_URL\" | grep -oE '[0-9]+$')\n"
-            "  BB_WS=$(echo \"$PR_URL\" | sed 's|https://bitbucket.org/||' | cut -d'/' -f1)\n"
-            "  BB_REPO=$(echo \"$PR_URL\" | sed 's|https://bitbucket.org/||' | cut -d'/' -f2)\n"
-            "  echo \"tracker=bitbucket org=$BB_WS repo=$BB_REPO pr=$PR_NUM\"\n"
-            "elif echo \"$PR_URL\" | grep -q \"github.com\"; then\n"
-            "  PR_NUM=$(echo \"$PR_URL\" | grep -oE '[0-9]+$')\n"
-            "  GH_SLUG=$(echo \"$PR_URL\" | sed 's|https://github.com/||' | sed 's|/pull/.*||')\n"
-            "  GH_ORG_PART=$(echo \"$GH_SLUG\" | cut -d'/' -f1)\n"
-            "  GH_REPO_PART=$(echo \"$GH_SLUG\" | cut -d'/' -f2)\n"
-            "  echo \"tracker=github org=$GH_ORG_PART repo=$GH_REPO_PART pr=$PR_NUM\"\n"
-            "else\n"
-            "  echo \"tracker=bare org= repo= pr=$PR_URL\"\n"
-            "fi\n"
-            "'''\n"
-            "    r = subprocess.run(['bash','-c',script], capture_output=True, text=True)\n"
-            "    out = r.stdout.strip()\n"
-            "    print(f'  [{url[:40]}] → {out}')\n"
-            "    if f'tracker={tracker}' not in out: errors.append(f'{url}: expected tracker={tracker} got: {out}')\n"
-            "    if org and f'org={org}' not in out: errors.append(f'{url}: expected org={org} got: {out}')\n"
-            "    if repo and f'repo={repo}' not in out: errors.append(f'{url}: expected repo={repo} got: {out}')\n"
-            "    if f'pr={pr}' not in out: errors.append(f'{url}: expected pr={pr} got: {out}')\n"
-            "if errors:\n"
-            "    for e in errors: print('ERROR: '+e, file=sys.stderr)\n"
-            "    sys.exit(1)\n"
-            "print('::add-task-context URL_PARSE::ok')\n"
-            "PYEOF"
-        )
-        url_step = exec_step(pod, "url-parse", url_parse_cmd, env, timeout=20)
-        result.steps.append(url_step)
-        if not url_step.ok:
-            return _fail(result, url_step, f"URL parse test: {url_step.stderr[-400:]}")
-
-        # --- Test 6: bb_merge exits 0 when PR is already MERGED (not OPEN) ---
-        # Simulates a PR that was already closed — should not fail the job.
-        already_merged_cmd = (
-            "bash - <<'BEOF'\n"
-            "bb_merge() {\n"
-            "  local ws=$1 repo=$2 num=$3\n"
-            "  local state\n"
-            "  # Mock: pretend Bitbucket returned state=MERGED\n"
-            "  state='MERGED'\n"
-            "  if [ \"$state\" != \"OPEN\" ]; then\n"
-            "    echo \"PR #${num} is already ${state} — skipping merge\"\n"
-            "    return 0\n"
-            "  fi\n"
-            "  echo 'should not reach here' >&2; return 1\n"
-            "}\n"
-            "bb_merge myws myrepo 48776\n"
-            "echo \"::add-task-context ALREADY_MERGED_EXIT::$?\"\n"
-            "BEOF"
-        )
-        merged_step = exec_step(pod, "bb-already-merged", already_merged_cmd, env, timeout=15)
-        result.steps.append(merged_step)
-        if not merged_step.ok:
-            return _fail(result, merged_step, f"already-merged: {merged_step.stderr[-200:]}")
-        if "ALREADY_MERGED_EXIT::0" not in merged_step.stdout:
-            return _fail(result, merged_step, "bb_merge should exit 0 when PR is already MERGED")
-
-        # --- Test 7: bb_merge logs HTTP error and exits non-zero on 4xx ---
-        http_error_cmd = (
-            "bash - <<'BEOF'\n"
-            "bb_merge() {\n"
-            "  local ws=$1 repo=$2 num=$3\n"
-            "  local state='OPEN'\n"
-            "  # Mock: curl returns HTTP 403\n"
-            "  echo '{\"error\":{\"message\":\"permission denied\"}}' > /tmp/bb_merge_resp.json\n"
-            "  local http_code=403\n"
-            "  if [ \"${http_code}\" -lt 400 ]; then\n"
-            "    echo \"PR merged\"\n"
-            "  else\n"
-            "    echo \"ERROR: Bitbucket merge failed HTTP ${http_code}: $(cat /tmp/bb_merge_resp.json)\" >&2\n"
-            "    return 1\n"
-            "  fi\n"
-            "}\n"
-            "if bb_merge myws myrepo 99 2>/tmp/bb_err.txt; then\n"
-            "  echo 'UNEXPECTED_SUCCESS' >&2; exit 1\n"
-            "fi\n"
-            "grep -q 'permission denied' /tmp/bb_err.txt && echo '::add-task-context HTTP_ERROR_LOGGED::yes' || echo '::add-task-context HTTP_ERROR_LOGGED::no'\n"
-            "BEOF"
-        )
-        http_err_step = exec_step(pod, "bb-http-error", http_error_cmd, env, timeout=15)
-        result.steps.append(http_err_step)
-        if not http_err_step.ok:
-            return _fail(result, http_err_step, f"http-error: {http_err_step.stderr[-200:]}")
-        if "HTTP_ERROR_LOGGED::yes" not in http_err_step.stdout:
-            return _fail(result, http_err_step, "bb_merge should log error body on HTTP 4xx")
+        # --- Test 3: the real script fails loudly (never "safe") when the review left no usable findings ---
+        inject3 = exec_step(pod, "inject-no-findings",
+            f"rm -f {ws}/reports/findings.json {ws}/findings.json && python3 - <<'PYEOF'\n"
+            f"import json\n"
+            f"open('{ws}/risk_score.json','w').write(json.dumps({{'score':1,'tier':'LOW'}}))\n"
+            f"open('{ws}/findings.json','w').write(json.dumps({{'verdict':'COMMENT','findings':[],'findings_available':False,'summary':'Review completed.'}}))\n"
+            f"PYEOF",
+            env, timeout=15)
+        result.steps.append(inject3)
+        gate3 = exec_step(pod, "gate-no-findings", gate_critical_cmd, env, timeout=15)
+        result.steps.append(gate3)
+        if gate3.returncode != 0 or gate3.context.get("GATE_LABEL") != "needs-approval" or gate3.context.get("GATE_REASON") != "review findings unavailable":
+            return _fail(result, gate3,
+                         f"unavailable findings must require approval — got rc={gate3.returncode} context={gate3.context}")
 
         result.passed = True
         result.message = (
-            "gate-check logic: critical→exit0 ✓, low-risk→exit3 ✓, "
-            "URL parsing GH/BB/bare ✓, bb_merge already-merged→exit0 ✓, "
-            "bb_merge 4xx→error logged ✓"
+            "gate-check (scripts.mq.gate_check): critical→needs-approval ✓, low-risk→safe-to-merge ✓, "
+            "unavailable findings→needs-approval ✓"
         )
         return result
 
@@ -5199,8 +5099,8 @@ ALL_TESTS: dict[str, callable] = {
     "mq-test-impact-branch":  test_34_mq_test_impact_branch,
     "mq-collect-group":       test_42_mq_collect_group,
     "mq-report-permissions":  test_43_mq_report_permissions,
-    "gate-review-gh":         test_35_gate_review_gh,
-    "gate-review-bb":         test_36_gate_review_bb,
+    "pr-risk-gh":         test_35_pr_risk_gh,
+    "pr-risk-bb":         test_36_pr_risk_bb,
     "gate-check-logic":       test_37_gate_check_logic,
     "contract-test":          test_38_contract_test,
     "fuzz-sqli-detection":    test_39_fuzz_sqli_detection,
@@ -5217,6 +5117,10 @@ ALL_TESTS.update(_build_qa_flaky_tests(sys.modules[__name__]))
 # Model-default pod tests (scripts/common/models.json).
 from tests.pod_model_tests import build_tests as _build_model_tests  # noqa: E402
 ALL_TESTS.update(_build_model_tests(sys.modules[__name__]))
+
+# PR review metrics pod tests (scripts/common/pr_signals, pr_metrics).
+from tests.pod_pr_metrics_tests import build_tests as _build_pr_metrics_tests  # noqa: E402
+ALL_TESTS.update(_build_pr_metrics_tests(sys.modules[__name__]))
 
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
 

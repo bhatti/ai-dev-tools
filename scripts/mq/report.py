@@ -255,11 +255,11 @@ def _emit_test_health_insights(
     sections.append("")
 
 
+from scripts.common.pr_metrics import PR_TYPE_EMOJI as _PR_TYPE_EMOJI, RISK_EMOJI as _RISK_EMOJI, STACKED_COLUMNS, age_days, build_pr_table as _build_pr_table, build_single_pr_metrics as _build_single_pr_metrics
+from scripts.common.pr_signals import read_cached as _read_signals
+from scripts.common.severity import count_findings as _count_findings
 from scripts.common.pr_classify import (
     HIGH_BLAST_CATEGORIES as _HIGH_BLAST_CATEGORIES,
-    PR_TYPE_EMOJI as _PR_TYPE_EMOJI,
-    RISK_EMOJI as _RISK_EMOJI,
-    _compute_pr_age_inline,
     build_category_breakdown as _build_category_breakdown_shared,
     build_work_type_distribution as _build_work_type_distribution_shared,
     build_metrics_dashboard as _build_metrics_dashboard,
@@ -459,9 +459,9 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
     # Stale / obsolete PR flagging — use shared builder (>14 days)
     stale_lines = _build_stale_pr_table(prs, threshold_days=14)
     if stale_lines:
-        stale_14d = [p for p in prs if _compute_pr_age_inline(p) > 14]
-        stale_30d = [p for p in prs if _compute_pr_age_inline(p) > 30]
-        stale_60d = [p for p in prs if _compute_pr_age_inline(p) > 60]
+        stale_14d = [p for p in prs if age_days(p) > 14]
+        stale_30d = [p for p in prs if age_days(p) > 30]
+        stale_60d = [p for p in prs if age_days(p) > 60]
         # Prepend count header with 30d/60d breakdown
         if stale_60d:
             lines.append("> 🔴 PRs open >60 days are likely obsolete — consider closing or rebasing.")
@@ -593,16 +593,15 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     """Build markdown report from available MQ result files.
 
     Returns (markdown_text, context_vars_for_task_context).
-    Section order: header → PR Overview → Review Findings → Gate Decision → Risk Score → Scope → Test Impact → Test Results → Lanes
+    Section order: header → PR Overview → Review Findings → Gate Decision → Risk Score → PR Metrics → Test Impact → Test Results → Lanes
     """
     ctx: dict[str, str] = {}
     # Named buckets assembled in desired display order at the end.
     header_sections: list[str] = []
-    pr_overview_sections: list[str] = []  # PR title, issue, description (gate-review only)
+    pr_overview_sections: list[str] = []  # PR title, issue, description (pr-risk only)
     findings_sections: list[str] = []
     gate_sections: list[str] = []
     risk_sections: list[str] = []
-    scope_sections: list[str] = []
     metrics_sections: list[str] = []  # single-PR 5-column dashboard
     test_sections: list[str] = []
     lane_sections: list[str] = []
@@ -616,7 +615,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     header_sections.append("")
 
     # PR Overview — title, linked issue, description (problem/solution context).
-    # Shown at top when scope.json has PR metadata (gate-review / scope-router mode).
+    # Shown at top when scope.json has PR metadata (pr-risk / scope-router mode).
     sections = pr_overview_sections
     scope = _read_json(workspace / "scope.json")
     if scope:
@@ -641,40 +640,9 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 sections.append(pr_body)
                 sections.append("")
 
-    sections = scope_sections  # scope block
     if scope:
         s = scope.get("scope", "unknown")
         blast = scope.get("blast_radius", "unknown")
-        files = scope.get("changed_files", 0)
-        lines = scope.get("lines_changed", 0)
-        owners = scope.get("owners", [])
-        scope_desc = _SCOPE_DESCRIPTIONS.get(s, f"All changes owned by {s} — can merge in dedicated lane")
-        blast_desc = _BLAST_DESCRIPTIONS.get(blast, "Unknown blast radius")
-        sections.append("## Scope")
-        sections.append("")
-        sections.append("| Field | Value | Description |")
-        sections.append("|-------|-------|-------------|")
-        sections.append(f"| Scope | **{s}** | {scope_desc} |")
-        sections.append(f"| Blast radius | **{blast}** | {blast_desc} |")
-        sections.append(f"| Changed files | {files} | Number of files modified in this PR |")
-        sections.append(f"| Lines changed | {lines} | Total additions + deletions |")
-        if owners:
-            sections.append(f"| Owners | {', '.join(owners)} | CODEOWNERS entries responsible for review |")
-        sensitive = scope.get("touches", []) or scope.get("sensitive_touched", [])
-        if sensitive:
-            sections.append(f"| Sensitive paths | {', '.join(f'`{p}`' for p in sensitive[:5])} | Files matching auth/security/billing/infra patterns |")
-        additions = scope.get("additions", 0)
-        deletions = scope.get("deletions", 0)
-        if additions or deletions:
-            sections.append(f"| LOC added | {additions} | Lines added in this PR |")
-            sections.append(f"| LOC deleted | {deletions} | Lines deleted |")
-        pr_author = scope.get("author", "")
-        if pr_author:
-            sections.append(f"| PR author | {pr_author} | |")
-        pr_created = (scope.get("created_at") or scope.get("created_on") or "")[:10]
-        if pr_created:
-            sections.append(f"| PR date | {pr_created} | When PR was opened |")
-        sections.append("")
         ctx["SCOPE"] = s
         ctx["BLAST_RADIUS"] = blast
 
@@ -727,49 +695,34 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                             "provide `defect_history.json` for data-driven scoring")
             sections.append("")
         if needs_approval:
-            sections.append("> ⚠️ **Human approval required** — risk score exceeds auto-merge threshold (≥31)")
+            sections.append("> ⚠️ **Human approval required** — risk score exceeds the auto-merge threshold")
             sections.append("")
         ctx["RISK_TIER"] = tier
         ctx["RISK_SCORE"] = str(score)
 
-    # Single-PR metrics dashboard — only when scope.json exists (gate-review / scope mode).
+    # The one single-PR metrics table (scope, risk, size, reviews, comments, tasks, commits, major issues).
     sections = metrics_sections
     if pr_number and scope:
-        _add = scope.get("additions", 0)
-        _del = scope.get("deletions", 0)
-        _total_loc = _add + _del
-        _n_files = scope.get("changed_files", 0)
-        _blast = scope.get("blast_radius", "low")
-        _cats = scope.get("categories", [])
-        _pr_created = scope.get("created_at", "")
-
-        _loc_sig = "🟢" if _total_loc <= 300 else ("🟡" if _total_loc <= 800 else "🔴")
-        _files_sig = "🟢" if _n_files <= 5 else ("🟡" if _n_files <= 15 else "🔴")
-        _blast_sig = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(_blast, "🟡")
-
-        _risk_tier_val = risk.get("tier", "LOW") if risk else "—"
-        _risk_score_val = risk.get("score", "—") if risk else "—"
-        _risk_sig = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(_risk_tier_val, "🟡")
-
-        sections.append("## Metrics Dashboard")
+        _ff = _read_json(workspace / "findings.json") or _read_json(workspace / "reports" / "findings.json")
+        _rr = _read_json(workspace / "review_result.json")
+        _list = (_ff or {}).get("findings") or (_rr or {}).get("findings") or []
+        _pr_for_metrics = {
+            "scope": scope.get("scope", "unknown"), "blast_radius": scope.get("blast_radius", "low"),
+            "scope_description": _SCOPE_DESCRIPTIONS.get(scope.get("scope", "unknown"), f"All changes owned by {scope.get('scope', 'unknown')} — can merge in dedicated lane"),
+            "blast_description": _BLAST_DESCRIPTIONS.get(scope.get("blast_radius", "low"), "Unknown blast radius"),
+            "additions": scope.get("additions", 0), "deletions": scope.get("deletions", 0),
+            "total_loc": scope.get("additions", 0) + scope.get("deletions", 0), "file_count": scope.get("changed_files", 0),
+            "categories": scope.get("categories", []), "owners": scope.get("owners", []),
+            "sensitive_paths": scope.get("touches", []) or scope.get("sensitive_touched", []),
+            "created_at": scope.get("created_at", ""),
+            "signals": _read_signals(pr_number, workspace),
+            "ai_findings": _count_findings(_list) if (_ff or _rr) else None,
+        }
+        if risk:
+            _pr_for_metrics.update(risk_score=risk.get("score", 0), risk_tier=risk.get("tier", "LOW"))
+        sections.append("## PR Metrics")
         sections.append("")
-        sections.append("| Metric | Value | Benchmark | Signal | Description |")
-        sections.append("|--------|-------|-----------|--------|-------------|")
-        sections.append(f"| LOC Changed | {_total_loc} (+{_add}/−{_del}) | ≤300 healthy | {_loc_sig} | Total lines added + deleted |")
-        sections.append(f"| Files Changed | {_n_files} | ≤5 healthy | {_files_sig} | Number of files modified |")
-        sections.append(f"| Blast Radius | {_blast} | low ideal | {_blast_sig} | Scope of potential impact |")
-        sections.append(f"| Risk Score | {_risk_score_val}/100 ({_risk_tier_val}) | <16 LOW | {_risk_sig} | Composite risk from 6 dimensions |")
-        if _cats:
-            sections.append(f"| File Categories | {', '.join(_cats[:4])} | — | — | Domain areas touched |")
-        if _pr_created:
-            try:
-                from datetime import datetime as _dt, timezone as _tz
-                _dt_val = _dt.fromisoformat(_pr_created.replace("Z", "+00:00"))
-                _age_days = (_dt.now(tz=_tz.utc) - _dt_val).days
-                _age_sig = "🟢" if _age_days < 3 else ("🟡" if _age_days < 14 else "🔴")
-                sections.append(f"| PR Age | {_age_days}d | <3d fresh | {_age_sig} | Days since PR was opened |")
-            except Exception:
-                pass
+        sections.extend(_build_single_pr_metrics(_pr_for_metrics))
         sections.append("")
 
     sections = test_sections  # test impact + results block
@@ -913,15 +866,8 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         review_summary = (findings_full or {}).get("summary", "") or _rv.get("summary", "")
         verdict_emoji = {"DONE": "✅", "DONE_WITH_CONCERNS": "⚠️", "BLOCKED": "🚫", "APPROVE": "✅", "REQUEST_CHANGES": "🔄", "COMMENT": "💬"}.get(verdict, "📋")
         _SEV_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "info": "ℹ️"}
-        sev_counts: dict[str, int] = {}
-        for f in all_findings:
-            s = f.get("severity", "info").lower()
-            sev_counts[s] = sev_counts.get(s, 0) + 1
-        sev_summary = ", ".join(
-            f"{c} {s}" for s, c in sorted(sev_counts.items(),
-                                           key=lambda x: ["critical","high","medium","low","info"].index(x[0])
-                                           if x[0] in ["critical","high","medium","low","info"] else 99)
-        )
+        sev_counts = _count_findings(all_findings)
+        sev_summary = ", ".join(f"{sev_counts[lvl]} {lvl}" for lvl in ("critical", "high", "medium", "low") if sev_counts[lvl])
         sections.append("## Review Findings")
         sections.append("")
         if review_summary:
@@ -986,8 +932,6 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
     if gate:
         needs = gate.get("needs_approval", False)
         reason = gate.get("reason", "")
-        risk_score_val = gate.get("risk_score", "?")
-        risk_tier = gate.get("risk_tier", "?")
         has_critical = gate.get("has_critical_findings", False)
         findings_count = gate.get("findings_count", 0)
         emoji = "🚦" if needs else "✅"
@@ -1000,7 +944,6 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         sections.append("|-------|-------|")
         sections.append(f"| Needs approval | {needs} |")
         sections.append(f"| Reason | {reason} |")
-        sections.append(f"| Risk score | {risk_score_val} ({risk_tier}) |")
         sections.append(f"| Critical findings | {has_critical} |")
         sections.append(f"| Total findings | {findings_count} |")
         sections.append("")
@@ -1201,89 +1144,9 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             )
             sections.append("")
 
-        def _ci_cell(ci_status: str) -> str:
-            if ci_unavailable:
-                return "N/A"
-            if ci_status == "pass":
-                return "✅"
-            if ci_status == "fail":
-                return "❌"
-            if ci_status == "pending":
-                return "⏳"
-            return "—"
-
-        def _age_label(age_hours: float) -> str:
-            if age_hours < 24:
-                return f"{age_hours:.0f}h"
-            days = age_hours / 24
-            if days >= 60:
-                return f"⛔ {days:.0f}d"
-            if days >= 30:
-                return f"🔴 {days:.0f}d"
-            if days >= 14:
-                return f"🟡 {days:.0f}d"
-            return f"{days:.0f}d"
-
-        def _issue_cell(issue_ref: dict | None) -> str:
-            if not issue_ref:
-                return "—"
-            key = issue_ref.get("key", "")
-            url = issue_ref.get("url", "")
-            return f"[{key}]({url})" if url else key
-
-        def _rev_cell(approval_count: int, reviewer_count: int) -> str:
-            """Reviewer/approval cell.
-
-            BB bulk API does not return approval status (participants not in bulk endpoint).
-            Show approvals/reviewers only when approval_count > 0 (has actual data).
-            Otherwise show assigned reviewer count to avoid misleading '0/N ✅'.
-            """
-            if approval_count > 0:
-                return f"{approval_count}/{reviewer_count} ✅"
-            if reviewer_count > 0:
-                return f"{reviewer_count} assigned"
-            return "—"
-
         def _per_pr_table(prs_in_tier: list[dict], sec: list[str]) -> None:
             """Emit per-PR detail table for one risk tier."""
-            sec.append("| Status | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |")
-            sec.append("|--------|-----|-------|----------|------|-------|------|-----|-------|----|-----|-----------|--------|")
-            for p in prs_in_tier:
-                pr_link = _pr_link(p)
-                title = (p.get("title") or "")[:80]
-                cat = p.get("category", "unknown")
-                conf = p.get("category_confidence", "")
-                cat_cell = f"{cat}*" if conf not in ("file_path", "label", "") else cat
-                if cat in ("security", "authn_authz"):
-                    cat_cell = f"⚠️ {cat_cell}"
-                if p.get("is_hotspot"):
-                    cat_cell = f"🔥 {cat_cell}"
-                pt = p.get("pr_type", "unknown")
-                type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
-                if p.get("is_wip_pr"):
-                    type_emoji += "🚧"
-                elif p.get("is_docs_pr"):
-                    type_emoji += "📝"
-                blast = p.get("blast_radius", "low")
-                blast_cell = f"{_RISK_EMOJI.get(blast, '⚪')} {blast}"
-                risk_score = p.get("risk_score", 0)
-                risk_tier = p.get("risk_tier", blast)
-                risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
-                loc = p.get("total_loc", 0)
-                loc_cell = f"{loc:,}" if loc else "—"
-                file_count = p.get("file_count", 0)
-                files_cell = str(file_count) if file_count else "—"
-                ci_cell = _ci_cell(p.get("ci_status", "unknown"))
-                age = _age_label(p.get("age_hours", 0))
-                approvals = p.get("approval_count", 0)
-                reviewers = p.get("reviewer_count", 0)
-                rev_cell = _rev_cell(approvals, reviewers)
-                issue_cell = _issue_cell(p.get("issue_ref"))
-                status = _format_pr_status(p).split(" ", 1)[1] if " " in _format_pr_status(p) else _format_pr_status(p)
-                sec.append(
-                    f"| {status} | {pr_link} | {title} | {cat_cell} | {type_emoji} | {blast_cell} "
-                    f"| {risk_cell} | {loc_cell} | {files_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
-                )
+            sec.extend(_build_pr_table(prs_in_tier, ci_unavailable=bool(ci_unavailable)))
             if len(prs_in_tier) > 20:
                 sec.append(f"_+{len(prs_in_tier) - 20} more — use `--target-branch` to narrow scope_")
             sec.append("")
@@ -1361,36 +1224,7 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
                 n_med = sum(1 for p in prs_in_lane if p.get("risk_tier", p.get("blast_radius")) == "medium")
                 sections.append(f"**→ {feature}** ({len(prs_in_lane)} PRs)")
                 sections.append("")
-                sections.append("| PR | Title | Target | Category | Type | Blast | Risk | LOC | Cx | CI | Age | Reviewers | Issues |")
-                sections.append("|----|-------|--------|----------|------|-------|------|-----|-----|-----|-----|-----------|--------|")
-                for p in prs_in_lane:
-                    pr_link = _pr_link(p)
-                    title = (p.get("title") or "")[:40]
-                    target = p.get("target_branch", feature)
-                    cat = p.get("category", "unknown")
-                    if p.get("is_hotspot"):
-                        cat = f"🔥 {cat}"
-                    pt = p.get("pr_type", "unknown")
-                    type_emoji = _PR_TYPE_EMOJI.get(pt, "❓")
-                    blast = p.get("blast_radius", "low")
-                    blast_cell = f"{_RISK_EMOJI.get(blast,'⚪')} {blast}"
-                    risk_score = p.get("risk_score", 0)
-                    risk_tier = p.get("risk_tier", blast)
-                    risk_cell = f"{_RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}"
-                    loc = p.get("total_loc", 0)
-                    loc_cell = f"{loc:,}" if loc else "—"
-                    cx = p.get("complexity", "low")
-                    cx_cell = _RISK_EMOJI.get(cx, "—")
-                    ci_cell = _ci_cell(p.get("ci_status", "unknown"))
-                    age = _age_label(p.get("age_hours", 0))
-                    approvals = p.get("approval_count", 0)
-                    reviewers = p.get("reviewer_count", 0)
-                    rev_cell = _rev_cell(approvals, reviewers)
-                    issue_cell = _issue_cell(p.get("issue_ref"))
-                    sections.append(
-                        f"| {pr_link} | {title} | {target} | {cat} | {type_emoji} | {blast_cell} "
-                        f"| {risk_cell} | {loc_cell} | {cx_cell} | {ci_cell} | {age} | {rev_cell} | {issue_cell} |"
-                    )
+                sections.extend(_build_pr_table(prs_in_lane, STACKED_COLUMNS, ci_unavailable=bool(ci_unavailable)))
                 sections.append("")
 
         ctx["LANE_COUNT"] = str(len(lane_list))
@@ -1402,7 +1236,6 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
         + findings_sections
         + gate_sections
         + risk_sections
-        + scope_sections
         + metrics_sections
         + test_sections
         + lane_sections
@@ -1634,8 +1467,8 @@ def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -
     lines_out.append(header)
 
     # Queue health line
-    stale_7d = [p for p in all_prs if _compute_pr_age_inline(p) > 7]
-    stale_14d = [p for p in all_prs if _compute_pr_age_inline(p) > 14]
+    stale_7d = [p for p in all_prs if age_days(p) > 7]
+    stale_14d = [p for p in all_prs if age_days(p) > 14]
     blast_counts: dict = Counter(p.get("blast_radius", "low") for p in all_prs)
     high_blast = blast_counts.get("high", 0) + blast_counts.get("critical", 0)
     hotspot_count = sum(1 for p in all_prs if p.get("is_hotspot"))
@@ -1711,7 +1544,7 @@ def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -
     # Throughput: avg age + CFR proxy
     throughput_parts: list[str] = []
     if all_prs:
-        ages = [_compute_pr_age_inline(p) for p in all_prs]
+        ages = [age_days(p) for p in all_prs]
         avg_age = round(sum(ages) / len(ages), 1) if ages else 0
         throughput_parts.append(f"{avg_age}d avg age")
         cfr = round(len(bug_sec_prs) / len(all_prs) * 100, 1)

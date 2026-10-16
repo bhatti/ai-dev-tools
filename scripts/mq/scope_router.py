@@ -20,7 +20,8 @@ import click
 
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.pr_classify import classify_pr_category, extract_issue_ref as _extract_issue_ref
-from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, parse_pr_ref, repo_slug, top_level_module
+from scripts.common.pr_signals import collect_signals
+from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, parse_pr_ref, repo_slug, resolve_tracker, top_level_module
 
 _CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
 
@@ -115,6 +116,8 @@ def main(pr_number: str) -> None:
     pr_number, extracted_repo = parse_pr_ref(pr_number)
     config = load_config(required=[])
     apply_repo_override(config, extracted_repo or "")
+    if extracted_repo:   # the PR's own URL decides GitHub vs Bitbucket, not the job's default tracker
+        config["DEFAULT_TRACKER"] = resolve_tracker(config, extracted_repo)
     slug = repo_slug(config)
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -157,6 +160,14 @@ def main(pr_number: str) -> None:
             pr_meta = _fetch_single_pr(config, pr_num_int) or {}
     except Exception as e:
         print(f"[scope_router] PR metadata fetch skipped: {e}", flush=True)
+
+    # Review activity (comments by humans/bots, reviewers, tasks, commits) for the PR Metrics table; best-effort,
+    # cached in <workspace>/pr_signals.json for mq.report.
+    if str(pr_number).isdigit():
+        try:
+            collect_signals([{"number": int(pr_number)}], resolve_tracker(config), config, workspace=workspace)
+        except Exception as e:  # noqa: BLE001 - signals are optional; the report shows them as unavailable
+            print(f"[scope_router] review signals skipped: {type(e).__name__}: {e}", flush=True)
 
     # Extract issue reference — pr_meta already has title/body from fetch_single_pr
     issue_ref = _extract_issue_ref(pr_meta) if pr_meta else None

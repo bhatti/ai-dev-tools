@@ -686,7 +686,7 @@ def test_pr_queue_to_markdown_group_section_has_badge():
 
 def test_pr_queue_to_markdown_pr_rows_have_links():
     md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
-    assert "[PR #42](https://github.com/org/repo/pull/42)" in md
+    assert "[#42](https://github.com/org/repo/pull/42)" in md
     assert "[PROJ-100](https://org.atlassian.net/browse/PROJ-100)" in md
 
 

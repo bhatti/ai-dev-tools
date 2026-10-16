@@ -26,11 +26,14 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.config import get_workspace_dir, load_config, worker_count
 from scripts.common.pr_classify import build_open_pr_dashboard
 from scripts.common.pr_metadata import enrich_pr_full, normalize_pr
+from scripts.common.pr_signals import tracker_name
+from scripts.common.pr_metrics import enrich_with_signals
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.report_utils import write_report
 
@@ -91,15 +94,21 @@ def main() -> None:
     raw_prs = _fetch_open_prs(config, repo_url or None, target_branch or None, label or None)
     print(f"[open-prs] fetched {len(raw_prs)} open PR(s)", flush=True)
 
-    # Normalize and enrich each PR
-    prs: list[dict] = []
-    for raw in raw_prs:
-        pr = normalize_pr(raw, tracker=tracker)
+    # Normalize, then enrich concurrently (Bitbucket enrichment is one API call per PR) and attach review signals.
+    prs: list[dict] = [normalize_pr(raw, tracker=tracker) for raw in raw_prs]
+
+    def _enrich(pr: dict) -> dict:
         try:
-            pr = enrich_pr_full(pr, files=None, config=config)
+            return enrich_pr_full(pr, files=None, config=config)
         except Exception as exc:
             print(f"[open-prs] warn: enrichment failed for PR#{pr.get('number','?')}: {exc}", flush=True)
-        prs.append(pr)
+            return pr
+
+    if prs:
+        workers = worker_count()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            prs = list(pool.map(_enrich, prs))
+        enrich_with_signals(prs, tracker_name(tracker), config, workspace=workspace_dir)
 
     now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     branch_info = f" → `{target_branch}`" if target_branch else ""

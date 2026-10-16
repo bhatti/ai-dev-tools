@@ -12,17 +12,17 @@ import pytest
 from scripts.common import models as m
 from scripts.common.models import ModelError, load_models, model_env, resolve_model
 
-SONNET = "us.anthropic.claude-sonnet-5-5"
-OPUS = "us.anthropic.claude-opus-4-6-v1"
-HAIKU = "anthropic.claude-haiku-4-5"
+# Derived from the shipped file so that rolling a model (editing models.json) does not break these tests.
+_ALIASES = load_models()["aliases"]
+SONNET, OPUS, HAIKU = _ALIASES["sonnet"], _ALIASES["opus"], _ALIASES["haiku"]
 
 
 class TestShippedFile:
-    def test_is_valid_and_has_the_agreed_defaults(self):
+    def test_is_valid_and_maps_the_tiers_as_agreed(self):
         data = load_models()
-        assert data["aliases"][data["default"]] == SONNET
+        assert data["default"] == "sonnet"
+        assert {t: data["tiers"][t] for t in ("default", "medium", "high", "low")} == {"default": "sonnet", "medium": "sonnet", "high": "opus", "low": "haiku"}
         assert [resolve_model(tier=t) for t in ("default", "high", "low")] == [SONNET, OPUS, HAIKU]
-        assert resolve_model(tier="medium") == SONNET
 
     def test_every_alias_is_a_model_id(self):
         for name, model_id in load_models()["aliases"].items():

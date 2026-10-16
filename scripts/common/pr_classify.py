@@ -28,8 +28,8 @@ from statistics import median
 # Shared helpers re-exported from pr_metadata (single source of truth).
 # Import here at module level — no circular risk since pr_metadata imports
 # pr_classify only lazily inside function bodies (enrich_pr_fast, enrich_pr_full).
+from scripts.common.pr_metrics import PR_TYPE_EMOJI, RISK_EMOJI, age_days as pr_age_days, aggregate_rows, build_pr_table
 from scripts.common.pr_metadata import (
-    compute_pr_age as _compute_pr_age_base,
     format_pr_status,  # noqa: F401 — re-exported; callers import from pr_classify
     _size_bucket as _size_bucket_fn,
 )
@@ -257,13 +257,6 @@ _CATEGORY_RULES: list[tuple[str, list[str], list[str], list[str]]] = [
 # ---------------------------------------------------------------------------
 
 HIGH_BLAST_CATEGORIES = frozenset({"security", "authn_authz", "sre", "data"})
-
-PR_TYPE_EMOJI: dict[str, str] = {
-    "bug": "🐛", "feature": "✨", "refactor": "♻️", "chore": "🔧",
-    "security": "🔒", "test": "🧪", "docs": "📝", "unknown": "❓",
-}
-
-RISK_EMOJI: dict[str, str] = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 # ---------------------------------------------------------------------------
 # Classification functions
@@ -719,83 +712,16 @@ def build_work_type_distribution(prs: list[dict]) -> list[str]:
     return lines
 
 
-def _compute_pr_age_inline(pr: dict) -> int:
-    """Days since created_at; falls back to age_hours for MQ PRs that lack created_at."""
-    age = _compute_pr_age_base(pr)
-    if age == 0:
-        age_hours = pr.get("age_hours", 0)
-        return int(age_hours / 24) if age_hours else 0
-    return age
-
-
 def _ci_emoji(ci_status: str) -> str:
     return {"pass": "✅", "fail": "❌", "pending": "⏳"}.get(ci_status, "-")
 
 
 def build_pr_metrics_table(prs: list[dict]) -> list[str]:
-    """Build per-PR metrics table with canonical column set.
-
-    Columns: Status | # | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues
-
-    Sorted by risk_score descending so highest-risk PRs appear first.
-    Backward-compatible: missing fields (ci_status, age_days, reviewer_count) use safe defaults.
-    """
+    """Per-PR metrics table with the canonical column set (``pr_metrics.TABLE_COLUMNS``), highest risk first."""
     if not prs:
         return []
-
-    sorted_prs = sorted(prs, key=lambda p: -p.get("risk_score", 0))
-
-    lines: list[str] = [
-        "### Per-PR Metrics",
-        "",
-        "| Status | # | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues |",
-        "|--------|---|-----|-------|----------|------|-------|------|-----|-------|-----|-----|-----------|--------|",
-    ]
-    for idx, p in enumerate(sorted_prs, 1):
-        pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
-        pr_url = p.get("url", "")
-        pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
-
-        title = (p.get("title") or "").replace("|", "\\|").replace("\n", " ")
-        if len(title) > 80:
-            title = title[:77] + "..."
-
-        cat = p.get("category", "—")
-        hotspot_prefix = "🔥 " if p.get("is_hotspot") else ""
-        cat_cell = f"{hotspot_prefix}{cat}"
-        pr_type = p.get("pr_type", "—")
-        type_emoji = PR_TYPE_EMOJI.get(pr_type, "")
-        blast = p.get("blast_radius", "—")
-        risk_score = p.get("risk_score", 0)
-        risk_tier = p.get("risk_tier", "—")
-        risk_emoji = RISK_EMOJI.get(risk_tier, "")
-        loc = p.get("total_loc", 0)
-        files = p.get("file_count", 0)
-
-        # New columns — safe defaults for backward compatibility
-        ci_status = p.get("ci_status", "unknown")
-        ci_cell = _ci_emoji(ci_status)
-        age_days = p.get("age_days") if p.get("age_days") is not None else _compute_pr_age_inline(p)
-        age_cell = f"{age_days}d" if age_days else "—"
-        reviewer_count = p.get("reviewer_count", len(p.get("reviewers") or []))
-        rev_cell = str(reviewer_count) if reviewer_count else "—"
-        linked = p.get("linked_issue") or {}
-        issue_key = linked.get("key", "") if isinstance(linked, dict) else str(linked)
-        issue_url = linked.get("url", "") if isinstance(linked, dict) else ""
-        issue_cell = f"[{issue_key}]({issue_url})" if issue_url and issue_key else (issue_key or "—")
-
-        status = format_pr_status(p)
-        # Short form for table (strip emoji but keep text)
-        status_short = status.split(" ", 1)[1] if " " in status else status
-
-        lines.append(
-            f"| {status_short} | {idx} | {pr_cell} | {title} "
-            f"| {cat_cell} | {type_emoji} {pr_type} "
-            f"| {blast} | {risk_emoji} {risk_score:.0f} | {loc:,} | {files} "
-            f"| {ci_cell} | {age_cell} | {rev_cell} | {issue_cell} |"
-        )
-    lines.append("")
-    return lines
+    ordered = sorted(prs, key=lambda p: -p.get("risk_score", 0))
+    return ["### Per-PR Metrics", "", *build_pr_table(ordered, index=True), ""]
 
 
 def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> str:
@@ -804,9 +730,15 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
     Standard rows are computed from the PR list. Workflow-specific rows
     can be appended via extra_rows: list of (metric, value, benchmark, signal, description) tuples.
 
+    The review-signal rows (``pr_metrics.aggregate_rows``: comments, tasks, commits, major issues) are added for
+    every report that uses this dashboard, unless ``extra_rows`` already has a row of that name.
+
     Returns an empty string when both prs and extra_rows are empty.
     Accepts empty prs with extra_rows to build an audit-only dashboard.
     """
+    extra_rows = list(extra_rows or [])
+    named = {r[0].lower() for r in extra_rows}
+    extra_rows += [r for r in aggregate_rows(prs) if r[0].lower() not in named]
     if not prs and not extra_rows:
         return ""
 
@@ -881,7 +813,7 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
             lines.append(f"| Rubber-Stamp Rate | {rubber_stamp}/{len(approved_prs)} ({rs_pct}%) | ≤10% | {rs_signal} | Approvals with zero substantive review comments |")
 
         # Stale PRs
-        stale = sum(1 for p in prs if _compute_pr_age_inline(p) > 7)
+        stale = sum(1 for p in prs if pr_age_days(p) > 7)
         stale_signal = "🟢" if stale == 0 else ("🟡" if stale <= total * 0.2 else "🔴")
         lines.append(f"| Stale PRs (>7d) | {stale}/{total} | 0 | {stale_signal} | PRs open longer than 7 days |")
 
@@ -891,7 +823,7 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
         lines.append(f"| Hotspot Count | {hotspots}/{total} | 0 | {hotspot_signal} | PRs touching sensitive paths (auth/billing/crypto) |")
 
         # Avg Age
-        ages = [_compute_pr_age_inline(p) for p in prs]
+        ages = [pr_age_days(p) for p in prs]
         avg_age = round(sum(ages) / total) if total else 0
         age_signal = "🟢" if avg_age <= 3 else ("🟡" if avg_age <= 7 else "🔴")
         lines.append(f"| Avg Age | {avg_age}d | ≤3d | {age_signal} | Mean days since PR was opened |")
@@ -997,11 +929,11 @@ def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:
     Columns: PR | Title | Author | Age | Status | Risk
     Sorted by age descending (oldest first).
     """
-    stale = [p for p in prs if _compute_pr_age_inline(p) > threshold_days]
+    stale = [p for p in prs if pr_age_days(p) > threshold_days]
     if not stale:
         return []
 
-    stale_sorted = sorted(stale, key=lambda p: -_compute_pr_age_inline(p))
+    stale_sorted = sorted(stale, key=lambda p: -pr_age_days(p))
 
     lines: list[str] = [
         f"### Stale PRs (>{threshold_days}d)",
@@ -1017,7 +949,7 @@ def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:
         pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
         title = (p.get("title") or "")[:50]
         author = p.get("author", "—")
-        age_days = _compute_pr_age_inline(p)
+        age_days = pr_age_days(p)
         age_emoji = "⛔ " if age_days >= 60 else ("🔴 " if age_days >= 30 else ("🟡 " if age_days >= 14 else ""))
         age_cell = f"{age_emoji}{age_days}d"
         _status_full = format_pr_status(p)

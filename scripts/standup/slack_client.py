@@ -17,6 +17,8 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
+from scripts.common.pr_metrics import PRIORITY_EMOJI, RISK_EMOJI
+
 
 _BLOCKER_KEYWORDS = (
     "blocked", "stuck", "waiting on", "help needed", "blocker",
@@ -250,7 +252,7 @@ def build_mrkdwn_blocks(text: str, max_chars: int = 2900) -> list:
     return blocks
 
 
-PR_PRIORITY_EMOJI = {"blocker": "🚨", "critical": "🔴", "high": "🟠"}
+PR_PRIORITY_EMOJI = PRIORITY_EMOJI
 PR_CI_EMOJI = {"pass": "✅", "fail": "❌", "pending": "⏳", "unknown": ""}
 PR_GROUP_BADGE = {
     "CI FAILING": "🔴",
@@ -370,7 +372,6 @@ def build_pr_blocks(title: str, pr_data: dict) -> list:
                 metrics_parts.append(pt)
             risk_tier = pr.get("risk_tier", "")
             if risk_tier:
-                from scripts.common.pr_classify import RISK_EMOJI
                 r_emoji = RISK_EMOJI.get(risk_tier, "")
                 metrics_parts.append(f"{r_emoji}{risk_tier}")
             total_loc = pr.get("total_loc", 0)

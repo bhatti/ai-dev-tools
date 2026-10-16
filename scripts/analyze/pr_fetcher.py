@@ -13,17 +13,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.common.config import worker_count
 from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
 from scripts.common.issue_fetcher import get_jira_linked_prs
 from scripts.common.pr_classify import enrich_pr_with_metrics as _enrich_pr_with_metrics
 from scripts.common.pr_metadata import _size_bucket as _size_bucket_fn
 
-KNOWN_BOTS = {
-    "github-actions[bot]", "dependabot[bot]", "renovate[bot]",
-    "codecov[bot]", "sonarcloud[bot]", "mergify[bot]",
-    "copilot[bot]", "netlify[bot]", "vercel[bot]",
-}
-_KNOWN_BOTS_LOWER = frozenset(b.lower() for b in KNOWN_BOTS)
+from scripts.common.actors import classify_actor, is_ai_authored
+from scripts.common.bitbucket_api import api_base
 
 # Rubber-stamp phrases: short approvals with no substantive feedback
 _RUBBER_STAMP_RE = re.compile(
@@ -34,29 +31,6 @@ _RUBBER_STAMP_RE = re.compile(
     r'merge(?:\s+it)?|go(?:\s+for\s+it)?|no\s+(?:issues?|comments?|concerns?|objections?))?'
     r'(?:\s*[!.]*)?$',
     re.IGNORECASE,
-)
-
-# AI coding-agent author patterns that don't end in "bot" but are known automation
-_AI_AGENT_AUTHOR_RE = re.compile(r'copilot|claude[-_]agent|ai[-_]agent', re.IGNORECASE)
-
-# CI bots: build runners, test runners, status reporters — NOT code reviewers
-_CI_BOT_USERNAMES: frozenset[str] = frozenset({
-    "github-actions[bot]", "circleci", "jenkins", "travis-ci",
-    "buildkite", "teamcity", "azure-pipelines[bot]", "circle-ci[bot]",
-})
-_CI_BOT_BODY_PATTERNS: tuple[str, ...] = (
-    "Linux - ", "Windows - ", "macOS - ", "Build #",
-    "GitHub Actions", "CircleCI", "Jenkins build", "Travis CI",
-)
-
-# Code-review bots: AI reviewers that catch logical/security/style issues
-_CODE_REVIEW_BOT_USERNAME_SUBSTRINGS: tuple[str, ...] = (
-    "claude", "copilot", "coderabbit", "codeclimate",
-    "sonarcloud", "codacy", "snyk", "deepsource", "reviewdog",
-)
-_CODE_REVIEW_BOT_BODY_MARKERS: tuple[str, ...] = (
-    "ygs-review-pr", "ygs-security-review", "## Code Review",
-    "## Security Review", "## Audit Report", "pr-review-agent",
 )
 
 # Cache for raw issue API responses (populated by fetch_issue_details)
@@ -256,8 +230,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time as _time
 
-    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
-    max_workers = max(1, min(max_workers, 20))
+    max_workers = worker_count()
     print(f"[pr-fetch] fetching inline comments for {len(raw_prs)} GH PRs (workers={max_workers})...", flush=True)
     t0 = _time.monotonic()
 
@@ -279,6 +252,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         for c in rp.get("comments", []):
             all_comments.append({
                 "author": c.get("author", {}).get("login", ""),
+                "author_kind": "Bot" if c.get("author", {}).get("is_bot") else "",
                 "body": c.get("body", ""),
                 "type": "comment",
             })
@@ -287,6 +261,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
             if body:
                 all_comments.append({
                     "author": rv.get("author", {}).get("login", ""),
+                    "author_kind": "Bot" if rv.get("author", {}).get("is_bot") else "",
                     "body": body,
                     "type": "review",
                 })
@@ -353,7 +328,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
             "linked_issue": None,
             "review_decision": review_decision,
             "review_decision_protected": rp.get("reviewDecision", ""),
-            "is_bot_authored": _is_ai_authored(author),
+            "is_bot_authored": is_ai_authored(author),
             **depth,
         }
         classify_files = [
@@ -434,6 +409,7 @@ def _fetch_gh_review_comments(org: str, repo: str, pr_number: int) -> list[dict]
     for c in data if isinstance(data, list) else []:
         comments.append({
             "author": c.get("user", {}).get("login", ""),
+            "author_kind": c.get("user", {}).get("type", ""),
             "body": c.get("body", ""),
             "type": "review_comment",
             "path": c.get("path", ""),
@@ -470,6 +446,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
     for c in rp.get("comments", []):
         all_comments.append({
             "author": c.get("author", {}).get("login", ""),
+            "author_kind": "Bot" if c.get("author", {}).get("is_bot") else "",
             "body": c.get("body", ""),
             "type": "comment",
         })
@@ -478,6 +455,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         if body:
             all_comments.append({
                 "author": rv.get("author", {}).get("login", ""),
+                "author_kind": "Bot" if rv.get("author", {}).get("is_bot") else "",
                 "body": body,
                 "type": "review",
             })
@@ -529,7 +507,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         "linked_issue": None,
         "review_decision": review_decision,
         "review_decision_protected": rp.get("reviewDecision", ""),
-        "is_bot_authored": _is_ai_authored(author),
+        "is_bot_authored": is_ai_authored(author),
         **depth,
     }
 
@@ -569,7 +547,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
     token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", "")).strip()
     auth = (username, token) if username and token else None
 
-    base = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
+    base = f"{api_base()}/repositories/{workspace}/{repo}"
     state_params = "&".join(f"state={s}" for s in bb_states)
     # +values.participants adds approval data without removing any default fields
     url = f"{base}/pullrequests?{state_params}&sort=-updated_on&pagelen=50&fields=%2Bvalues.participants"
@@ -605,8 +583,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time as _time
 
-    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
-    max_workers = max(1, min(max_workers, 20))
+    max_workers = worker_count()
     to_fetch = raw_prs[:fetch_cap]
     print(f"[pr-fetch] fetching comments+diffstat for {len(to_fetch)} BB PRs (workers={max_workers})...", flush=True)
     t0 = _time.monotonic()
@@ -688,7 +665,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
             "reviewers": assigned_reviewers,
             "linked_issue": None,
             "review_decision": review_decision,
-            "is_bot_authored": _is_ai_authored(author),
+            "is_bot_authored": is_ai_authored(author),
             **depth,
         }
         classify_files = [
@@ -721,24 +698,32 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
 
 
 def _fetch_bb_comments(base_url: str, pr_id: int, auth: tuple | None) -> list[dict]:
-    """Fetch comments for a Bitbucket PR."""
+    """All comments of a Bitbucket PR (every page, deleted ones skipped). A failed page ends the list; what was read is kept."""
     import requests as _requests
 
-    url = f"{base_url}/pullrequests/{pr_id}/comments?pagelen=100"
+    url: str | None = f"{base_url}/pullrequests/{pr_id}/comments?pagelen=100"
     comments: list[dict] = []
-    try:
-        resp = _requests.get(url, auth=auth, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+    for _ in range(50):  # same page cap as bitbucket_api.list_pr_comments
+        if not url:
+            break
+        try:
+            resp = _requests.get(url, auth=auth, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"[pr-fetch] warn: Bitbucket comments for PR {pr_id} cut short ({type(e).__name__}); counts may be low", file=sys.stderr, flush=True)
+            break
         for c in data.get("values", []):
+            if c.get("deleted"):
+                continue
             user = c.get("user", {})
             comments.append({
                 "author": user.get("display_name", user.get("nickname", "")),
+                "author_kind": user.get("account_type", ""),
                 "body": c.get("content", {}).get("raw", ""),
                 "type": "comment",
             })
-    except Exception:
-        pass
+        url = data.get("next")
     return comments
 
 
@@ -780,7 +765,7 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
     token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", "")).strip()
     auth = (username, token) if username and token else None
 
-    base = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
+    base = f"{api_base()}/repositories/{workspace}/{repo}"
     # Single-PR endpoint: %2Bparticipants (not %2Bvalues.participants which is for the list endpoint)
     url = f"{base}/pullrequests/{pr_id}?fields=%2Bparticipants"
     try:
@@ -841,7 +826,7 @@ def _fetch_single_bb_pr(config: dict, pr_id: int) -> dict | None:
         "approvers": approvers,
         "linked_issue": None,
         "review_decision": review_decision,
-        "is_bot_authored": _is_ai_authored(author),
+        "is_bot_authored": is_ai_authored(author),
         **depth,
     }
 
@@ -1052,7 +1037,7 @@ def classify_comments(comments: list[dict]) -> dict:
     human: list[dict] = []
     for c in comments:
         author = c.get("author", "")
-        bucket = _classify_comment(author, c.get("body", ""))
+        bucket = classify_actor(author, c.get("body", ""), c.get("author_kind", ""))
         if bucket == "ci":
             ci.append(c)
         elif bucket == "review_bot":
@@ -1065,60 +1050,6 @@ def classify_comments(comments: list[dict]) -> dict:
         "human_comments": human,
         "bot_comments": ci + review_bot,
     }
-
-
-def _classify_comment(author: str, body: str) -> str:
-    """Return 'ci', 'review_bot', or 'human' for a single comment."""
-    lower_author = author.lower()
-
-    # 1. Known CI bot usernames
-    if lower_author in _CI_BOT_USERNAMES:
-        return "ci"
-
-    # 2. Known code-review bot username substrings
-    for sub in _CODE_REVIEW_BOT_USERNAME_SUBSTRINGS:
-        if sub in lower_author:
-            return "review_bot"
-
-    # 3. Code-review bot body markers
-    for marker in _CODE_REVIEW_BOT_BODY_MARKERS:
-        if marker in body:
-            return "review_bot"
-
-    # 4. Generic bot suffix — then distinguish CI vs review-bot by body content
-    if lower_author in _KNOWN_BOTS_LOWER or lower_author.endswith("[bot]") or lower_author.endswith("bot"):
-        for pattern in _CI_BOT_BODY_PATTERNS:
-            if pattern in body:
-                return "ci"
-        return "review_bot"
-
-    return "human"
-
-
-def _is_bot(author: str) -> bool:
-    """Backward-compat helper — returns True for any bot (CI or review-bot)."""
-    if not author:
-        return False
-    lower = author.lower()
-    if lower in _KNOWN_BOTS_LOWER:
-        return True
-    if lower.endswith("[bot]") or lower.endswith("bot"):
-        return True
-    return False
-
-
-def _is_ai_authored(author: str) -> bool:
-    """Return True if the PR author is an AI/bot agent.
-
-    Primary signal: username ends with 'bot' (dependabot, any-bot, etc.).
-    Secondary: known AI coding agents that don't follow that convention.
-    """
-    if not author:
-        return False
-    lower = author.lower()
-    if lower.endswith("bot") or lower.endswith("[bot]"):
-        return True
-    return bool(_AI_AGENT_AUTHOR_RE.search(lower))
 
 
 def _is_rubber_stamp_comment(body: str) -> bool:

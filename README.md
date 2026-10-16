@@ -345,6 +345,10 @@ formicary submit formicary/ai-gh-review.yaml \
 
 The implement workflow (`ai-gh-implement` / `ai-jira-implement`) runs a self-review pass automatically before creating the PR. After `implement`, `scripts.review.run` is called with `--mode self-review`; if it returns exit code 2 (BLOCKED), the job pauses for human review before the PR is created. This catches obvious mistakes before they hit the review queue.
 
+### PR review metrics
+
+Every PR report shows comments by humans vs bots, tasks, major/critical issues, reviewers (including bots that only commented) and commits (merge commits excluded), as **one** metrics table, for GitHub and Bitbucket/Jira. One definition (`scripts/common/pr_metrics.py`), fetched in a few requests (`scripts/common/pr_signals/`). See [docs/pr-metrics.md](docs/pr-metrics.md). `PR_SIGNALS=off` disables the fetch; `BITBUCKET_API_BASE` sets the Bitbucket REST base.
+
 ### Complexity-tiered model selection
 
 The `plan` step writes a `plan_complexity.txt` file (`low`, `medium`, or `high`). The `implement` step exports it as `AI_MODEL_TIER`, and `scripts/common/models.json` maps the tier to a model (`low` = Haiku, `medium` = Sonnet, `high` = Opus). Edit the JSON to change a tier; pass `--model` or `AI_MODEL` to override a single run.
@@ -448,7 +452,8 @@ Scripts for scope-aware merge queue orchestration. Called by Formicary YAML jobs
 
 | Script | Purpose |
 |--------|---------|
-| `scope_router.py` | Compute blast-radius scope from changed file paths and CODEOWNERS. Writes `scope.json`, labels PR with `scope:{name}` |
+| `scope_router.py` | Compute blast-radius scope from changed file paths and CODEOWNERS. Writes `scope.json` and `pr_signals.json` (review activity); read-only |
+| `gate_check.py` | Gate decision from `risk_score.json` + `reports/findings.json`: needs approval on a critical finding, a high score, or unavailable findings. Writes `gate_result.json` |
 | `risk_score.py` | RADAR-style risk tier (LOW/MEDIUM/HIGH) from scope + diff stats + historical defect data. Writes `risk_score.json` |
 | `collect_ready.py` | Collect all PRs labeled `ai-merge-ready`, compute scope and blast radius per PR. Writes `ready_prs.json` |
 | `group_by_scope.py` | Partition ready PRs into independent scope lanes for parallel testing. Writes `lane_groups.json` |
@@ -462,7 +467,7 @@ All scripts follow the standard pattern: Click CLI, `load_config(required=[...])
 PR classification and risk scoring shared across MQ, PR-queue, PR-audit, open-prs, and all reporting pipelines. Provides a single taxonomy for PR type (feature/bug/security/...), category, blast radius, risk score/tier, complexity, and hotspot detection. All pipelines call `enrich_pr_with_metrics(pr, files)` for consistent classification.
 
 **Canonical report builders** produce identical Markdown tables across all workflows:
-- `build_pr_metrics_table(prs)` — columns: `Status | # | PR | Title | Category | Type | Blast | Risk | LOC | Files | CI | Age | Reviewers | Issues`
+- `build_pr_metrics_table(prs)` — the canonical per-PR table, columns from `pr_metrics.TABLE_COLUMNS` (adds Comments, Tasks, Major/Critical, Commits; see [docs/pr-metrics.md](docs/pr-metrics.md))
 - `build_metrics_dashboard(prs, extra_rows)` — portable Metrics Dashboard (CI pass rate, review coverage, rubber-stamp rate, stale PRs, hotspot count, avg age, + workflow-specific extra rows)
 - `build_stale_pr_table(prs, threshold_days)` — PRs older than N days, sorted by age
 - `build_category_breakdown(prs)`, `build_work_type_distribution(prs)` — category/type summaries
@@ -473,7 +478,7 @@ PR classification and risk scoring shared across MQ, PR-queue, PR-audit, open-pr
 Single source of truth for PR object normalization. All workflows import from here to guarantee consistent field names and safe defaults regardless of tracker (GitHub or Bitbucket).
 
 - `normalize_pr(raw_pr, tracker)` — guarantees all fields with safe defaults
-- `enrich_pr_fast(pr, files)` — classification-only enrichment (no extra API calls; for gate-review/parallel-test where speed matters)
+- `enrich_pr_fast(pr, files)` — classification-only enrichment (no extra API calls; for pr-risk/parallel-test where speed matters)
 - `enrich_pr_full(pr, files, config)` — full enrichment + CI status from Bitbucket API (for pr-audit and mq)
 - `compute_pr_age(pr)` — days since `created_at`; 0 if field missing
 - `format_pr_status(pr)` — `🟣 MERGED` / `🟢 OPEN` / `🟡 PENDING` / `🔵 WIP` / `🔴 DECLINED`

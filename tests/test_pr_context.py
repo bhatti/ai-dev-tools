@@ -439,14 +439,25 @@ class TestAcliFallback:
         assert "pr_description" in ctx["ac_source"]
 
     def test_rest_tokens_win_over_acli(self, tmp_path, monkeypatch):
-        self._install(tmp_path, monkeypatch, "#!/bin/sh\necho must-not-run >&2; exit 1\n")
+        marker = tmp_path / "acli-was-called"
+        self._install(tmp_path, monkeypatch, f"#!/bin/sh\ntouch {marker}\nexit 1\n")
         cfg = {**self.CFG, "BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t"}
         with patch.object(pc, "fetch_prs_by_numbers", return_value=[_pr()]) as rest, \
                 patch.object(pc, "fetch_pr_diff", return_value=("", "")), patch.object(pc, "fetch_issue_details", return_value=None):
             pc.build_context(self.URL, cfg)
-        assert rest.called
+        assert rest.called and not marker.exists()      # with tokens, acli is never even probed
 
     def test_unauthenticated_acli_means_no_fallback(self, tmp_path, monkeypatch):
         self._install(tmp_path, monkeypatch, "#!/bin/sh\necho 'not logged in' >&2; exit 1\n")
         with pytest.raises(ValueError, match="missing credentials"):
             pc.build_context(self.URL, self.CFG)
+
+    def test_acli_that_authenticates_but_cannot_find_the_pr_is_not_found(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch, FAKE_ACLI.replace('*"bitbucket pr get acme widgets 7"*)', '*"bitbucket pr get never"*)'))
+        with pytest.raises(ValueError, match="not found"):
+            pc.build_context(self.URL, self.CFG)
+
+    def test_acli_diff_failure_is_reported_not_hidden(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch, FAKE_ACLI.replace('*"bitbucket pr diff acme widgets 7"*)', '*"bitbucket pr diff never"*)'))
+        ctx = pc.build_context(self.URL, self.CFG, tmp_path / "d")
+        assert ctx["pr"]["title"] == "Limit carts" and ctx["diff_error"].startswith("acli pr diff exit 1") and ctx["changed_files"] == []

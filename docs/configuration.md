@@ -47,7 +47,10 @@ All configuration is via environment variables. Set them in a `.env` file for lo
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AI_MODEL` | *(from `models.json`)* | Optional per-job model (alias or full id). Normally unset: the default lives in `scripts/common/models.json` |
-| `AI_MODEL_TIER` | *(unset)* | Optional role tier `low` \| `default` \| `high` (e.g. `low` for classification). `AI_MODEL` wins over it |
+| `PR_SIGNALS` | `on` | `off` skips fetching PR review metrics (comments, tasks, reviewers, commits); reports show `—` |
+| `BITBUCKET_API_BASE` | `https://api.bitbucket.org/2.0` | Bitbucket REST base URL for the PR metrics, PR context/diff, merge-queue, open-PRs, PR queue and resync paths (the review skill's own `curl` recipes and `create_skill_pr` still call `api.bitbucket.org`) |
+| `DIFFSTAT_WORKERS` | `8` | Concurrent per-PR API calls (1-20) for diffstat and Bitbucket review metrics |
+| `AI_MODEL_TIER` | *(unset)* | Optional role tier `low` \| `medium` \| `default` \| `high` (e.g. `low` for classification). `AI_MODEL` wins over it |
 | `MAX_TURNS_PLAN` | `50` | Max claude turns for planning step |
 | `MAX_TURNS_IMPLEMENT` | `200` | Max claude turns for implementation step |
 | `CLAUDE_EFFORT_LEVEL` | `medium` | Claude effort level (`low`, `medium`, `high`) |

@@ -365,12 +365,12 @@ ALL_TESTS: list[TestCase] = [
         timeout=1200,
         requires=["BB_PR_URL"],
     ),
-    # gate-review: full end-to-end gate-review pipeline against a public GitHub PR.
+    # pr-risk: full end-to-end pr-risk pipeline against a public GitHub PR.
     # Pipeline: review → gate-check → (auto-merge or approve) → done
     # Uses a known public PR so no credentials needed beyond GH_TOKEN.
     TestCase(
-        name="gate-review",
-        job_type="ai-gate-review",
+        name="pr-risk",
+        job_type="ai-pr-risk",
         params={
             "PRNumber": os.environ.get("GH_PR_URL", "https://github.com/bhatti/todo-sample/pull/9"),
             "ApprovalThreshold": "30",

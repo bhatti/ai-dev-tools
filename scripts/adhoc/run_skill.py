@@ -27,7 +27,9 @@ import requests
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills, export_aliased_env, _KNOWN_SKILLS
 from scripts.common.atlassian_cli import write_cli_configs
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
-from scripts.common.models import ModelError, resolve_model
+from scripts.common.models import ModelError, resolve_run_model
+from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution
+from scripts.common.pr_metrics import QUEUE_COLUMNS, build_pr_table
 from scripts.common.report_utils import write_report
 from scripts.standup.slack_client import (
     build_mrkdwn_blocks, build_pr_blocks, notify as slack_notify,
@@ -175,12 +177,6 @@ def _strip_for_slack(text: str) -> str:
 
 def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
     """Convert pr_queue.json data to a Markdown report with tables and status badges."""
-    from scripts.common.pr_classify import (
-        PR_TYPE_EMOJI,
-        RISK_EMOJI,
-        build_category_breakdown,
-        build_work_type_distribution,
-    )
 
     prs: list[dict] = pr_data.get("prs", [])
     lines = [f"# {title}", ""]
@@ -213,59 +209,8 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
             continue
         badge = PR_GROUP_BADGE.get(group_name, "")
         lines += [f"## {badge} {group_name} ({len(group_prs)})", ""]
-        lines += [
-            "| CI | PR | Jira | Author | Age | Priority | Title | Cat | Type | Blast | Risk | LOC | Files | Cx | Reviewers |",
-            "|----|-----|------|--------|-----|----------|-------|-----|------|-------|------|-----|-------|----|-----------| ",
-        ]
-        for pr in group_prs:
-            pr_url = pr.get("url", "")
-            pr_num = pr_url.rstrip("/").split("/")[-1] if pr_url else pr.get("id", "?")
-            jira_key = pr.get("jira_key", "")
-            jira_url = pr.get("jira_url", "")
-            pr_title = (pr.get("jira_summary") or pr.get("title") or "(no title)").replace("|", "\\|").replace("\n", " ")[:60]
-            author = (pr.get("author") or "?").split()[0]
-            days = pr.get("age_days", 0)
-            approved_by = pr.get("approved_by") or []
-            pending_reviewers = pr.get("reviewers") or []
-            ci_icon = PR_CI_EMOJI.get(pr.get("ci_status", "unknown"), "")
-            priority = (pr.get("priority") or "").strip()
-            priority_badge = PR_PRIORITY_EMOJI.get(priority.lower(), "")
-
-            pr_cell = f"[PR #{pr_num}]({pr_url})" if pr_url else f"PR #{pr_num}"
-            jira_cell = f"[{jira_key}]({jira_url})" if jira_url and jira_key else (jira_key or "—")
-            priority_cell = f"{priority_badge} {priority}".strip() if priority else "—"
-
-            # Metrics columns
-            cat = pr.get("category", "—")
-            hotspot_prefix = "🔥 " if pr.get("is_hotspot") else ""
-            cat_cell = f"{hotspot_prefix}{cat}"
-            pt = pr.get("pr_type", "unknown")
-            type_cell = f"{PR_TYPE_EMOJI.get(pt, '❓')} {pt}"
-            blast = pr.get("blast_radius", "—")
-            blast_cell = f"{RISK_EMOJI.get(blast, '⚪')} {blast}"
-            risk_tier = pr.get("risk_tier", "—")
-            risk_score = pr.get("risk_score", 0)
-            risk_cell = f"{RISK_EMOJI.get(risk_tier, '⚪')} {risk_score:.0f}" if isinstance(risk_score, (int, float)) else "—"
-            total_loc = pr.get("total_loc", 0)
-            loc_cell = f"{total_loc:,}" if total_loc else "—"
-            file_count = pr.get("file_count", 0)
-            files_cell = str(file_count) if file_count else "—"
-            cx = pr.get("complexity", "low")
-            cx_cell = RISK_EMOJI.get(cx, "—")
-
-            reviewer_parts: list[str] = []
-            if approved_by:
-                reviewer_parts.append("✅ " + ", ".join("@" + n.split()[0] for n in approved_by[:3]))
-            if pending_reviewers:
-                reviewer_parts.append("🔔 " + ", ".join("@" + n.split()[0] for n in pending_reviewers[:4]))
-            reviewer_cell = ";  ".join(reviewer_parts) if reviewer_parts else "—"
-
-            lines.append(
-                f"| {ci_icon} | {pr_cell} | {jira_cell} | @{author} | {days}d"
-                f" | {priority_cell} | {pr_title}"
-                f" | {cat_cell} | {type_cell} | {blast_cell} | {risk_cell}"
-                f" | {loc_cell} | {files_cell} | {cx_cell} | {reviewer_cell} |"
-            )
+        shown = [{**pr, "title": pr.get("jira_summary") or pr.get("title") or "(no title)"} for pr in group_prs]
+        lines += build_pr_table(shown, QUEUE_COLUMNS)
         lines.append("")
 
     return "\n".join(lines)
@@ -697,7 +642,7 @@ def main(skill: str, prompt_text: str) -> None:
 
     # Model: AI_MODEL_OVERRIDE (router/--model, alias or id) > configured AI_MODEL (models.json default).
     try:
-        model = resolve_model(requested=os.getenv("AI_MODEL_OVERRIDE", ""), env_model=config.get("AI_MODEL", ""))
+        model = resolve_run_model(config)
     except ModelError as e:
         print(f"ERROR: {e}", file=sys.stderr, flush=True)
         sys.exit(1)

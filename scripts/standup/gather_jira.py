@@ -31,6 +31,7 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from scripts.common.pr_metrics import STANDUP_COLUMNS, enrich_with_signals
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.standup.slack_client import get_standup_messages
 from scripts.standup.bb_helpers import get_open_prs
@@ -569,6 +570,7 @@ def main() -> None:
         open_prs = filtered_prs
     else:
         print(f"[gather_jira] {len(open_prs)} open Bitbucket PRs (no team filter)", flush=True)
+    enrich_with_signals(open_prs, "bitbucket", config, columns=STANDUP_COLUMNS)
 
     slack_messages = get_standup_messages(config, lookback_hours)
 

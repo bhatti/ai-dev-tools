@@ -649,27 +649,32 @@ class TestDesignMetricsRows:
         assert "Avg Readability Score" in dashboard
 
 
+from scripts.common.models import load_models  # noqa: E402
+
+_MODELS = load_models()["aliases"]
+
+
 class TestModelOverride:
     def test_slack_text_beats_the_route_parameter(self, monkeypatch):
         from scripts.analyze.run_pr_audit import _apply_model_override
         monkeypatch.setenv("AI_MODEL_OVERRIDE", "low")
-        config = {"AI_MODEL": "us.anthropic.claude-sonnet-5-5"}
+        config = {"AI_MODEL": _MODELS["sonnet"]}
         _apply_model_override(config, {"model": "high"})
-        assert config["AI_MODEL"] == "us.anthropic.claude-opus-4-6-v1"
+        assert config["AI_MODEL"] == _MODELS["opus"]
 
     def test_route_parameter_alone_is_enough(self, monkeypatch):
         from scripts.analyze.run_pr_audit import _apply_model_override
         monkeypatch.setenv("AI_MODEL_OVERRIDE", "low")
-        config = {"AI_MODEL": "us.anthropic.claude-sonnet-5-5"}
+        config = {"AI_MODEL": _MODELS["sonnet"]}
         _apply_model_override(config, {"model": ""})
-        assert config["AI_MODEL"] == "anthropic.claude-haiku-4-5"
+        assert config["AI_MODEL"] == _MODELS["haiku"]
 
     def test_nothing_requested_keeps_the_configured_model(self, monkeypatch):
         from scripts.analyze.run_pr_audit import _apply_model_override
         monkeypatch.setenv("AI_MODEL_OVERRIDE", "{{.AiModel}}")
-        config = {"AI_MODEL": "us.anthropic.claude-sonnet-5-5"}
+        config = {"AI_MODEL": _MODELS["sonnet"]}
         _apply_model_override(config, {"model": ""})
-        assert config["AI_MODEL"] == "us.anthropic.claude-sonnet-5-5"
+        assert config["AI_MODEL"] == _MODELS["sonnet"]
 
     def test_unknown_name_exits_1(self, monkeypatch, capsys):
         import pytest
@@ -678,3 +683,67 @@ class TestModelOverride:
         with pytest.raises(SystemExit) as e:
             _apply_model_override({"AI_MODEL": "x.claude-y"}, {"model": "opuss"})
         assert e.value.code == 1 and "unknown model" in capsys.readouterr().err
+
+
+class TestSingleDashboard:
+    MD = """# Audit
+
+## Findings
+text
+
+## Metrics Dashboard
+
+| Metric | Value | Benchmark | Signal | Description |
+|--------|-------|-----------|--------|-------------|
+| Spec coverage | 40% | ≥80% | 🔴 | linked issues |
+| Rubber-stamp rate | 10% | ≤10% | 🟢 | approvals |
+
+### Claude-Assessed Process Metrics
+
+| Metric | Value | Benchmark | Signal | Description |
+|--------|-------|-----------|--------|-------------|
+| Verbosity Rate | 5% | <10% | 🟢 | bloat |
+
+## Single-PR observations
+keep me
+"""
+
+    def test_model_written_tables_are_lifted_out_with_their_rows(self):
+        from scripts.analyze.run_pr_audit import _extract_and_strip_metrics_tables
+        md, rows = _extract_and_strip_metrics_tables(self.MD)
+        assert "| Metric |" not in md and "keep me" in md and "text" in md
+        assert [r[0] for r in rows] == ["Spec coverage", "Rubber-stamp rate", "Verbosity Rate"]
+        assert rows[0] == ("Spec coverage", "40%", "≥80%", "🔴", "linked issues")
+
+    def test_sections_without_a_table_are_kept(self):
+        from scripts.analyze.run_pr_audit import _extract_and_strip_metrics_tables
+        md, rows = _extract_and_strip_metrics_tables("## Metrics discussion\nonly prose\n\n## Next\nx\n")
+        assert "only prose" in md and rows == []
+
+    def test_report_ends_with_exactly_one_dashboard_containing_every_row(self):
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude, _extract_and_strip_metrics_tables
+        md, rows = _extract_and_strip_metrics_tables(self.MD)
+        pr = {"number": 1, "state": "merged", "signals": {"groups": ["comments", "commits"], "truncated": [], "error": "",
+                                                          "comments_human": 0, "comments_bot": 2, "major_comments_human": 0,
+                                                          "major_comments_bot": 1, "commits": 3}}
+        out = md + "\n" + _build_metrics_summary_with_claude([pr], rows)
+        assert out.count("### Metrics Dashboard") == 1
+        for name in ("Spec coverage", "Rubber-stamp rate", "Verbosity Rate", "PRs without a human comment", "Avg commits per PR"):
+            assert name in out
+
+
+class TestReportAssembly:
+    def test_a_second_pass_replaces_the_appended_summary_instead_of_duplicating_it(self):
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude, _extract_and_strip_metrics_tables
+        pr = {"number": 1, "state": "merged"}
+        first = "# Audit\n\n## Findings\nx\n\n" + _build_metrics_summary_with_claude([pr], [("Spec coverage", "40%", "≥80%", "🔴", "d")])
+        md, rows = _extract_and_strip_metrics_tables(first)
+        assert "Pre-Computed PR Metrics" not in md and "## Findings" in md and rows == []     # regenerated, not parsed back
+        second = md + "\n\n" + _build_metrics_summary_with_claude([pr], [("Spec coverage", "40%", "≥80%", "🔴", "d")])
+        assert second.count("### Metrics Dashboard") == 1 and second.count("Pre-Computed PR Metrics Summary") == 1
+
+    def test_other_sections_that_mention_metrics_are_kept(self):
+        from scripts.analyze.run_pr_audit import _extract_and_strip_metrics_tables
+        text = "# A\n\n## Design Metrics\n\n| Metric | Value | Benchmark | Signal | Description |\n|---|---|---|---|---|\n| SRP | 1 | 0 | 🟡 | d |\n\n## Metrics Dashboard\n\n| Metric | Value | Benchmark | Signal | Description |\n|---|---|---|---|---|\n| Spec | 1% | x | 🔴 | d |\n"
+        md, rows = _extract_and_strip_metrics_tables(text)
+        assert "## Design Metrics" in md and "| SRP |" in md and [r[0] for r in rows] == ["Spec"]

@@ -25,6 +25,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 
+from scripts.common.pr_metrics import STANDUP_COLUMNS, enrich_with_signals
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.common.shell import run_cmd as _run
 from scripts.standup.slack_client import get_standup_messages
@@ -298,6 +299,7 @@ def main() -> None:
         open_prs = filtered_prs
     else:
         print(f"[gather_gh] {len(open_prs)} open PRs (no team filter)", flush=True)
+    enrich_with_signals(open_prs, "github", config, columns=STANDUP_COLUMNS)
 
     slack_messages = get_standup_messages(config, lookback_hours)
 

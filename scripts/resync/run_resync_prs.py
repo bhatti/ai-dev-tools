@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.analyze.pr_fetcher import fetch_prs_by_numbers, parse_pr_url
+from scripts.common.bitbucket_api import api_base
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.report_renderer import render_simple_html
 from scripts.resync.pr_syncer import SyncResult, sync_pr
@@ -222,7 +223,7 @@ def _fetch_my_open_bb_prs(config: dict, current_user_info: dict) -> list[dict]:
         auth = (bb_user, bb_token) if bb_user else None
         headers = {} if bb_user else {"Authorization": f"Bearer {bb_token}"}
         url: str | None = (
-            f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests"
+            f"{api_base()}/repositories/{workspace}/{repo}/pullrequests"
         )
         params: dict = {"state": "OPEN", "pagelen": 50}
         my_prs: list[dict] = []

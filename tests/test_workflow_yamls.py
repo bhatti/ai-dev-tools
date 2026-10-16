@@ -31,7 +31,7 @@ WORKFLOW_YAMLS = [
     "ai-merge-queue.yaml",
     "ai-mq-lane.yaml",
     "ai-parallel-test.yaml",
-    "ai-gate-review.yaml",
+    "ai-pr-risk.yaml",
     "ai-scope-router.yaml",
     "ai-contract-test.yaml",
     "ai-gh-review.yaml",
@@ -291,3 +291,12 @@ class TestWorkflowYamlInteg:
             f"a root-owned /workspace/reports/ directory that UID=1000 cannot write to.\n"
             f"Actual artifact paths: {paths}"
         )
+
+
+def test_pr_risk_builds_the_gate_decision_before_the_report_in_one_task():
+    """The report shows the gate decision, so gate_check must run before it in the same pod (artifacts do not flow backwards)."""
+    text = (EXAMPLES_DIR / "ai-pr-risk.yaml").read_text()
+    assert text.index("scripts.mq.gate_check") < text.index("scripts.mq.report")
+    assert "task_type: gate-check" not in text
+    assert "./gate_result.json" in text and "./reports" in text
+    assert 'APPROVAL_THRESHOLD: "{{.ApprovalThreshold}}"' in text

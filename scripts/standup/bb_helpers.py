@@ -11,7 +11,7 @@ import sys
 from datetime import datetime, timezone
 
 import requests
-from scripts.common.bitbucket_api import _auth, _BASE
+from scripts.common.bitbucket_api import auth, api_base
 
 
 def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
@@ -37,7 +37,7 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
         raw_team = ""
     team_filter = [m.strip().lower() for m in raw_team.split(",") if m.strip()]
 
-    url = f"{_BASE}/repositories/{ws}/{repo}/pullrequests"
+    url = f"{api_base()}/repositories/{ws}/{repo}/pullrequests"
     # Server-side filter by destination branch when set — avoids fetching all pages
     # just to post-filter. BB REST supports: q=destination.branch.name="branch"
     base_params: dict = {"state": "OPEN", "pagelen": 50}
@@ -48,7 +48,7 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
     for _ in range(5):          # max 5 pages = 250 PRs
         resp = requests.get(
             url,
-            auth=_auth(config),
+            auth=auth(config),
             params=params,
             timeout=30,
         )

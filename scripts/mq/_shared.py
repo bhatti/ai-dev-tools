@@ -10,7 +10,8 @@ import re
 
 import requests
 
-from scripts.common.bitbucket_api import _auth as bb_auth, _repo as bb_repo_url, _BASE as _BB_BASE
+from scripts.common.pr_signals import tracker_name
+from scripts.common.bitbucket_api import auth as bb_auth, _repo as bb_repo_url, api_base
 from scripts.common.shell import run_cmd
 
 _JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
@@ -118,10 +119,7 @@ def resolve_tracker(config: dict, repo_url: str = "") -> str:
             return "github"
         if "bitbucket.org" in repo_url:
             return "bitbucket"
-    tracker = (config.get("DEFAULT_TRACKER") or "github").lower().strip()
-    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
-        return "bitbucket"
-    return "github"
+    return tracker_name(config.get("DEFAULT_TRACKER") or "github")
 
 
 def repo_slug(config: dict) -> str:
@@ -439,7 +437,7 @@ def fetch_bb_pr_metadata(config: dict, pr_number: str) -> dict:
         )
         commit_hash = (pr_data.get("source", {}).get("commit", {}).get("hash", ""))
         if commit_hash:
-            status_url = f"{_BB_BASE}/repositories/{ws}/{repo}/commit/{commit_hash}/statuses"
+            status_url = f"{api_base()}/repositories/{ws}/{repo}/commit/{commit_hash}/statuses"
             resp = requests.get(status_url, auth=auth, params={"pagelen": 25}, timeout=15)
             if resp.ok:
                 statuses = resp.json().get("values", [])

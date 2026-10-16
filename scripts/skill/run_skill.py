@@ -33,7 +33,7 @@ from scripts.common.config import (
     load_config,
     validate_claude_config,
 )
-from scripts.common.models import ModelError, resolve_model
+from scripts.common.models import ModelError, resolve_run_model
 from scripts.common.git_utils import clone_repo, create_branch, drop_stored_credentials, resolve_clone_auth
 from scripts.common.docker_check import CLI_MISSING, CLI_NOT_EXECUTABLE, docker_preflight
 from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
@@ -118,7 +118,7 @@ def _clone_target_repo(
 
 def _resolve_model(config: dict, flags: SkillFlags) -> str:
     """Model for this run: --model flag or AI_MODEL_OVERRIDE (alias or id), else the configured AI_MODEL."""
-    return resolve_model(requested=flags.model or os.getenv("AI_MODEL_OVERRIDE", ""), env_model=config.get("AI_MODEL", ""))
+    return resolve_run_model(config, flags.model)
 
 
 def _write_result(workspace: Path, data: dict) -> None:
@@ -126,7 +126,7 @@ def _write_result(workspace: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _append_model_footer(text: str, model: str | None) -> str:
+def _append_model_footer(text: str, model: str) -> str:
     """Append a model footer line to report text."""
     if model:
         return f"{text.rstrip()}\n\n---\n*Model: {model}*\n"
@@ -134,7 +134,7 @@ def _append_model_footer(text: str, model: str | None) -> str:
 
 
 def _write_reports(workspace: Path, skill: str, output_text: str, status_data: dict,
-                   model: str | None = None) -> None:
+                   model: str = "") -> None:
     """Write reports/report.md, reports/report.html, reports/result.json."""
     try:
         from scripts.common.report_renderer import render_simple_html
@@ -276,11 +276,10 @@ def main() -> None:
         print(f"[skill] no SKILL.md found for {flags.skill} — using fallback prompt", flush=True)
 
     # Emit task context markers.
-    model_val = model or ""
     print(f"::add-task-context SELECTED_TRACKER::{tracker}", flush=True)
     print(f"::add-task-context SKILL::{flags.skill}", flush=True)
     print(f"::add-task-context SKILL_LOADED::{'yes' if skill_md else 'no'}", flush=True)
-    print(f"::add-task-context SELECTED_MODEL::{model_val}", flush=True)
+    print(f"::add-task-context SELECTED_MODEL::{model}", flush=True)
     if clone_url:
         print(f"::add-task-context REPO_URL::{clone_url}", flush=True)
         print(f"::add-task-context BRANCH::{branch}", flush=True)
@@ -416,7 +415,7 @@ def main() -> None:
     # Claude's JSON output and may not reflect MAX_TURNS_REACHED correctly.
     final_status = result.status
     print(f"[skill] status={final_status}", flush=True)
-    print(f"::add-task-context SELECTED_MODEL::{model or ''}", flush=True)
+    print(f"::add-task-context SELECTED_MODEL::{model}", flush=True)
 
     # Treat MAX_TURNS_REACHED as a job failure so Formicary marks it failed
     # and triggers notify-error (the on_failed task).

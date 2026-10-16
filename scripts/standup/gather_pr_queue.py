@@ -30,7 +30,9 @@ from pathlib import Path
 
 import requests
 
-from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.config import get_workspace_dir, load_config, worker_count
+from scripts.common.pr_signals import tracker_name
+from scripts.common.pr_metrics import QUEUE_COLUMNS, enrich_with_signals
 from scripts.standup.gather_jira import (
     get_active_sprints,
     get_sprint_issues,
@@ -423,8 +425,7 @@ def _enrich_prs_with_metrics(prs: list[dict], config: dict, tracker: str) -> Non
     if not prs:
         return
 
-    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
-    max_workers = max(1, min(max_workers, 20))
+    max_workers = worker_count()
     total = len(prs)
     print(f"[gather_pr_queue] enriching {total} PRs with metrics (workers={max_workers})...", flush=True)
     t0 = time.monotonic()
@@ -497,6 +498,7 @@ def main() -> None:
         result = _gather_github(config)
 
     _enrich_prs_with_metrics(result.get("prs", []), config, default_tracker)
+    enrich_with_signals(result.get("prs", []), tracker_name(default_tracker), config, columns=QUEUE_COLUMNS, workspace=workspace_dir)
 
     out_path = workspace_dir / "pr_queue.json"
     out_path.write_text(json.dumps(result, indent=2))

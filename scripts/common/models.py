@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -101,6 +102,11 @@ def resolve_model(requested: str = "", env_model: str = "", tier: str = "") -> s
             raise ModelError(f"unknown model tier '{tier}': use one of {', '.join(sorted(models['tiers']))}")
         return models["aliases"][models["tiers"][key]]
     return models["aliases"][models["default"]]
+
+
+def resolve_run_model(config: dict, requested: str = "") -> str:
+    """Model for one run: ``requested`` (Slack ``--model``) or the ``AI_MODEL_OVERRIDE`` job parameter, else the configured ``AI_MODEL``."""
+    return resolve_model(requested=requested or os.environ.get("AI_MODEL_OVERRIDE", ""), env_model=config.get("AI_MODEL", ""))
 
 
 def model_env() -> dict[str, str]:

@@ -191,6 +191,14 @@ def load_config(required: list[str] | None = None) -> dict[str, str]:
     return config
 
 
+def worker_count() -> int:
+    """Concurrent per-PR API calls: ``DIFFSTAT_WORKERS`` (default 8), clamped to 1-20; a bad value means the default."""
+    try:
+        return max(1, min(20, int(os.environ.get("DIFFSTAT_WORKERS", "8"))))
+    except ValueError:
+        return 8
+
+
 def validate_claude_config(config: dict[str, str]) -> None:
     """Verify Claude API credentials are present before invoking the claude CLI.
 

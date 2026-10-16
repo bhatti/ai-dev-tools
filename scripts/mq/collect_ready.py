@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 import click
 
-from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.config import get_workspace_dir, load_config, worker_count
 from scripts.common.pr_metadata import _BB_CI_MAP as _bb_ci_map
 from scripts.common.pr_classify import (
     SENSITIVE_PATHS,
@@ -33,6 +33,7 @@ from scripts.common.pr_classify import (
     extract_issue_ref as _extract_issue_ref,
     is_test_file,
 )
+from scripts.common.pr_metrics import enrich_with_signals
 from scripts.mq._shared import (
     _cfg_for_repo,
     fetch_bb_pr_metadata,
@@ -64,8 +65,7 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
     if not total:
         return
 
-    max_workers = int(os.environ.get("DIFFSTAT_WORKERS", "8"))
-    max_workers = max(1, min(max_workers, 20))
+    max_workers = worker_count()
     print(
         f"[collect_ready] enriching {total} PRs with diffstat "
         f"(concurrent, workers={max_workers})...",
@@ -127,6 +127,9 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
                 pr["build_count_passed"] = meta.get("build_count_passed", 0)
                 pr["build_count_failed"] = meta.get("build_count_failed", 0)
         print(f"[collect_ready] metadata fetch complete in {time.monotonic() - t1:.1f}s", flush=True)
+
+    # Review activity (comments by humans/bots, reviewers, tasks, commits) for the per-PR tables.
+    enrich_with_signals(prs, "bitbucket" if is_bb else "github", config)
 
     for pr in prs:
         files = diffstats.get(pr["pr_number"], [])
