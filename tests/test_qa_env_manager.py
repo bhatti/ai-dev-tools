@@ -51,9 +51,9 @@ def fake_docker(tmp_path, monkeypatch, app):
 echo "$@" >> "{log}"
 echo "$1 GH_TOKEN=${{GH_TOKEN-unset}} NPM_TOKEN=${{NPM_TOKEN-unset}}" >> "{log.parent}/docker.env"
 case "$1" in
-  info) exit ${{FAKE_DOCKER_INFO_RC:-0}} ;;
-  image) if [ -f "{log}.pulled" ] || [ -n "$FAKE_IMAGE_PRESENT" ]; then echo '{{"8080/tcp":{{}}}}'; else exit 1; fi ;;
-  pull) if [ -n "$FAKE_PULL_FAIL" ]; then echo "pull access denied" >&2; exit 1; fi; touch "{log}.pulled" ;;
+  info) case "$*" in *Architecture*) echo "${{FAKE_DAEMON_ARCH:-x86_64}}"; exit 0 ;; esac; exit ${{FAKE_DOCKER_INFO_RC:-0}} ;;
+  image) if [ -f "{log}.pulled" ] || [ -n "$FAKE_IMAGE_PRESENT" ]; then case "$*" in *Architecture*) echo "${{FAKE_IMAGE_ARCH-amd64}}" ;; *) echo '{{"8080/tcp":{{}}}}' ;; esac; else exit 1; fi ;;
+  pull) if [ -n "$FAKE_PULL_FAIL" ]; then echo "${{FAKE_PULL_MSG:-pull access denied}}" >&2; exit 1; fi; touch "{log}.pulled" ;;
   run) if [ -n "$FAKE_RUN_FAIL" ]; then echo "port is already allocated" >&2; exit 1; fi; echo fakecid ;;
   port) [ -n "$FAKE_PORT_EMPTY" ] || echo "127.0.0.1:{port}" ;;
   inspect) echo true ;;
@@ -169,7 +169,7 @@ class TestDockerEnv:
         spec = em.EnvSpec(kind="docker", image="shop:1", container_port=3000, out_dir=str(tmp_path))
         em.run_in_env(spec, ["true"])
         calls = fake_docker.read_text().splitlines()
-        assert not any(c.startswith("image inspect") for c in calls) and any("127.0.0.1::3000" in c for c in calls)
+        assert not any("ExposedPorts" in c for c in calls) and any("127.0.0.1::3000" in c for c in calls)
 
 
 class TestComposeEnv:
@@ -419,3 +419,43 @@ class TestBoundedAndLoudTeardown:
         spec = em.EnvSpec(kind="compose", compose_file="c.yml", url=app, out_dir=str(tmp_path), ready_timeout=5)
         em.run_in_env(spec, ["true"])
         assert "could not remove" in capsys.readouterr().err
+
+
+class TestImageArchitecture:
+    """The daemon (often arm64 on a laptop node) runs the image natively or not at all: no platform is ever forced."""
+
+    def _run(self, tmp_path):
+        return em.run_in_env(em.EnvSpec(kind="docker", image="shop:1", out_dir=str(tmp_path)), ["true"])
+
+    def test_an_image_for_another_architecture_is_blocked_before_it_is_started(self, tmp_path, fake_docker, monkeypatch):
+        monkeypatch.setenv("FAKE_DAEMON_ARCH", "aarch64")
+        monkeypatch.setenv("FAKE_IMAGE_ARCH", "amd64")
+        assert self._run(tmp_path) == em.EXIT_BLOCKED
+        error = json.loads((tmp_path / "candidate" / "env-failure.json").read_text())["error"]
+        assert "amd64" in error and "arm64" in error and "imagetools" in error
+        assert not any(c.startswith("run ") for c in fake_docker.read_text().splitlines())
+
+    def test_a_matching_image_is_started_and_no_platform_is_forced(self, tmp_path, fake_docker, monkeypatch):
+        monkeypatch.setenv("FAKE_DAEMON_ARCH", "aarch64")
+        monkeypatch.setenv("FAKE_IMAGE_ARCH", "arm64")
+        assert self._run(tmp_path) == 0
+        assert not any("--platform" in c for c in fake_docker.read_text().splitlines() if c.split()[0] in ("run", "pull"))
+
+    def test_an_image_without_a_build_for_the_daemon_is_blocked_when_the_engine_reports_nothing(self, tmp_path, fake_docker, monkeypatch):
+        """With the containerd image store, inspecting for the native platform of a foreign-only image prints nothing."""
+        monkeypatch.setenv("FAKE_DAEMON_ARCH", "aarch64")
+        monkeypatch.setenv("FAKE_IMAGE_ARCH", "")
+        assert self._run(tmp_path) == em.EXIT_BLOCKED
+        assert "arm64" in json.loads((tmp_path / "candidate" / "env-failure.json").read_text())["error"]
+        assert not any(c.startswith("run ") for c in fake_docker.read_text().splitlines())
+
+    def test_unknown_architectures_are_not_a_reason_to_block(self, tmp_path, fake_docker, monkeypatch):
+        monkeypatch.setenv("FAKE_DAEMON_ARCH", "riscv-something")
+        assert self._run(tmp_path) == 0
+
+    def test_a_missing_native_build_is_explained_when_the_pull_fails(self, tmp_path, fake_docker, monkeypatch):
+        monkeypatch.setenv("FAKE_PULL_FAIL", "1")
+        monkeypatch.setenv("FAKE_PULL_MSG", "no matching manifest for linux/arm64/v8 in the manifest list entries")
+        assert self._run(tmp_path) == em.EXIT_BLOCKED
+        error = json.loads((tmp_path / "candidate" / "env-failure.json").read_text())["error"]
+        assert "no matching manifest" in error and "imagetools" in error

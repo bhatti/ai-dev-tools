@@ -47,6 +47,8 @@ from scripts.common.env_scrub import scrubbed_environ
 from scripts.common.redact import redact
 
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+_ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+_PLATFORM_HINT = "list the platforms an image has with `docker buildx imagetools inspect <image>`; run on a node of a matching architecture"
 
 
 class EnvError(RuntimeError):
@@ -205,12 +207,36 @@ class DockerEnv(_Env):
     def _ensure_image(self) -> None:
         """A fresh daemon (e.g. a dind sidecar) has no images, so pull before inspecting."""
         if _sh(["docker", "image", "inspect", self.spec.image], check=False).returncode != 0:
-            _sh(["docker", "pull", self.spec.image], timeout=900)
+            try:
+                _sh(["docker", "pull", self.spec.image], timeout=900)
+            except EnvError as e:
+                if "no matching manifest" in str(e):
+                    raise EnvError(f"{e}; the image has no build for this node's architecture: {_PLATFORM_HINT}") from e
+                raise
+
+    def _require_native_image(self) -> None:
+        """Run the image on the daemon's own architecture or not at all: a forced platform leaves a half-usable image
+        (``docker save`` and cluster image loads fail) and emulation hides slow, flaky behaviour. With the containerd
+        image store, asking for the native platform of an image that only has another one prints nothing. An unknown
+        daemon architecture is not blocked."""
+        daemon = _ARCHITECTURES.get(_sh(["docker", "info", "--format", "{{.Architecture}}"], check=False).stdout.strip())
+        if not daemon:
+            return
+        inspect = ["docker", "image", "inspect", "--format", "{{.Architecture}}", self.spec.image]
+        res = _sh([*inspect[:3], "--platform", f"linux/{daemon}", *inspect[3:]], check=False)
+        if res.returncode != 0:  # an engine without `inspect --platform`: only a clearly different architecture is a mismatch
+            found = _ARCHITECTURES.get(_sh(inspect, check=False).stdout.strip())
+            if found and found != daemon:
+                raise EnvError(f"image {self.spec.image} is built for {found} but the Docker daemon runs {daemon}: {_PLATFORM_HINT}")
+            return
+        found = res.stdout.strip()
+        if _ARCHITECTURES.get(found) != daemon:
+            raise EnvError(f"image {self.spec.image} has no build for {daemon}, the architecture of the Docker daemon"
+                           f"{f' (found {found})' if found else ''}: {_PLATFORM_HINT}")
 
     def _port(self) -> int:
         if self.spec.container_port:
             return self.spec.container_port
-        self._ensure_image()
         res = _sh(["docker", "image", "inspect", "--format", "{{json .Config.ExposedPorts}}", self.spec.image], check=False)
         try:
             ports = sorted(int(k.split("/")[0]) for k in json.loads(res.stdout or "null") or {})
@@ -227,6 +253,8 @@ class DockerEnv(_Env):
         ok, msg = docker_preflight()
         if not ok:
             raise EnvError(msg)
+        self._ensure_image()
+        self._require_native_image()
         port = self._port()
         argv = ["docker", "run", "-d", "--name", self.name, "-p", f"127.0.0.1::{port}"]
         for k in self.spec.env:  # `-e K` reads the value from our environment, keeping it out of the process list

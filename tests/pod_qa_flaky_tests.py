@@ -447,7 +447,20 @@ python3 -c "import pathlib;print('::add-task-context ENV_LOG::' + str(pathlib.Pa
             })
             if bad:
                 return bad
-        return h._pass(result, "real docker:dind sidecar: image started with auto-detected port, tests ran, containers removed, delta CLEAN")
+            foreign = h.exec_step(pod, "foreign-architecture", r'''
+cd /app; Q=/workspace/qa
+OTHER=$( [ "$(uname -m)" = aarch64 ] && echo linux/amd64 || echo linux/arm64 )
+docker rmi -f alpine:3 > /dev/null 2>&1; docker pull -q --platform $OTHER alpine:3 > /dev/null
+python3 -m scripts.qa.env_manager run --kind docker --image alpine:3 --container-port 80 --side foreign --out-dir $Q/out -- true > /dev/null 2>&1
+echo "::add-task-context FOREIGN_RC::$?"
+python3 -c "import json; print('::add-task-context FOREIGN_EXPLAINED::' + str('has no build for' in json.load(open('$Q/out/foreign/env-failure.json'))['error']))"
+echo "::add-task-context FOREIGN_CONTAINERS::$(docker ps -a --filter name=qa-foreign -q | wc -l)"
+''', env, timeout=300)
+            result.steps.append(foreign)
+            bad = markers_ok(result, foreign, {"FOREIGN_RC": "3", "FOREIGN_EXPLAINED": "True", "FOREIGN_CONTAINERS": "0"})
+            if bad:
+                return bad
+        return h._pass(result, "real docker:dind sidecar: image started natively with auto-detected port (no forced platform), tests ran, containers removed, delta CLEAN; an image of another architecture is BLOCKED with an explanation")
 
     def test_skill_dind_real(base_env):
         result = h.TestResult("skill-dind-real")
