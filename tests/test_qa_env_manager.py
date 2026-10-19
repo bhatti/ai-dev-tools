@@ -58,7 +58,8 @@ case "$1" in
   port) [ -n "$FAKE_PORT_EMPTY" ] || echo "127.0.0.1:{port}" ;;
   inspect) echo true ;;
   logs) echo "container log line" ;;
-  compose) exit ${{FAKE_COMPOSE_RC:-0}} ;;
+  rm) echo "Error: removal of container is already in progress" >&2; exit ${{FAKE_RM_RC:-0}} ;;
+  compose) case "$*" in *" down "*) [ -f "{log}.downfail" ] && exit 1; exit 0 ;; esac; exit ${{FAKE_COMPOSE_RC:-0}} ;;
 esac
 """)
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
@@ -389,3 +390,32 @@ class TestWaitReadyProxy:
         monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
         monkeypatch.delenv("NO_PROXY", raising=False)
         em.wait_ready(app, "/", timeout=5)
+
+
+class TestBoundedAndLoudTeardown:
+    def test_a_test_command_that_runs_too_long_is_killed_and_reported(self, tmp_path, app, capsys):
+        spec = em.EnvSpec(kind="url", url=app, out_dir=str(tmp_path), command_timeout=0.5)
+        code = em.run_in_env(spec, [sys.executable, "-c", "import time; time.sleep(60)"])
+        assert code == em.EXIT_TIMEOUT
+        assert "exceeded" in capsys.readouterr().err and (tmp_path / "candidate" / "logs" / "env.log").exists()
+
+    def test_results_written_before_the_timeout_are_kept(self, tmp_path, app):
+        probe = [sys.executable, "-c", "import os, time; open(os.environ['QA_OUT'] + '/results.jsonl', 'a').write('{\"case\":\"C1\",\"outcome\":\"pass\"}\\n'); time.sleep(60)"]
+        em.run_in_env(em.EnvSpec(kind="url", url=app, out_dir=str(tmp_path), command_timeout=1), probe)
+        assert "C1" in (tmp_path / "candidate" / "results.jsonl").read_text()
+
+    def test_the_cli_exposes_the_timeout(self, tmp_path):
+        res = run_cli(["run", "--kind", "url", "--url", "http://127.0.0.1:1", "--command-timeout", "abc", "--out-dir", str(tmp_path), "--", "true"])
+        assert res.returncode == 2
+
+    def test_a_container_that_cannot_be_removed_is_reported_with_the_manual_command(self, tmp_path, fake_docker, monkeypatch, capsys):
+        monkeypatch.setenv("FAKE_RM_RC", "1")
+        assert em.run_in_env(em.EnvSpec(kind="docker", image="shop:1", out_dir=str(tmp_path)), ["true"]) == 0
+        err = capsys.readouterr().err
+        assert "could not remove" in err and "docker rm -f qa-candidate-" in err
+
+    def test_a_compose_project_that_cannot_be_removed_is_reported(self, tmp_path, fake_docker, app, monkeypatch, capsys):
+        Path(f"{fake_docker}.downfail").touch()
+        spec = em.EnvSpec(kind="compose", compose_file="c.yml", url=app, out_dir=str(tmp_path), ready_timeout=5)
+        em.run_in_env(spec, ["true"])
+        assert "could not remove" in capsys.readouterr().err

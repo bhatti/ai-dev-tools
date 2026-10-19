@@ -206,7 +206,7 @@ class TestSafetyAndStrictness:
 
     def test_planned_case_without_any_record_counts_as_not_run_in_the_denominator(self):
         a = assess([rec("C1", "pass")])
-        assert a["summary"]["total"] == 2 and a["summary"]["counts"]["not-run"] == 1 and a["readiness"] == "Ready with concerns"
+        assert a["summary"]["total"] == 2 and a["summary"]["counts"]["not-run"] == 1 and a["readiness"] == "Not ready"
 
     def test_untrusted_text_cannot_inject_links_tags_or_columns(self):
         evil = 'x [click](javascript:alert(1)) <img src=x onerror=alert(1)> `code` | extra'
@@ -267,3 +267,28 @@ class TestSafetyAndStrictness:
         (tmp_path / "cand.jsonl").write_text("\n".join(json.dumps(rec(c, "pass")) for c in ("C1", "C2")))
         assert rp.main(["--plan", str(tmp_path / "plan.json"), "--candidate", str(tmp_path / "cand.jsonl"), "--env-failure", str(tmp_path / "none.json"),
                         "--out-dir", str(tmp_path / "r")]) == 0
+
+
+class TestNothingSilentlyMissing:
+    def test_an_automatable_case_with_no_recorded_result_is_a_problem_not_a_concern(self):
+        a = assess([rec("C1", "pass")])  # C2 (UI) never reported anything
+        assert a["readiness"] == "Not ready" and any("C2" in p and "no result" in p for p in a["problems"])
+
+    def test_an_explicit_skip_is_a_concern_not_a_pass(self):
+        a = assess([rec("C1", "pass"), rec("C2", "not-run", "skipped on purpose")])
+        assert a["readiness"] == "Ready with concerns" and a["ac_status"]["AC2"] == "unverifiable"
+
+    def test_manual_cases_without_results_are_not_problems(self):
+        plan = {**PLAN, "cases": [*PLAN["cases"], {"id": "C3", "title": "eyeball", "type": "MANUAL", "ac": ["AC1"], "expected": "looks right"}]}
+        a = assess([rec("C1", "pass"), rec("C2", "pass")], plan=plan)
+        assert not any("C3" in p for p in a["problems"])
+
+    def test_ui_change_without_a_ui_case_blocks_the_report(self):
+        plan = {**PLAN, "cases": [PLAN["cases"][0]]}
+        a = rp.assess(plan, [rec("C1", "pass")], None, [], {}, changed_files=["web/src/Cart.tsx"])
+        assert a["readiness"] == "Blocked" and any("UI" in b for b in a["blockers"])
+
+    def test_ansi_codes_from_browser_errors_never_reach_the_report(self):
+        a = assess([rec("C1", "pass"), rec("C2", "fail", "\x1b[31mexpected visible\x1b[39m")])
+        md = rp.render_markdown(PLAN, a, {"mode": "verify"}, None, {})
+        assert "\x1b" not in md and "expected visible" in md

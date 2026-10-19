@@ -337,7 +337,7 @@ def render_simple_html(title: str, md_text: str) -> str:
       border: 1px solid #dee2e6; padding: .45rem .75rem;
       text-align: left; white-space: nowrap;
     }}
-    td {{ border: 1px solid #dee2e6; padding: .4rem .75rem; vertical-align: top; }}
+    td {{ border: 1px solid #dee2e6; padding: .4rem .75rem; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }}
     tbody tr:nth-child(odd) {{ background: #f8f9fa; }}
     tbody tr:hover {{ background: #dbe9ff; }}
     .risk-high {{ border-left: 4px solid #dc3545; padding-left: .75rem; margin-bottom: .75rem; }}

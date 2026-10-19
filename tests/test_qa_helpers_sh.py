@@ -15,6 +15,7 @@ pytestmark = pytest.mark.skipif(not all(shutil.which(t) for t in ("bash", "curl"
 
 HELPERS = Path(__file__).resolve().parents[1] / "scripts" / "qa" / "helpers.sh"
 SEEN: list[tuple[str, str, str | None]] = []
+LIMITED: list[int] = []
 
 
 class App(BaseHTTPRequestHandler):
@@ -38,6 +39,25 @@ class App(BaseHTTPRequestHandler):
             self.wfile.write(b'{"ok":tr')
             self.wfile.flush()
             self.close_connection = True
+            return
+        if self.path == "/limited-once":  # rate limited on the first request only
+            first = not LIMITED
+            LIMITED.append(1)
+            if first:
+                self.send_response(429)
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+            else:
+                self._send(200, {"ok": True})
+            return
+        if self.path == "/limited-always":
+            self.send_response(429)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
             return
         if self.path == "/secure":
             self._send(200 if self.headers.get("Authorization") else 401, {"secure": True})
@@ -247,3 +267,19 @@ def test_missing_jq_is_blocked_infrastructure_with_a_valid_record(tmp_path, base
     res, rows = run(tmp_path, base_url, "qa_case C1; api_call GET /items; check_http 200 ok; qa_summary", path=str(bindir))
     assert len(rows) == 1 and rows[0]["outcome"] == "blocked" and rows[0]["infra"] is True
     assert "no check executed" in res.stdout
+
+
+def test_a_rate_limited_request_is_retried_after_retry_after_and_then_judged_normally(tmp_path, base_url):
+    LIMITED.clear()
+    res, results = run(tmp_path, base_url, 'qa_case C1; api_call GET /limited-once; check_http 200 "works after the limit lifts"; qa_summary')
+    assert [r["outcome"] for r in results] == ["pass"] and len(LIMITED) == 2
+
+
+def test_a_target_that_keeps_rate_limiting_is_infrastructure_not_a_product_failure(tmp_path, base_url):
+    res, results = run(tmp_path, base_url, 'qa_case C1; api_call GET /limited-always; check_http 200 "never gets through"; qa_summary', QA_RETRY_429="2")
+    assert [(r["outcome"], r["infra"]) for r in results] == [("blocked", True)] and "rate limit" in results[0]["message"]
+
+
+def test_a_429_that_the_case_expects_is_a_normal_check(tmp_path, base_url):
+    res, results = run(tmp_path, base_url, 'qa_case C1; api_call GET /limited-always; check_http 429 "limit is enforced"; qa_summary', QA_RETRY_429="0")
+    assert [r["outcome"] for r in results] == ["pass"]

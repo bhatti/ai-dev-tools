@@ -297,3 +297,9 @@ PRs <https://bitbucket.org/org/repo/pull-requests/47076|#47076> (35d) have 0 rev
         # Slack links should not appear as raw syntax
         assert "|#47076>" not in html
         assert "|PROJ-100>" not in html
+
+
+def test_long_unbreakable_table_cells_wrap_instead_of_widening_the_table():
+    html = render_simple_html("t", "| a | b |\n| --- | --- |\n| " + "x" * 400 + " | y |\n")
+    assert "overflow-wrap: anywhere" in html
+    assert "<link" not in html and "<script src" not in html  # self-contained: no CDN

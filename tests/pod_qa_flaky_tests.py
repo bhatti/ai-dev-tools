@@ -95,7 +95,6 @@ python3 -c "import os; open(os.environ['QA_OUT'] + '/seen-env.txt', 'w').write(s
 """
 
 FORMICARY_DIR = Path(os.environ.get("FORMICARY_DIR", Path(__file__).resolve().parents[2] / "formicary"))
-DIND_JOB_ARGS = "qa-regression https://bitbucket.org/ws/repo/pull-requests/7 --dind"
 
 
 def workflow_pod_manifest(name: str, namespace: str, image: str) -> str:
@@ -536,6 +535,62 @@ PYEOF
                 return h._fail(result, step, f"a crashing app must be reported as exited before ready: {step.context.get('BROKEN_ERROR')}")
         return h._pass(result, "git worktree tier with real git: app started on $PORT, tests ran, worktree + process removed; crashing app -> BLOCKED")
 
+    def test_qa_plan_gates(base_env):
+        result = h.TestResult("qa-plan-gates")
+        env = dict(base_env)
+        with h.pod_fixture("qa-plan-gates") as pod:
+            step = h.exec_step(pod, "gates", r'''
+cd /app; G=/workspace/qa_gates; rm -rf $G; mkdir -p $G
+cat > $G/plan.json <<'JSON'
+{"criteria": [{"id": "AC1", "text": "the banner shows", "source": "issue:X-1"}],
+ "cases": [{"id": "C1", "ac": ["AC1"], "type": "API", "title": "api", "expected": "200"}]}
+JSON
+echo '{"changed_files": ["web/src/Banner.tsx", "web/src/Banner.test.tsx"]}' > $G/ctx.json
+printf 'qa_case C1\nqa_summary\n' > $G/api-tests.sh
+python3 -m scripts.qa.model $G/plan.json --url http://127.0.0.1 --pr-context $G/ctx.json --tests $G/api-tests.sh > $G/fit.json; echo "::add-task-context UI_PR_RC::$?"
+python3 - <<'PYEOF'
+import json
+fit = json.loads(open("/workspace/qa_gates/fit.json").read().split("::add-task-context")[0])
+print("::add-task-context UI_PR_BLOCKER::" + str(any("UI" in b for b in fit["blockers"])))
+PYEOF
+printf 'qa_case C9\n' > $G/other.sh
+python3 -m scripts.qa.model $G/plan.json --url http://127.0.0.1 --tests $G/other.sh > /dev/null; echo "::add-task-context UNTRACED_RC::$?"
+# nothing recorded: never clean
+: > $G/empty.jsonl
+python3 -m scripts.qa.report --plan $G/plan.json --candidate $G/empty.jsonl --out-dir $G/reports | tail -1 > $G/status.json
+python3 -c "import json; print('::add-task-context EMPTY_READINESS::' + json.load(open('$G/status.json'))['readiness'])"
+# a target that rate limits once, then answers
+python3 - <<'PYEOF' &
+import http.server
+state = {"n": 0}
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == "/x" and not state["n"]:  # only the first real request is limited, not the readiness probe
+            state["n"] = 1
+            self.send_response(429); self.send_header("Retry-After", "1"); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+        else:
+            self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+http.server.ThreadingHTTPServer(("127.0.0.1", 18085), H).serve_forever()
+PYEOF
+SRV=$!
+python3 -m scripts.qa.env_manager run --kind url --url http://127.0.0.1:18085 --ready-timeout 20 --health-path /ready --side limited --out-dir $G/out --command-timeout 30 -- bash -c 'source /app/scripts/qa/helpers.sh; qa_case C1; api_call GET /x; check_http 200 "after the limit"; qa_summary' > /dev/null 2>&1
+echo "::add-task-context RATE_LIMIT_OUTCOME::$(python3 -c "import json; print([json.loads(l)['outcome'] for l in open('$G/out/limited/results.jsonl')][-1])")"
+# a hung test command is killed, results recorded before it survive
+python3 -m scripts.qa.env_manager run --kind url --url http://127.0.0.1:18085 --side hung --out-dir $G/out --command-timeout 3 -- bash -c 'echo "{\"case\":\"C1\",\"outcome\":\"pass\"}" >> "$QA_OUT/results.jsonl"; sleep 60' > /dev/null 2>&1
+echo "::add-task-context HUNG_RC::$?"
+echo "::add-task-context HUNG_KEPT::$(python3 -c "from scripts.qa.model import load_jsonl; print(len(load_jsonl('$G/out/hung/results.jsonl')))")"
+python3 -m scripts.qa.env_manager run --kind url --url http://127.0.0.1:1 --ready-timeout 1 --side broken --out-dir $G/out -- true > /dev/null 2>&1
+echo "::add-task-context UNREACHABLE_RC::$?"
+kill $SRV 2>/dev/null
+''', env, timeout=180)
+            result.steps.append(step)
+            bad = markers_ok(result, step, {"UI_PR_RC": "2", "UI_PR_BLOCKER": "True", "UNTRACED_RC": "2", "EMPTY_READINESS": "Blocked",
+                                            "UNREACHABLE_RC": "3", "RATE_LIMIT_OUTCOME": "pass", "HUNG_RC": "124", "HUNG_KEPT": "1"})
+            if bad:
+                return bad
+        return h._pass(result, "UI change without a UI case -> NO-GO; case missing from the tests -> NO-GO; nothing recorded -> Blocked; a hung test command is killed (exit 124) with finished results kept; unreachable env -> exit 3; HTTP 429 retried after Retry-After")
+
     # ── skills load in the pod ───────────────────────────────────────────────────
 
     def test_skills_load(base_env):
@@ -583,5 +638,6 @@ python3 -m scripts.qa.env_manager --help > /dev/null && echo "::add-task-context
         "qa-worktree-env": test_qa_worktree_env,
         "qa-regression-docker": test_qa_regression_docker,
         "skill-dind-real": test_skill_dind_real,
+        "qa-plan-gates": test_qa_plan_gates,
         "qa-skills-load": test_skills_load,
     }

@@ -455,3 +455,50 @@ class TestLoginFailureIsNotRetried:
         browser = FakeBrowser(lambda: ListeningPage())
         records = ui.run_cases(browser, SPEC_LOGIN["cases"], SPEC_LOGIN, BASE, tmp_path, tmp_path / "r.jsonl", {ui.origin(BASE)}, False, False)
         assert [r["outcome"] for r in records] == ["blocked", "blocked"] and len(browser.contexts) == 1
+
+
+class TestEvidenceAndRobustness:
+    def test_ansi_escape_codes_are_stripped_from_records(self):
+        r = ui._record("C1", "fail", "\x1b[31mexpected\x1b[39m visible", observed="\x1b[2mcall log\x1b[22m")
+        assert r["message"] == "expected visible" and r["observed"] == "call log"
+
+    def test_login_dialogs_listed_in_the_spec_are_dismissed_when_present(self):
+        assert ui.validate_spec({"cases": [{"id": "C1", "steps": [{"goto": "/"}]}],
+                                 "login": {"success_selector": "#app", "dismiss": ["text=Continue"]}}) == []
+        assert any("dismiss" in p for p in ui.validate_spec({"cases": [{"id": "C1", "steps": [{"goto": "/"}]}],
+                                                              "login": {"success_selector": "#app", "dismiss": "text=Continue"}}))
+
+    def test_every_case_leaves_a_screenshot_even_without_a_screenshot_step(self, tmp_path):
+        recs = run(FakePage(visible=[".ok"]), [{"goto": "/"}, {"expect_visible": ".ok"}], tmp_path)
+        shot = next(r["screenshot"] for r in recs if r["screenshot"])
+        assert open(shot, "rb").read() == b"png"
+
+
+class TestBlockingDialogsAfterLogin:
+    def _login(self, monkeypatch, page, dismiss):
+        monkeypatch.setenv("QA_USERNAME", "u")
+        monkeypatch.setenv("QA_PASSWORD", "p")
+        ui._login(page, {"username_selector": "#u", "password_selector": "#p", "submit_selector": "button", "success_selector": "#app",
+                         "dismiss": dismiss}, BASE, 1000)
+
+    def test_listed_dialogs_are_clicked_before_waiting_for_the_app(self, monkeypatch):
+        page = FakePage(visible=["#app", "text=Continue"])
+
+        def click(sel, **k):
+            page.calls.append(("click", sel))
+            if sel == "text=Continue":  # clicking the dialog's button closes it
+                page.visible.discard(sel)
+
+        page.click = click
+        self._login(monkeypatch, page, ["text=Continue"])
+        assert [c for c in page.calls if c[0] == "click"] == [("click", "button"), ("click", "text=Continue")]
+
+    def test_a_dialog_that_is_not_shown_on_this_build_is_skipped(self, monkeypatch):
+        page = FakePage(visible=["#app"])
+        self._login(monkeypatch, page, ["text=Continue"])
+        assert ("click", "text=Continue") not in page.calls
+
+    def test_a_dialog_that_keeps_reappearing_cannot_loop_forever(self, monkeypatch):
+        page = FakePage(visible=["#app", "text=Continue"])  # clicking never closes it
+        self._login(monkeypatch, page, ["text=Continue"])
+        assert page.calls.count(("click", "text=Continue")) == 3

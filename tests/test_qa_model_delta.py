@@ -274,3 +274,63 @@ class TestSplitByPlan:
         assert md.coverage(plan)["uncovered"] == ["A"]
         assert any("missing its id" in p for p in md.validate_plan(plan))
         assert md.fitness(plan, {"url": "u"})["verdict"] == "NO-GO"
+
+
+class TestPlanAgainstTheChange:
+    """The plan must exercise the kind of code the PR changed, and every case must be in a test file that will run."""
+
+    UI_PLAN = {"criteria": [{"id": "AC1", "text": "t", "source": "issue:X-1"}],
+               "cases": [{"id": "C1", "ac": ["AC1"], "type": "API", "title": "t", "expected": "e"}]}
+
+    def test_ui_change_without_a_ui_case_is_no_go(self):
+        r = md.fitness(self.UI_PLAN, {"url": "http://x", "changed_files": ["web/src/Button.tsx", "web/src/Button.test.tsx"]})
+        assert r["verdict"] == "NO-GO" and any("UI" in b for b in r["blockers"])
+
+    def test_ui_change_with_a_ui_case_is_fine(self):
+        plan = {**self.UI_PLAN, "cases": [*self.UI_PLAN["cases"], {"id": "C2", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e"}]}
+        assert md.fitness(plan, {"url": "http://x", "changed_files": ["web/src/Button.tsx"]})["verdict"] == "GO"
+
+    def test_a_manual_ui_case_does_not_satisfy_the_ui_requirement(self):
+        plan = {**self.UI_PLAN, "cases": [{"id": "C2", "ac": ["AC1"], "type": "MANUAL", "title": "t", "expected": "e"}, *self.UI_PLAN["cases"]]}
+        assert md.fitness(plan, {"url": "http://x", "changed_files": ["ui/app.vue"]})["verdict"] == "NO-GO"
+
+    def test_test_only_and_docs_changes_need_no_ui_case(self):
+        files = ["web/src/__tests__/Button.test.tsx", "web/e2e/login.spec.ts", "README.md", "docs/ui.md"]
+        assert md.fitness(self.UI_PLAN, {"url": "http://x", "changed_files": files})["verdict"] == "GO"
+
+    def test_backend_change_with_only_ui_cases_is_a_gap(self):
+        plan = {**self.UI_PLAN, "cases": [{"id": "C1", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e"}]}
+        r = md.fitness(plan, {"url": "http://x", "changed_files": ["service/handler.go"]})
+        assert r["verdict"] == "CAUTION" and any("backend" in g for g in r["gaps"])
+
+    def test_a_backend_file_under_a_web_directory_is_backend_not_ui(self):
+        assert md.classify_changes(["web/handler.go", "web/api/views.py", "web/src/app.ts"]) == {"ui": ["web/src/app.ts"], "backend": ["web/handler.go", "web/api/views.py"]}
+        assert md.fitness(self.UI_PLAN, {"url": "http://x", "changed_files": ["web/handler.go"]})["verdict"] == "GO"
+
+    def test_no_changed_files_means_no_requirement(self):
+        assert md.fitness(self.UI_PLAN, {"url": "http://x"})["verdict"] == "GO"
+
+    def test_a_case_missing_from_every_test_file_is_no_go(self):
+        r = md.fitness(self.UI_PLAN, {"url": "http://x", "test_sources": {"api-tests.sh": "qa_case C2\nqa_summary"}})
+        assert r["verdict"] == "NO-GO" and any("C1" in b for b in r["blockers"])
+
+    def test_case_ids_match_whole_tokens_only(self):
+        r = md.fitness(self.UI_PLAN, {"url": "http://x", "test_sources": {"api-tests.sh": "qa_case C10\n"}})
+        assert r["verdict"] == "NO-GO"
+        assert md.fitness(self.UI_PLAN, {"url": "http://x", "test_sources": {"api-tests.sh": "qa_case C10\nqa_case C1\n"}})["verdict"] == "GO"
+
+    def test_manual_cases_need_no_test_file_entry(self):
+        plan = {**self.UI_PLAN, "cases": [{"id": "C9", "ac": ["AC1"], "type": "MANUAL", "title": "t", "expected": "e"},
+                                          {"id": "C1", "ac": ["AC1"], "type": "API", "title": "t", "expected": "e"}]}
+        assert md.fitness(plan, {"url": "http://x", "test_sources": {"t.sh": "qa_case C1"}})["verdict"] == "GO"
+
+    def test_cli_reads_changed_files_and_test_files_and_checks_shell_syntax(self, tmp_path, capsys):
+        plan = tmp_path / "plan.json"
+        plan.write_text(json.dumps(self.UI_PLAN))
+        ctx = tmp_path / "ctx.json"
+        ctx.write_text(json.dumps({"changed_files": ["src/App.tsx"]}))
+        sh = tmp_path / "api.sh"
+        sh.write_text("qa_case C1\nif then\n")
+        assert md.main([str(plan), "--url", "http://x", "--pr-context", str(ctx), "--tests", str(sh)]) == 2
+        out = json.loads(capsys.readouterr().out.split("::add-task-context")[0])
+        assert any("UI" in b for b in out["blockers"]) and any("syntax" in b for b in out["blockers"])

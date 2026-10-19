@@ -16,6 +16,7 @@
 #   QA_USERNAME/QA_PASSWORD  basic auth alternative
 #   QA_TIMEOUT           per-request seconds (default 30)
 #   QA_INSECURE_TLS      1 to accept self-signed certificates (curl -k)
+#   QA_RETRY_429         retries after HTTP 429, honouring Retry-After (default 3, 0 = none; a case that tests rate limiting itself sets 0)
 #
 # There is deliberately no `set -e`: every check runs and qa_summary always prints (it always exits 0; the
 # report is the gate). Safety rules enforced here, because test scripts are written from untrusted PR text:
@@ -100,9 +101,18 @@ _qa_vet_curl_args() {
   return 0
 }
 
+# Seconds to wait before retrying a 429: the Retry-After header (seconds) when present, else 1, 2, 4...; capped at 30.
+_qa_retry_after() {
+  local header="$1" attempt="$2" value
+  value="$(tr -d '\r' < "$header" | awk -F': *' 'tolower($1)=="retry-after" {print $2; exit}')"
+  case "$value" in ''|*[!0-9]*) value=$((1 << attempt)) ;; esac
+  [ "$value" -gt 30 ] && value=30
+  echo "$value"
+}
+
 # api_call METHOD PATH_OR_URL [extra curl args...]  -> sets HTTP_CODE, HTTP_BODY
 api_call() {
-  local method url target body_file err_file n code rc arg
+  local method url target body_file err_file hdr_file n code rc arg attempt=0 max_retry="${QA_RETRY_429:-3}" wait_s
   method="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"; target="$2"; shift 2
   _QA_N=$((_QA_N + 1)); n="$_QA_N"
   HTTP_CODE=0; HTTP_BODY=""; _QA_LAST_OK=0; _QA_LAST_EVIDENCE=""
@@ -119,21 +129,30 @@ api_call() {
     *) if [ "$QA_ALLOW_MUTATIONS" != "1" ]; then qa_blocked "mutating call $method blocked (set --allow-mutations / QA_ALLOW_MUTATIONS=1)"; return 1; fi ;;
   esac
   if ! _qa_vet_curl_args "$@"; then qa_blocked "$_QA_VET_ERROR"; return 1; fi
-  body_file="$(mktemp)"; err_file="$(mktemp)"
+  body_file="$(mktemp)"; err_file="$(mktemp)"; hdr_file="$(mktemp)"; _QA_RETRIES_USED=0
   local auth=()
   [ "${QA_INSECURE_TLS:-0}" = "1" ] && auth+=(-k)
   if [ -n "${QA_AUTH_HEADER:-}" ]; then auth+=(-H "$QA_AUTH_HEADER")
   elif [ -n "${QA_USERNAME:-}" ]; then auth+=(-u "$QA_USERNAME:${QA_PASSWORD:-}"); fi
   # ${auth[@]+...}: an empty array is an unbound variable under `set -u` on bash 3.2 (macOS).
   # ulimit -f caps what a response can write to disk (20 MB); --proto keeps curl to http(s)
-  code="$( ulimit -f 40960 2>/dev/null; curl -sS -o "$body_file" -w '%{http_code}' -X "$method" --proto '=http,https' --max-filesize 20971520 --max-time "$QA_TIMEOUT" ${auth[@]+"${auth[@]}"} "$@" "$url" 2>"$err_file")"
-  rc=$?
+  while :; do
+    code="$( ulimit -f 40960 2>/dev/null; curl -sS -D "$hdr_file" -o "$body_file" -w '%{http_code}' -X "$method" --proto '=http,https' --max-filesize 20971520 --max-time "$QA_TIMEOUT" ${auth[@]+"${auth[@]}"} "$@" "$url" 2>"$err_file")"
+    rc=$?
+    # A rate-limited target is not a failing product: wait as told and ask again before judging the answer.
+    if [ "$rc" -eq 0 ] && [ "$code" = 429 ] && [ "$attempt" -lt "$max_retry" ]; then
+      wait_s="$(_qa_retry_after "$hdr_file" "$attempt")"; attempt=$((attempt + 1)); _QA_RETRIES_USED="$attempt"
+      [ "$wait_s" -gt 0 ] && sleep "$wait_s"
+      continue
+    fi
+    break
+  done
   HTTP_CODE="${code:-0}"
   HTTP_BODY="$(head -c 1048576 "$body_file" | tr -d '\0')"
   _QA_LAST_EVIDENCE="$QA_OUT/evidence/${QA_CASE}-${n}.txt"
   { printf '%s\nstatus: %s\n---\n' "$_QA_LAST_CMD" "$HTTP_CODE"; printf '%s' "${HTTP_BODY:0:4000}"; printf '\n---\ncurl exit: %s\n' "$rc"; cat "$err_file"; } > "$_QA_LAST_EVIDENCE"
   local curl_err; curl_err="$(head -c 200 "$err_file" | tr '\n' ' ')"
-  rm -f "$body_file" "$err_file"
+  rm -f "$body_file" "$err_file" "$hdr_file"
   if [ "$rc" -ne 0 ]; then
     # A stalled or reset transfer can leave a 200 header and half a body: never treat that as a response.
     qa_infra "curl failed (exit $rc) for $url: $curl_err"; return 1
@@ -148,6 +167,9 @@ check_http() {
   if [ "$HTTP_CODE" = "$1" ]; then qa_pass "${2:-HTTP $1}"; return 0; fi
   if { [ "$HTTP_CODE" = 401 ] || [ "$HTTP_CODE" = 403 ]; } && [ -z "${QA_AUTH_HEADER:-}${QA_USERNAME:-}" ]; then
     qa_infra "${2:-HTTP $1}: target answered $HTTP_CODE and no credentials were provided (QA_AUTH_HEADER / QA_USERNAME); criteria cannot be verified"; return 0
+  fi
+  if [ "$HTTP_CODE" = 429 ] && [ "$1" != 429 ]; then
+    qa_infra "${2:-HTTP $1}: target is rate limiting (HTTP 429 after ${_QA_RETRIES_USED:-0} retries); this is not a product failure"; return 0
   fi
   qa_fail "${2:-HTTP $1}: expected $1, got $HTTP_CODE"
 }

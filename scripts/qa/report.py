@@ -30,7 +30,8 @@ from scripts.qa import model
 _READINESS_SIGNAL = {"Ready": "DONE", "Ready with concerns": "DONE_WITH_CONCERNS", "Not ready": "DONE_WITH_CONCERNS", "Blocked": "BLOCKED"}
 
 
-def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failures: list[dict], findings: dict, mode: str = "verify") -> dict:
+def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failures: list[dict], findings: dict, mode: str = "verify",
+           changed_files: list[str] | None = None) -> dict:
     """Compute readiness and the reasons behind it."""
     all_outcomes = model.case_outcomes(cand_records)
     outcomes, extra = model.split_by_plan(plan, all_outcomes)
@@ -41,12 +42,18 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     problems: list[str] = []
     blockers = [f"plan is invalid: {p}" for p in model.validate_plan(plan)]
     blockers += [f"{e.get('side', '?')} environment failed to start: {e.get('error', '')}" for e in env_failures]
+    change_blockers, change_gaps = model.change_coverage(plan, changed_files or [])
+    blockers += change_blockers
     if mode == "regression" and delta is None:
         blockers.append("regression mode needs a delta (baseline vs candidate comparison) but none was provided")
     if summ["executed"] == 0:
         blockers.append("no planned case executed on the candidate")
     if delta and delta["status"] == "BLOCKED":
         blockers.append(f"regression comparison blocked: {delta['reason']}")
+    automated = {c["id"]: c for c in plan.get("cases", []) if c.get("id") and c.get("type") in model.AUTOMATED_TYPES}
+    silent = [cid for cid in automated if cid not in all_outcomes]
+    if silent:
+        problems.append(f"no result was recorded for case(s) {', '.join(silent)}: their test never ran or never reported")
     if summ["counts"]["fail"]:
         problems.append(f"{summ['counts']['fail']} case(s) failed")
     not_met = [a for a, s in statuses.items() if s == "not met"]
@@ -63,6 +70,7 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     partial = [a for a, s in statuses.items() if s in ("partial", "unverifiable")]
     if partial:
         concerns.append(f"criteria partially or not verifiable: {', '.join(partial)}")
+    concerns += change_gaps
     if cov["uncovered"]:
         concerns.append(f"criteria without a test case: {', '.join(cov['uncovered'])}")
     c = summ["counts"]
@@ -179,7 +187,7 @@ def _evidence_paths(outcomes: dict[str, dict], delta: dict | None) -> list[str]:
 
 def write_outputs(plan: dict, cand_records: list[dict], delta: dict | None, env_failures: list[dict], findings: dict, meta: dict,
                   out_dir: Path, evidence_roots: list[Path] | None = None) -> dict:
-    a = assess(plan, cand_records, delta, env_failures, findings, meta.get("mode", "verify"))
+    a = assess(plan, cand_records, delta, env_failures, findings, meta.get("mode", "verify"), meta.get("changed_files"))
     links = collect_evidence(out_dir, _evidence_paths({**a["outcomes"], **a["extra"]}, delta), evidence_roots or [])
     line = status_line(a, delta)
     result = {**line, "ac_status": a["ac_status"], "summary_stats": a["summary"], "delta": delta, "meta": meta, "evidence_files": sorted(links.values())}
@@ -221,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     cand = Path(a.candidate)
     roots = [Path(r) for r in a.evidence_root] or [cand.resolve().parent.parent]
     meta = {"mode": a.mode, "title": (pr.get("pr") or {}).get("title", ""), "url": (pr.get("pr") or {}).get("url", ""),
-            "ref": a.pr, "ac_source": pr.get("ac_source", ""), "target_url": a.target_url, "baseline_url": a.baseline_url}
+            "ref": a.pr, "ac_source": pr.get("ac_source", ""), "changed_files": pr.get("changed_files") or [], "target_url": a.target_url, "baseline_url": a.baseline_url}
     line = write_outputs(plan, model.load_jsonl(cand), delta, env_failures, findings, meta, Path(a.out_dir), roots)
     print(f"[qa] wrote {a.out_dir}/report.md, report.html, result.json", flush=True)
     print(json.dumps(line))

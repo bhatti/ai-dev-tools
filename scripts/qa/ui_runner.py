@@ -37,6 +37,7 @@ from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
 from scripts.common.exit_codes import EXIT_BLOCKED, EXIT_USAGE
+from scripts.common.text_utils import strip_ansi
 from scripts.qa.model import append_jsonl
 
 DEFAULT_TIMEOUT_MS = 10_000
@@ -72,6 +73,8 @@ def validate_spec(spec: dict) -> list[str]:
     login = spec.get("login")
     if login and not login.get("success_selector"):
         problems.append("login needs a success_selector, otherwise cases would run unauthenticated after a failed login")
+    if login and "dismiss" in login and not (isinstance(login["dismiss"], list) and all(isinstance(x, str) for x in login["dismiss"])):
+        problems.append("login.dismiss must be a list of selectors")
     ids = set()
     for case in spec.get("cases", []):
         cid = case.get("id")
@@ -106,7 +109,7 @@ def _ignored(text: str) -> bool:
 
 
 def _record(case: str, outcome: str, message: str, command: str = "", observed: str = "", screenshot: str = "", infra: bool = False) -> dict:
-    return {"case": case, "outcome": outcome, "message": message, "command": command, "observed": observed[:500],
+    return {"case": case, "outcome": outcome, "message": strip_ansi(message), "command": command, "observed": strip_ansi(observed)[:500],
             "screenshot": screenshot, "infra": infra}
 
 
@@ -236,6 +239,8 @@ def run_case(page: Any, case: dict, base: str, out_dir: Path, console: list[str]
         records.append(_record(cid, "inconclusive", "the case made no check (add an expect_* step)"))
     elif all(r["outcome"] == "pass" for r in records):
         records.append(_record(cid, "pass", "no console errors or 5xx responses", "console+network"))
+    if not shot and records and not any(r.get("screenshot") for r in records):
+        shot = _shot(page, out_dir, cid, "final")  # every case leaves a picture, so side-by-side review never has a gap
     if shot and records:  # the screenshot is evidence for the case as a whole: attach it to its deciding record
         _attach(records[-1], shot)
     return records
@@ -254,7 +259,21 @@ def _login(page: Any, login: dict, base: str, timeout: int) -> None:
     page.fill(login["username_selector"], user, timeout=timeout)
     page.fill(login["password_selector"], pw, timeout=timeout)
     page.click(login["submit_selector"], timeout=timeout)
+    _dismiss_blocking_dialogs(page, login.get("dismiss", []), timeout)
     page.locator(login["success_selector"]).first.wait_for(state="visible", timeout=timeout)
+
+
+def _dismiss_blocking_dialogs(page: Any, selectors: list[str], timeout: int) -> None:
+    """Apps stack modals after login (change password, release notes, cookie banners) that cover the page and make
+    every later click time out. Each listed selector is clicked while it shows up; one that never appears is skipped
+    (a short bounded wait, not a failure) and a dialog that keeps reappearing cannot loop."""
+    for selector in selectors:
+        for _ in range(3):
+            try:
+                page.locator(selector).first.wait_for(state="visible", timeout=min(timeout, 2_000))
+            except Exception:  # noqa: BLE001 - not shown on this build: nothing to dismiss
+                break
+            page.click(selector, timeout=timeout)
 
 
 def launch_chromium(pw: Any, headless: bool = True) -> Any:

@@ -42,7 +42,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from scripts.common.docker_check import docker_preflight
-from scripts.common.exit_codes import EXIT_BLOCKED, EXIT_USAGE
+from scripts.common.exit_codes import EXIT_BLOCKED, EXIT_TIMEOUT, EXIT_USAGE
 from scripts.common.env_scrub import scrubbed_environ
 from scripts.common.redact import redact
 
@@ -70,6 +70,7 @@ class EnvSpec:
     build_cmd: str = ""
     start_cmd: str = ""
     allow_mutations: bool = False
+    command_timeout: float = 3600.0  # the wrapped test command; results recorded before it is killed are kept
 
     @property
     def side_dir(self) -> Path:
@@ -149,6 +150,17 @@ def _sh(argv: list[str], timeout: float = 300, check: bool = True, env: dict[str
 
 def _git(args: list[str]) -> subprocess.CompletedProcess:
     return _sh(["git", *args])
+
+
+def _teardown(argv: list[str], what: str, manual: str, timeout: float = 300, env: dict[str, str] | None = None) -> None:
+    """Run a teardown command; a failure leaves resources behind, so say what and how to remove it by hand."""
+    try:
+        res = _sh(argv, check=False, timeout=timeout, env=env)
+        error = "" if res.returncode == 0 else f"exit {res.returncode}: {redact((res.stderr or res.stdout).strip()[:200])}"
+    except EnvError as e:
+        error = str(e)
+    if error:
+        print(f"[qa-env] WARNING: could not remove {what} ({error}); remove it manually: {manual}", file=sys.stderr, flush=True)
 
 
 class _Env:
@@ -239,7 +251,7 @@ class DockerEnv(_Env):
 
     def stop(self) -> None:
         if self.started:
-            _sh(["docker", "rm", "-f", self.name], check=False)
+            _teardown(["docker", "rm", "-f", self.name], f"container {self.name}", f"docker rm -f {self.name}")
             self.started = False
 
 
@@ -274,7 +286,8 @@ class ComposeEnv(_Env):
 
     def stop(self) -> None:
         if self.started:
-            _sh([*self._base(), "down", "-v", "--remove-orphans"], check=False, timeout=300, env=scrubbed_environ(self.spec.env))
+            _teardown([*self._base(), "down", "-v", "--remove-orphans"], f"compose project {self.project}",
+                      f"docker compose -p {self.project} -f {self.spec.compose_file} down -v --remove-orphans", env=scrubbed_environ(self.spec.env))
             self.started = False
 
 
@@ -340,10 +353,9 @@ class WorktreeEnv(_Env):
                 pass
             self.proc = None
         if self.created:
-            try:
-                _git(["-C", str(Path(self.spec.repo_dir).resolve()), "worktree", "remove", "--force", str(self.dir)])
-            except EnvError:
-                pass
+            repo = str(Path(self.spec.repo_dir).resolve())
+            _teardown(["git", "-C", repo, "worktree", "remove", "--force", str(self.dir)], f"worktree {self.dir}",
+                      f"git -C {repo} worktree remove --force {self.dir}")
             self.created = False
         if self.log_path.exists():  # the app log may hold secrets and is about to become an artifact
             self.log_path.write_text(redact(self.log_path.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
@@ -396,7 +408,12 @@ def run_in_env(spec: EnvSpec, command: list[str]) -> int:
                 proc = subprocess.Popen(argv, env=child_env, start_new_session=True)
             finally:
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, set(signals))
-            code = proc.wait()
+            try:
+                code = proc.wait(timeout=spec.command_timeout or None)
+            except subprocess.TimeoutExpired:
+                print(f"[qa-env] the test command exceeded {spec.command_timeout:.0f}s and was killed; "
+                      "results recorded so far are kept, every case without a result is reported as not run", file=sys.stderr, flush=True)
+                code = EXIT_TIMEOUT
         except OSError as e:
             print(f"[qa-env] cannot run the test command {argv[0]!r}: {e}", file=sys.stderr, flush=True)
             code = 127
@@ -452,7 +469,7 @@ def _spec_from_args(a: argparse.Namespace) -> EnvSpec:
     return EnvSpec(kind=a.kind, side=a.side, out_dir=a.out_dir, url=a.url, health_path=a.health_path, ready_timeout=a.ready_timeout,
                    image=a.image, container_port=a.container_port, env=dict(kv.split("=", 1) for kv in a.env), compose_file=a.compose_file,
                    ref=a.ref, repo_dir=a.repo_dir, build_cmd=a.build_cmd, start_cmd=a.start_cmd,
-                   allow_mutations=getattr(a, "allow_mutations", False))
+                   allow_mutations=getattr(a, "allow_mutations", False), command_timeout=getattr(a, "command_timeout", 3600.0))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -475,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--build-cmd", default="")
         sp.add_argument("--start-cmd", default="")
         if name == "run":
+            sp.add_argument("--command-timeout", type=float, default=3600.0, help="seconds the test command may run before it is killed (0 = no limit)")
             sp.add_argument("--allow-mutations", action="store_true", help="export QA_ALLOW_MUTATIONS=1 to the test command")
             sp.add_argument("command", nargs=argparse.REMAINDER)
     cl = sub.add_parser("cleanup")

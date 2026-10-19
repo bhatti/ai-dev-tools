@@ -16,12 +16,62 @@ records is ``not-run``. Executed means pass or fail.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from pathlib import Path
 
 OUTCOMES = ("pass", "fail", "blocked", "not-run", "inconclusive")
 _EVIDENCE_KEYS = ("command", "observed", "screenshot", "evidence")
 _SEVERITY = {"fail": 4, "blocked": 3, "inconclusive": 2, "not-run": 1, "pass": 0}
 CASE_TYPES = ("API", "UI", "CLI", "UNIT", "MANUAL")
+AUTOMATED_TYPES = ("API", "UI", "CLI", "UNIT")
+
+# What kind of code a change touches, from its paths alone (a heuristic; the plan gate uses it to demand matching cases).
+_UI_EXTENSIONS = {".tsx", ".jsx", ".vue", ".svelte", ".html", ".css", ".scss", ".less"}
+_UI_DIRS = ("/ui/", "/frontend/", "/web/", "/client/", "/components/", "/pages/", "/views/")
+_UI_DIR_LANGUAGES = {".js", ".mjs", ".cjs", ".ts"}  # in a UI directory only browser languages are UI; a Go or Python handler under web/ is backend
+_SOURCE_EXTENSIONS = {".py", ".go", ".java", ".kt", ".rb", ".rs", ".cs", ".php", ".js", ".mjs", ".cjs", ".ts", ".c", ".cc", ".cpp", ".scala", ".swift"}
+_TEST_PATH = re.compile(r"(^|/)(__tests__|__integration__|tests?|specs?|e2e|testdata|fixtures)/|(^|/)test_[^/]*$|[._-](test|spec)\.[^/.]+$|_test\.[^/.]+$")
+
+
+def classify_changes(paths: list[str]) -> dict[str, list[str]]:
+    """Split changed paths into ``ui`` and ``backend`` source files; tests, docs and configuration are neither."""
+    ui, backend = [], []
+    for path in paths:
+        if _TEST_PATH.search(path):
+            continue
+        ext = Path(path).suffix.lower()
+        if ext in _UI_EXTENSIONS or (ext in _UI_DIR_LANGUAGES and any(d in f"/{path}" for d in _UI_DIRS)):
+            ui.append(path)
+        elif ext in _SOURCE_EXTENSIONS:
+            backend.append(path)
+    return {"ui": ui, "backend": backend}
+
+
+def change_coverage(plan: dict, changed_files: list[str]) -> tuple[list[str], list[str]]:
+    """(blockers, gaps) when the plan does not exercise what the change touched: UI code needs a UI case (blocker),
+    backend code needs an API, CLI or UNIT case (gap: the path heuristic is weaker there). MANUAL cases never count."""
+    types = {c.get("type") for c in plan.get("cases", [])}
+    changes = classify_changes(changed_files)
+    blockers, gaps = [], []
+    if changes["ui"] and "UI" not in types:
+        blockers.append(f"the change touches UI code ({len(changes['ui'])} file(s), e.g. {changes['ui'][0]}) but the plan has no automated UI case")
+    if changes["backend"] and not types & {"API", "CLI", "UNIT"}:
+        gaps.append(f"the change touches backend code ({len(changes['backend'])} file(s), e.g. {changes['backend'][0]}) but the plan has no API, CLI or UNIT case")
+    return blockers, gaps
+
+
+def untraced_cases(plan: dict, test_sources: dict[str, str]) -> list[str]:
+    """Automated case ids that appear in none of the test files (they would never produce a result). Whole tokens
+    only: ``C1`` is not found in ``C10``."""
+    missing = []
+    for case in plan.get("cases", []):
+        cid = case.get("id", "")
+        if cid and case.get("type") in AUTOMATED_TYPES:
+            token = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(cid)}(?![A-Za-z0-9_.-])")
+            if not any(token.search(text) for text in test_sources.values()):
+                missing.append(cid)
+    return missing
 
 
 def load_jsonl(path: str | Path) -> list[dict]:
@@ -131,6 +181,11 @@ def fitness(plan: dict, env: dict | None = None) -> dict:
         blockers.append("API/UI cases exist but no target URL is configured")
     if sum(1 for c in cases if c.get("mutating")) and not (env or {}).get("allow_mutations"):
         gaps.append("mutating cases will be blocked without --allow-mutations")
+    change_blockers, change_gaps = change_coverage(plan, (env or {}).get("changed_files") or [])
+    blockers += change_blockers
+    gaps += change_gaps
+    if (env or {}).get("test_sources") is not None:
+        blockers += [f"case {cid} appears in no test file, so it would never run" for cid in untraced_cases(plan, env["test_sources"])]
     verdict = "NO-GO" if blockers else ("CAUTION" if gaps else "GO")
     return {"verdict": verdict, "blockers": blockers, "gaps": gaps}
 
@@ -177,13 +232,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("plan")
     p.add_argument("--url", default="")
     p.add_argument("--allow-mutations", action="store_true")
+    p.add_argument("--pr-context", default="", help="pr-context.json: its changed_files must be exercised by the plan")
+    p.add_argument("--tests", nargs="*", default=[], help="test files (api-tests.sh, ui-spec.json): every automated case id must appear in one; .sh files are syntax-checked")
     a = p.parse_args(argv)
     try:
         plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         print(json.dumps({"error": f"cannot read plan: {e}"}))
         return 2
-    result = fitness(plan, {"url": a.url, "allow_mutations": a.allow_mutations})
+    env: dict = {"url": a.url, "allow_mutations": a.allow_mutations}
+    try:
+        if a.pr_context:
+            env["changed_files"] = json.loads(Path(a.pr_context).read_text(encoding="utf-8")).get("changed_files") or []
+        if a.tests:
+            env["test_sources"] = {t: Path(t).read_text(encoding="utf-8") for t in a.tests}
+    except (OSError, json.JSONDecodeError) as e:
+        print(json.dumps({"error": f"cannot read input: {e}"}))
+        return 2
+    result = fitness(plan, env)
+    for t in a.tests:
+        if t.endswith(".sh"):
+            check = subprocess.run(["bash", "-n", t], capture_output=True, text=True)
+            if check.returncode != 0:
+                result["blockers"].append(f"{t} has a shell syntax error: {check.stderr.strip()[:200]}")
+                result["verdict"] = "NO-GO"
     result["coverage"] = coverage(plan)
     print(json.dumps(result, indent=2))
     print(f"::add-task-context QA_FITNESS::{result['verdict']}", flush=True)

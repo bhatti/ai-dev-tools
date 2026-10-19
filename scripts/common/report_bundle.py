@@ -9,6 +9,7 @@ from pathlib import Path
 
 from scripts.common.redact import redact, redact_obj
 from scripts.common.report_renderer import render_simple_html
+from scripts.common.text_utils import strip_ansi
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _MD_SPECIAL = re.compile(r"([\[\]`<>|])")
@@ -16,7 +17,7 @@ _MD_SPECIAL = re.compile(r"([\[\]`<>|])")
 
 def md_cell(text: object) -> str:
     """Redact secrets and make untrusted ``text`` inert inside a markdown table cell (no links, tags, code spans)."""
-    return _MD_SPECIAL.sub(r"\\\1", redact(str(text))).replace("\n", " ").strip()
+    return _MD_SPECIAL.sub(r"\\\1", redact(strip_ansi(str(text)))).replace("\n", " ").strip()
 
 
 def collect_evidence(out_dir: Path, sources: list[str], roots: list[Path]) -> dict[str, str]:
