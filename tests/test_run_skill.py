@@ -229,8 +229,8 @@ def test_build_prompt_fallback_description_no_mandatory_directive():
 
 def test_build_prompt_mandatory_names_the_skill():
     """The MANDATORY directive must include the skill name so Claude knows which to follow."""
-    prompt = _build_prompt("edge-pr-hygiene", "run checks", "# hygiene content")
-    assert "edge-pr-hygiene" in prompt.split("## Skill:")[0]  # in the directive, before the skill body
+    prompt = _build_prompt("repo-skill", "run checks", "# hygiene content")
+    assert "repo-skill" in prompt.split("## Skill:")[0]  # in the directive, before the skill body
 
 
 def test_build_prompt_request_section_preserved():

@@ -3,11 +3,14 @@
 Covers the core routing bug: _detect_intent must be called AFTER _KNOWN_SKILLS is
 populated by ensure_ygs_skills(), otherwise PR review URLs fall back to ygs-ask.
 """
+import os
 import sys
 import pytest
 
 import scripts.adhoc.run_skill as run_skill_mod
 from scripts.adhoc.run_skill import _detect_intent, _best_review_skill, _REVIEW_SKILL_PREFERENCE
+from scripts.skill.flags import parse_skill_flags
+from scripts.skill.run_skill import export_repo_identity
 
 
 # ---------------------------------------------------------------------------
@@ -188,3 +191,25 @@ class TestUploadHtmlReportPostFallback:
         assert len(posted) == 1, "fallback link must be posted when post_fallback=True"
         assert "report.html" in posted[0]
         assert result is True
+
+
+class TestExplicitRepoIsWhatTheToolsMean:
+    def _run(self, monkeypatch, raw, tracker, clone_url, config):
+        monkeypatch.delenv("GH_ORG", raising=False)
+        monkeypatch.delenv("GH_REPO", raising=False)
+        export_repo_identity(parse_skill_flags(raw), tracker, clone_url, config)
+
+    def test_an_explicit_github_repo_overrides_the_org_default_for_every_tool(self, monkeypatch):
+        config = {"GH_ORG": "default-org", "GH_REPO": "default-repo"}
+        self._run(monkeypatch, "ygs-enrich-ticket 42 --repo acme/widgets", "github", "https://github.com/acme/widgets.git", config)
+        assert (config["GH_ORG"], config["GH_REPO"]) == ("acme", "widgets") and os.environ["GH_ORG"] == "acme" and os.environ["GH_REPO"] == "widgets"
+
+    def test_without_an_explicit_repo_the_org_default_stands(self, monkeypatch):
+        config = {"GH_ORG": "default-org", "GH_REPO": "default-repo"}
+        self._run(monkeypatch, "ygs-enrich-ticket 42", "github", "https://github.com/default-org/default-repo.git", config)
+        assert config == {"GH_ORG": "default-org", "GH_REPO": "default-repo"} and "GH_ORG" not in os.environ
+
+    def test_a_bitbucket_repo_changes_nothing(self, monkeypatch):
+        config = {"GH_ORG": "o", "GH_REPO": "r"}
+        self._run(monkeypatch, "ygs-qa --repo ws/repo", "jira", "https://bitbucket.org/ws/repo.git", config)
+        assert config == {"GH_ORG": "o", "GH_REPO": "r"}

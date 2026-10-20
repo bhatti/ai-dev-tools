@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from scripts.common.pr_signals.retry import Retryable, call_with_retry
+from scripts.common.http_retry import Retryable, call_with_retry
 
 BATCH = 10       # PRs per GraphQL request
 TIMEOUT = 90

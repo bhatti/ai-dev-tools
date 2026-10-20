@@ -506,7 +506,7 @@ Run **any** YGS skill against **any** repo with full flag parsing, smart default
 ```
 
 A GitHub PR/issue URL or a Bitbucket PR URL as the first argument names its repository, so `--repo` is not needed (explicit `--repo` wins; a link inside free text never changes the repo). A bare Jira key becomes the identifier; a test path or ticket text goes after `--` or with `--repo`.
-`ygs-qa` and `ygs-flaky-test` are backed by `scripts/qa`, `scripts/flaky` and `scripts/common/pr_context.py`: see [QA and flaky-test skills](docs/qa-and-flaky-skills.md).
+`ygs-qa` and `ygs-flaky-test` are backed by `scripts/qa`, `scripts/flaky` and `scripts/common/pr_context.py`: see [QA and flaky-test skills](docs/qa-and-flaky-skills.md). `ygs-sprint-ready` and `ygs-enrich-ticket` are backed by `scripts/tickets` (GitHub and Jira): see [Ticket readiness](docs/ticket-readiness.md).
 `--image` / `--compose` / `--dind` need a Docker daemon; without one the job stops with BLOCKED and says to add `--dind`.
 
 The default image (`plexobject/ai-dev-tools:latest`) is based on `python:3.12-bookworm` with

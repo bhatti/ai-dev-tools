@@ -13,7 +13,7 @@ import requests
 
 from scripts.common.bitbucket_api import api_base, auth
 from scripts.common.config import worker_count
-from scripts.common.pr_signals.retry import Retryable, call_with_retry
+from scripts.common.http_retry import Retryable, call_with_retry
 
 TIMEOUT = 30
 MAX_PAGES = 10          # 10 x 100 items per list; beyond that the group is reported as truncated

@@ -21,7 +21,7 @@ PR_METRICS_SCRIPTS = [
     "scripts/common/actors.py", "scripts/common/severity.py", "scripts/common/pr_metrics.py", "scripts/common/pr_classify.py",
     "scripts/common/pr_metadata.py", "scripts/common/bitbucket_api.py", "scripts/common/config.py", "scripts/common/models.py",
     "scripts/common/models.json", "scripts/common/pr_signals/__init__.py", "scripts/common/pr_signals/__main__.py",
-    "scripts/common/pr_signals/github.py", "scripts/common/pr_signals/bitbucket.py", "scripts/common/pr_signals/retry.py",
+    "scripts/common/pr_signals/github.py", "scripts/common/pr_signals/bitbucket.py", "scripts/common/http_retry.py",
     "scripts/analyze/pr_fetcher.py", "scripts/analyze/run_open_prs.py", "scripts/analyze/run_pr_audit.py",
     "scripts/mq/_shared.py", "scripts/mq/scope_router.py", "scripts/mq/gate_check.py", "scripts/mq/report.py", "scripts/mq/collect_ready.py",
     "scripts/review/post_findings.py", "scripts/standup/gather_pr_queue.py", "scripts/standup/gather_gh.py", "scripts/standup/gather_jira.py",

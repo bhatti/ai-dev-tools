@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from scripts.common.claude_runner import (
@@ -36,7 +37,7 @@ from scripts.common.config import (
 from scripts.common.models import ModelError, resolve_run_model
 from scripts.common.git_utils import clone_repo, create_branch, drop_stored_credentials, resolve_clone_auth
 from scripts.common.docker_check import CLI_MISSING, CLI_NOT_EXECUTABLE, docker_preflight
-from scripts.skill.flags import SkillFlags, parse_skill_flags, resolve_repo, resolve_tracker
+from scripts.skill.flags import SkillFlags, github_identity, parse_skill_flags, resolve_repo, resolve_tracker
 from scripts.common.slack_format import format_for_slack
 from scripts.standup.slack_client import notify as slack_notify
 
@@ -135,7 +136,7 @@ def _append_model_footer(text: str, model: str) -> str:
 
 def _write_reports(workspace: Path, skill: str, output_text: str, status_data: dict,
                    model: str = "") -> None:
-    """Write reports/report.md, reports/report.html, reports/result.json."""
+    """Write reports/report.md, reports/report.html, reports/result.json (for a tool-backed skill the tool's own result.json is kept)."""
     try:
         from scripts.common.report_renderer import render_simple_html
         from scripts.common.report_utils import write_report
@@ -145,9 +146,8 @@ def _write_reports(workspace: Path, skill: str, output_text: str, status_data: d
         reports_dir.mkdir(parents=True, exist_ok=True)
         write_report(reports_dir / "report.md", md_with_model)
         write_report(reports_dir / "report.html", render_simple_html(skill, md_with_model))
-        (reports_dir / "result.json").write_text(
-            json.dumps(status_data, indent=2), encoding="utf-8"
-        )
+        if skill not in TOOL_RESULTS or not (reports_dir / "result.json").exists():  # a tool's own result is richer than the status line
+            (reports_dir / "result.json").write_text(json.dumps(status_data, indent=2), encoding="utf-8")
         print("[skill] wrote reports/report.md, report.html, result.json", flush=True)
     except Exception as e:
         print(f"[skill] WARNING: could not write reports/: {e}", flush=True)
@@ -183,6 +183,31 @@ def _find_report_content(workspace: Path, skill: str = "") -> str | None:
     return None
 
 
+# Skills whose verdict and report come from ai-dev-tools tooling: the job must not pass if the model finished without running it.
+TOOL_RESULTS = {"ygs-sprint-ready": ("reports/result.json", "tickets"), "ygs-enrich-ticket": ("reports/result.json", "tickets")}
+
+
+def missing_tool_output(skill: str, workspace: Path, since: float = 0.0) -> str | None:
+    """Why a tool-backed skill's run cannot be trusted (its tooling result is absent, stale or not the tool's), else None.
+    ``since`` is the epoch time the run started: a result older than that is left over from before this run.
+    Must be checked before the job writes its own reports/result.json."""
+    contract = TOOL_RESULTS.get(skill)
+    if not contract:
+        return None
+    rel, key = contract
+    try:
+        path = workspace / rel
+        data = json.loads(path.read_text(encoding="utf-8"))
+        written = path.stat().st_mtime
+    except (OSError, ValueError):
+        return f"{skill} did not run its tooling: {rel} is missing or unreadable"
+    if written < since:
+        return f"{skill} did not run its tooling: {rel} is from before this run"
+    if not isinstance(data, dict) or not isinstance(data.get(key), list):
+        return f"{skill} did not run its tooling: {rel} was not written by scripts.tickets.readiness (no '{key}' list)"
+    return None
+
+
 def job_failure(final_status: str, status_data: dict) -> str | None:
     """Why the job must fail, or None.
 
@@ -198,7 +223,15 @@ def job_failure(final_status: str, status_data: dict) -> str | None:
     return None
 
 
+def export_repo_identity(flags: SkillFlags, tracker: str, clone_url: str | None, config: dict) -> None:
+    """An explicit GitHub ``--repo`` is the repository every tool in the job means (GH_ORG / GH_REPO), not the org default."""
+    identity = github_identity(clone_url) if (flags.repo and tracker == "github") else None
+    if identity:
+        config["GH_ORG"], config["GH_REPO"] = os.environ["GH_ORG"], os.environ["GH_REPO"] = identity
+
+
 def main() -> None:
+    started = time.time()
     config = load_config()
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -249,6 +282,7 @@ def main() -> None:
     # Override DEFAULT_TRACKER in config so downstream code sees the resolved tracker.
     config["DEFAULT_TRACKER"] = tracker
     os.environ["DEFAULT_TRACKER"] = tracker
+    export_repo_identity(flags, tracker, clone_url, config)
 
     print(f"[skill] skill={flags.skill} tracker={tracker} repo={clone_url or '(none)'} "
           f"branch={branch} instructions={flags.instructions[:80]}...", flush=True)
@@ -399,6 +433,8 @@ def main() -> None:
 
     output_text = result.output.strip()
 
+    tooling_gap = missing_tool_output(flags.skill, workspace, since=started)  # before _write_reports can create a result.json of its own
+
     # Check for report files written by Claude.
     report_content = _find_report_content(workspace, skill=flags.skill)
     if report_content:
@@ -419,7 +455,7 @@ def main() -> None:
 
     # Treat MAX_TURNS_REACHED as a job failure so Formicary marks it failed
     # and triggers notify-error (the on_failed task).
-    failure = job_failure(final_status, status_data)
+    failure = job_failure(final_status, status_data) or tooling_gap
     if failure:
         print(f"[skill] FAILURE: {failure} — marking job failed", file=sys.stderr, flush=True)
         sys.exit(1)

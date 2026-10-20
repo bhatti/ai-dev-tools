@@ -108,7 +108,7 @@ def strip_section_heading(text: str) -> str:
     """Remove the first line if it is a Markdown section heading for a known standup section.
 
     Handles headings with extra detail, e.g.:
-      '# Risk Report — DistMgmt Sprint 202 — 2026-09-18'
+      '# Risk Report — Team Sprint 202 — 2026-09-18'
     Only the first line is inspected so body headings are never accidentally removed.
     """
     text = text.strip()

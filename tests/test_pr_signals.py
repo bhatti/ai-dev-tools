@@ -11,7 +11,7 @@ import json
 import pytest
 
 from scripts.common import pr_signals as ps
-from scripts.common.pr_signals import retry
+from scripts.common import http_retry as retry
 from tests.fakes.bitbucket import FakeBitbucket
 from tests.fakes.gh import FakeGh
 from tests.fakes.stories import EXPECTED, bb_story, gh_node, gh_response, user

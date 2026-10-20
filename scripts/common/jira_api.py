@@ -16,6 +16,10 @@ from base64 import b64encode
 
 import requests
 
+from scripts.common import adf
+from scripts.common.http_retry import Retryable, call_with_retry
+from scripts.common.redact import redact
+
 _JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
 _JIRA_URL_RE = re.compile(r"https?://[^/]+/browse/([A-Z][A-Z0-9_]+-\d+)")
 
@@ -435,3 +439,101 @@ def add_comment(config: dict, issue_key: str, body: str) -> bool:
         print(f"Jira add_comment error {resp.status_code}: {resp.text}", file=sys.stderr)
         return False
     return True
+
+
+class JiraError(RuntimeError):
+    """A Jira call failed; ``status`` is the HTTP status (None for connection problems). Unlike the helpers above,
+    which return ``[]``/``None``/``False`` on failure, callers that must not mistake an error for "no data" use these."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+def _retry_after(resp) -> float | None:
+    try:
+        return max(0.0, float(resp.headers.get("Retry-After", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _call(config: dict, method: str, path: str, *, only_when_rejected: bool = False, **kwargs) -> "requests.Response":
+    """One request with retry on 429/5xx (honouring Retry-After); any other failure raises :class:`JiraError`.
+
+    ``only_when_rejected`` is for requests that must not run twice (posting a comment): a timeout or 5xx may have been applied by the
+    server, so only a 429, which means the request was refused, is retried."""
+    def attempt():
+        try:
+            resp = requests.request(method, f"{_base(config)}{path}", headers=_auth_headers(config), timeout=30, **kwargs)
+        except requests.RequestException as e:
+            if only_when_rejected:
+                raise JiraError(f"Jira request to {path} failed ({type(e).__name__}); it may or may not have been applied")
+            raise Retryable(f"Jira request to {path} failed: {type(e).__name__}")
+        if resp.status_code == 429 or (resp.status_code >= 500 and not only_when_rejected):
+            raise Retryable(f"Jira HTTP {resp.status_code} on {path}", _retry_after(resp))
+        if not resp.ok:
+            raise JiraError(f"Jira HTTP {resp.status_code} on {path}: {redact(resp.text[:200])}", resp.status_code)
+        return resp
+    try:
+        return call_with_retry(attempt)
+    except Retryable as e:
+        raise JiraError(str(e)) from e
+
+
+def _json(resp, path: str):
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise JiraError(f"Jira answered {path} with a response that is not JSON (a proxy or login page?)", resp.status_code) from e
+
+
+def search_issues_all(config: dict, jql: str, fields: list[str], limit: int = 500) -> list[dict]:
+    """Every issue matching ``jql`` (up to ``limit``), following ``nextPageToken``; raises :class:`JiraError` on failure."""
+    issues: list[dict] = []
+    token = None
+    while len(issues) < limit:
+        body = {"jql": jql, "maxResults": min(100, limit - len(issues)), "fields": fields}
+        if token:
+            body["nextPageToken"] = token
+        data = _json(_call(config, "POST", "/rest/api/3/search/jql", json=body), "/search/jql")
+        page = data.get("issues", [])
+        issues += page
+        token = data.get("nextPageToken")
+        if not token or not page:  # an empty page must end the loop even if a token is still offered
+            break
+    return issues[:limit]
+
+
+def fetch_issue(config: dict, issue_key: str, fields: "list[str] | None" = None) -> dict:
+    """One issue (optionally only ``fields``); raises :class:`JiraError` (status 404 when it does not exist or is not visible)."""
+    params = {"fields": ",".join(fields)} if fields else None
+    return _json(_call(config, "GET", f"/rest/api/3/issue/{issue_key}", params=params), f"/issue/{issue_key}")
+
+
+def list_fields(config: dict) -> list[dict]:
+    """All field definitions (``id``, ``name``); raises :class:`JiraError`."""
+    return _json(_call(config, "GET", "/rest/api/3/field"), "/field")
+
+
+def set_description(config: dict, issue_key: str, document: dict) -> None:
+    """Replace a description with a full ADF ``document`` (callers pass the old document with a section added)."""
+    _call(config, "PUT", f"/rest/api/3/issue/{issue_key}", json={"fields": {"description": document}})
+
+
+def list_comments(config: dict, issue_key: str) -> list[dict]:
+    """Every comment of an issue, oldest first (the issue payload only embeds a first page); raises :class:`JiraError`."""
+    comments: list[dict] = []
+    start = 0
+    while True:
+        data = _json(_call(config, "GET", f"/rest/api/3/issue/{issue_key}/comment", params={"startAt": start, "maxResults": 100}), f"/issue/{issue_key}/comment")
+        page = data.get("comments", [])
+        comments += page
+        start += len(page)
+        if not page or start >= data.get("total", 0):
+            return comments
+
+
+def add_comment_markdown(config: dict, issue_key: str, markdown: str) -> None:
+    """Post a comment whose formatting survives (headings, lists, marks); retried like every call here, errors redacted."""
+    body = {"type": "doc", "version": 1, "content": adf.from_markdown(markdown)}
+    _call(config, "POST", f"/rest/api/3/issue/{issue_key}/comment", only_when_rejected=True, json={"body": body})

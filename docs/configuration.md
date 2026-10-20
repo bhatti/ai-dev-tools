@@ -244,3 +244,13 @@ Credentials reach every `ai-skill` task as environment variables from the `ai-de
 The skill's shell (the Claude subprocess) does not inherit the whole pod environment: it gets the platform credentials listed in `claude_runner.CLAUDE_ENV_VARS`, every `QA_*` variable, and the names in `SKILL_ENV_PASSTHROUGH`. Credentials resolved from org-config aliases (for example `BitbucketUsername`) are exported as real variables at start-up. Code under test never receives the platform tokens: `scripts.common.env_scrub` strips them, keeping only `QA_*` when asked.
 
 `acli` and the jira CLI are configured automatically from the same variables (`scripts/common/atlassian_cli.py`), because Formicary does not run `entrypoint.sh`.
+
+
+## Ticket readiness (`scripts/tickets`)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `JIRA_STORY_POINT_FIELDS` | No | any field named "Story point…" | Comma separated Jira field names or ids that hold story points |
+| `GH_PROJECT_NUMBER` | No | — | GitHub Projects (v2) number whose number field holds the points; without it, labels such as `sp:3` are used |
+
+Credentials are the usual `JIRA_*` and `GH_*` variables; per-project settings live in `.ygs/readiness.yml` (see [ticket readiness](ticket-readiness.md)).

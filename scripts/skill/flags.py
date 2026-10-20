@@ -332,3 +332,12 @@ def _resolve_branch(flags: SkillFlags, config: dict, tracker: str) -> str:
     if tracker == "github":
         return config.get("GH_REPO_BRANCH", "main").strip() or "main"
     return config.get("BB_REPO_BRANCH", "dev").strip() or "dev"
+
+
+_GITHUB_REPO = re.compile(r"github\.com[/:]([^/\s]+)/([^/\s]+?)(?:\.git)?(?:/\S*)?$", re.I)
+
+
+def github_identity(clone_url: str | None) -> tuple[str, str] | None:
+    """(owner, name) of a GitHub clone URL, else None. An explicit ``--repo`` names the repository every tool in the job means."""
+    m = _GITHUB_REPO.search(clone_url or "")
+    return (m.group(1), m.group(2)) if m else None

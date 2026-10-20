@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.skill.flags import SkillFlags, infer_repo_url, parse_skill_flags, resolve_repo, resolve_tracker
+from scripts.skill.flags import SkillFlags, github_identity, infer_repo_url, parse_skill_flags, resolve_repo, resolve_tracker
 
 
 # ─── parse_skill_flags ────────────────────────────────────────────────────────
@@ -592,3 +592,34 @@ class TestPrUrlSkillPrompt:
         assert tracker == "jira"  # Bitbucket repos are served by the jira/bitbucket tracker
         url, branch = resolve_repo(flags, {"DEFAULT_TRACKER": "github"}, tracker)
         assert (url, branch) == ("https://bitbucket.org/acme/widgets.git", "my-branch")
+
+
+class TestTicketSkillPrompts:
+    """`skill ygs-sprint-ready ...` / `skill ygs-enrich-ticket ...` as Slack hands them over."""
+
+    def test_sprint_name_with_spaces_and_the_ticket_flags_stay_in_the_instructions(self):
+        f = parse_skill_flags('ygs-sprint-ready --sprint "Sprint 12" --dry-run --tracker github')
+        assert (f.skill, f.tracker) == ("ygs-sprint-ready", "github")
+        # Slack quoting is stripped by design, so the skills read the value after --sprint up to the next --flag
+        assert f.instructions == "--sprint Sprint 12 --dry-run"
+
+    def test_a_jira_key_or_issue_url_and_apply_are_instructions_not_flags(self):
+        f = parse_skill_flags("ygs-enrich-ticket PROJ-123 --apply")
+        assert f.skill == "ygs-enrich-ticket" and f.instructions == "PROJ-123 --apply" and f.repo == ""
+
+    def test_a_github_issue_url_names_the_repo_and_the_tracker(self):
+        f = parse_skill_flags("ygs-enrich-ticket https://github.com/acme/widgets/issues/42")
+        assert resolve_tracker(f, {"DEFAULT_TRACKER": "jira"}) == "github"
+
+    def test_a_github_milestone_prompt_keeps_every_ticket_flag_and_the_tracker_is_consumed(self):
+        f = parse_skill_flags('ygs-sprint-ready --tracker github --milestone "Sprint 12" --apply --format json --repo acme/widgets')
+        assert f.tracker == "github" and f.repo == "acme/widgets"
+        assert f.instructions == "--milestone Sprint 12 --apply --format json"
+
+
+class TestExplicitRepoIdentity:
+    @pytest.mark.parametrize("url,expected", [("https://github.com/acme/widgets.git", ("acme", "widgets")), ("git@github.com:acme/widgets.git", ("acme", "widgets")),
+                                              ("https://github.com/acme/widgets", ("acme", "widgets")), ("https://github.com/acme/widgets/tree/main/docs", ("acme", "widgets")),
+                                              ("https://github.com/acme/widgets/pull/7", ("acme", "widgets")), ("https://bitbucket.org/ws/repo.git", None), (None, None), ("", None)])
+    def test_github_identity(self, url, expected):
+        assert github_identity(url) == expected

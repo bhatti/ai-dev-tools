@@ -5123,6 +5123,10 @@ ALL_TESTS.update(_build_model_tests(sys.modules[__name__]))
 from tests.pod_pr_metrics_tests import build_tests as _build_pr_metrics_tests  # noqa: E402
 ALL_TESTS.update(_build_pr_metrics_tests(sys.modules[__name__]))
 
+# Ticket readiness tooling pod tests (scripts/tickets).
+from tests.pod_ticket_tests import build_tests as _build_ticket_tests  # noqa: E402
+ALL_TESTS.update(_build_ticket_tests(sys.modules[__name__]))
+
 DEFAULT_TESTS = ["jira-query", "jira-analyze", "standup-gather"]
 
 

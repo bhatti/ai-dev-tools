@@ -444,6 +444,8 @@ def _ensure_extra_skills(skills_base: Path) -> None:
 CLAUDE_ENV_VARS = {
     "HOME", "PATH", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
     "TMPDIR", "TMP", "TEMP",
+    # The job runs in /workspace; without PYTHONPATH (=/app in the image) the skills' `python3 -m scripts.*` commands cannot import
+    "PYTHONPATH",
     # Bedrock / API auth
     "CLAUDE_CODE_USE_BEDROCK",
     "ANTHROPIC_BEDROCK_BASE_URL",
@@ -458,7 +460,7 @@ CLAUDE_ENV_VARS = {
     # Tracker credentials — needed by you-got-skills that call APIs via Bash
     "GH_TOKEN", "GITHUB_TOKEN",
     "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_HOST", "JIRA_API_TOKEN", "JIRA_AUTH",
-    "JIRA_PROJECT",
+    "JIRA_PROJECT", "JIRA_STORY_POINT_FIELDS", "GH_PROJECT_NUMBER",
     "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD",
     "DEFAULT_TRACKER",
     # Slack — needed by skills that read standup channel signals
@@ -466,8 +468,8 @@ CLAUDE_ENV_VARS = {
     # Project context
     "GH_ORG", "GH_REPO",
     "STANDUP_TEAM_MEMBERS", "STANDUP_LOOKBACK_HOURS",
-    # Workspace
-    "WORKSPACE_DIR",
+    # Workspace and the checked-out repository (skills and tools read project files such as .ygs/readiness.yml from it)
+    "WORKSPACE_DIR", "CODEBASE_DIR",
     # Sidecars: the prompt tells the model where the Docker daemon / service is, so the env must agree
     "DOCKER_HOST", "SERVICE_PORT", "SERVICE_NAME",
 }
@@ -502,6 +504,7 @@ def build_claude_env(extra_env: dict | None = None) -> dict:
     allowed = CLAUDE_ENV_VARS | _passthrough_names()
     env = {k: v for k, v in os.environ.items() if k in allowed or k.startswith(CLAUDE_ENV_PREFIXES)}
     env.update(model_env())
+    env["YGS_HEADLESS"] = "1"  # no person can answer a question in this session: skills preview instead of asking
     if extra_env:
         env.update(extra_env)
     return env

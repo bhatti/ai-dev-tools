@@ -4,12 +4,13 @@ import io
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.common.claude_runner import ClaudeResult, extract_status_json, run_claude, _ensure_extra_skills, _install_via_skills_cli
+from scripts.common.claude_runner import ClaudeResult, build_claude_env, extract_status_json, run_claude, _ensure_extra_skills, _install_via_skills_cli
 
 
 # ---------------------------------------------------------------------------
@@ -871,3 +872,26 @@ def test_config_defaults_are_not_exported_as_if_they_were_configuration(monkeypa
     export_aliased_env(load_config())
     for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "ANTHROPIC_BEDROCK_BASE_URL"):
         assert name in DEFAULTS and name not in os.environ
+
+
+class TestModelShellCanRunTheTools:
+    """The job runs in /workspace; the skills tell the model to run `python3 -m scripts.*`, which needs PYTHONPATH."""
+
+    def test_pythonpath_and_ticket_settings_reach_the_model_shell(self, monkeypatch):
+        monkeypatch.setenv("CODEBASE_DIR", "/workspace/repo")
+        monkeypatch.setenv("PYTHONPATH", "/app")
+        monkeypatch.setenv("JIRA_STORY_POINT_FIELDS", "customfield_1")
+        monkeypatch.setenv("GH_PROJECT_NUMBER", "4")
+        env = build_claude_env()
+        assert env["PYTHONPATH"] == "/app" and env["JIRA_STORY_POINT_FIELDS"] == "customfield_1" and env["GH_PROJECT_NUMBER"] == "4"
+        assert env["CODEBASE_DIR"] == "/workspace/repo"
+
+    def test_the_tools_run_from_another_directory_with_only_that_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
+        r = subprocess.run([sys.executable, "-m", "scripts.tickets.readiness", "--help"], cwd=tmp_path, env=build_claude_env(), capture_output=True, text=True)
+        assert r.returncode == 0 and "--grades" in r.stdout and "--tickets" in r.stdout
+
+
+def test_the_model_shell_is_told_it_is_headless(monkeypatch):
+    monkeypatch.delenv("YGS_HEADLESS", raising=False)
+    assert build_claude_env()["YGS_HEADLESS"] == "1"

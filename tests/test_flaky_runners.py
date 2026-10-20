@@ -122,8 +122,8 @@ class TestIdentify:
         assert any(r["name"] == "TestRetry" for r in refs)
 
     def test_explicit_metadata_and_summary_form(self):
-        refs = ident.extract_test_refs("[Flaky Test] file='src/sluice/queue.test.ts' failed 3 times")
-        assert refs[0]["file"] == "src/sluice/queue.test.ts"
+        refs = ident.extract_test_refs("[Flaky Test] file='src/core/queue.test.ts' failed 3 times")
+        assert refs[0]["file"] == "src/core/queue.test.ts"
 
     def test_ignores_urls_and_non_test_files(self):
         refs = ident.extract_test_refs("see https://ci.example/job/1.test.js and path=src/main.py")
