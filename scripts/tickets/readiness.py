@@ -8,10 +8,10 @@ Writes reports/report.md, report.html, result.json and slack.md (the short summa
 
 Usage:
     python3 -m scripts.tickets.readiness --tickets ready-out/tickets.json --grades ready-out/grades.json \\
-        [--actions ready-out/actions.json] [--config .ygs/readiness.yml] [--dry-run] --out-dir reports
+        [--actions ready-out/actions.json] [--config .ygs/readiness.yml] [--capacity 40] [--dry-run] --out-dir reports
 
-grades.json:  {"tickets": [{"id", "checks": {"why","scope","acs","dod","variants"}, "says", "evidence", "questions",
-               "ac_starter", "variant_holes", "suggested_points"}]}      (grade values: pass | partial | missing | na)
+grades.json:  {"tickets": [{"id", "checks": {"why","scope","acs","dod","variants"}, "says", "evidence", "questions" (strings or {question, recommend, because}),
+               "decisions_made", "still_needed" {landed, duplicate_of, spec_drift}, "ac_starter", "variant_holes", "suggested_points"}]}      (grade values: pass | partial | missing | na)
 actions.json: the JSON result lines printed by scripts.tickets.write, as a list ({"id","kind","action",...}), or entries
               {"id", "action": "acs_written|acs_blocked_points|plan_written|plan_low_confidence|skipped|preview"}
 Exit codes: 0 report written, 2 invalid input, 3 BLOCKED (no ticket could be read). The last output line is the status line.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -29,6 +30,7 @@ from pathlib import Path
 from scripts.common.exit_codes import EXIT_BLOCKED, EXIT_USAGE
 from scripts.common.redact import redact
 from scripts.common.report_bundle import md_cell, write_bundle
+from scripts.tickets import load, load_report, slack_text
 from scripts.tickets.config import ReadinessConfig, load_config, no_enrich_reason
 from scripts.tickets.signals import has_behavior_evidence
 
@@ -55,11 +57,25 @@ def index_grades(raw: dict) -> dict[str, dict]:
         for name, value in (g.get("checks") or {}).items():
             if name not in CHECKS or value not in GRADES:
                 raise ValueError(f"{g['id']}: {name}={value!r} is not valid (checks: {', '.join(CHECKS)}; values: {', '.join(GRADES)})")
+        _check_grade_text(g)
         out[g["id"]] = g
     return out
 
 
 _WRITTEN = {"appended", "replaced", "exists"}
+
+
+def _check_grade_text(g: dict) -> None:
+    """The free-text parts of a grade have a fixed shape (the report renders them): questions are strings or {question, recommend, because}."""
+    for q in g.get("questions") or []:
+        if not (isinstance(q, str) and q.strip()) and not (isinstance(q, dict) and isinstance(q.get("question"), str) and q["question"].strip()):
+            raise ValueError(f"{g['id']}: each question is a string or {{question, recommend, because}}")
+    if "questions" in g and not isinstance(g["questions"], list):
+        raise ValueError(f"{g['id']}: questions must be a list")
+    if "decisions_made" in g and not (isinstance(g["decisions_made"], list) and all(isinstance(d, str) for d in g["decisions_made"])):
+        raise ValueError(f"{g['id']}: decisions_made must be a list of strings")
+    if "still_needed" in g and not isinstance(g["still_needed"], dict):
+        raise ValueError(f"{g['id']}: still_needed must be {{landed, duplicate_of, spec_drift}}")
 
 
 def canonical_action(item: dict) -> str:
@@ -154,6 +170,8 @@ def evaluate(tickets: list[dict], grades: dict[str, dict], cfg: ReadinessConfig,
             "gaps": detail["gaps"], "concerns": detail["concerns"], "notes": detail["notes"], "fetch_error": t["fetch_error"],
             "says": (g or {}).get("says", ""), "evidence": evidence, "questions": (g or {}).get("questions") or [],
             "ac_starter": (g or {}).get("ac_starter", ""), "suggested_points": (g or {}).get("suggested_points"),
+            "lane": t["lane"], "carry_over": t["carry_over"], "decisions_made": (g or {}).get("decisions_made") or [],
+            "still_needed": {k: v for k, v in ((g or {}).get("still_needed") or {}).items() if v},
             "test_lines": t["signals"]["test_lines"], "gwt_lines": t["signals"]["given_when_then_lines"],
             "auto_enrichable": status in ENRICHABLE and not enrich_blocked, "enrich_blocked": enrich_blocked,
         })
@@ -168,16 +186,16 @@ def summarize(rows: list[dict]) -> dict:
             "auto_enrichable": sum(1 for r in rows if r["auto_enrichable"]), "by_status": {s: counts[s] for s in ORDER if counts[s]}}
 
 
-def status_line(rows: list[dict], truncated: bool = False) -> dict:
+def status_line(rows: list[dict], truncated: bool = False, load_flags: int = 0) -> dict:
     """The line automation reads: DONE, DONE_WITH_CONCERNS or BLOCKED (nothing readable). A scope cut at the fetch limit is a concern."""
     s = summarize(rows)
     if not rows or s["unreadable"] == len(rows):
         return {"status": "ERROR", "signal": "BLOCKED", "total": s["total"], "ready": 0, "needs_human": s["needs_human"], "auto_enrichable": 0,
                 "summary": "no ticket could be read" if rows else "no tickets to evaluate"}
     flagged = sum(1 for r in rows if r["status"] in CLEAN and r["concerns"])
-    clean = all(r["status"] in CLEAN for r in rows) and not truncated and not flagged
+    clean = all(r["status"] in CLEAN for r in rows) and not truncated and not flagged and not load_flags
     parts = ([f"{n} {name}" for name, n in s["by_status"].items() if name not in CLEAN] + ([f"{flagged} with something that could not be read"] if flagged else [])
-             + (["scope truncated at the fetch limit"] if truncated else []))
+             + (["scope truncated at the fetch limit"] if truncated else []) + ([f"{load_flags} sprint-load decision(s) open"] if load_flags else []))
     return {"status": "DONE", "signal": "DONE" if clean else "DONE_WITH_CONCERNS", "total": s["total"], "ready": s["ready"],
             "needs_human": s["needs_human"], "auto_enrichable": s["auto_enrichable"],
             "summary": "every ticket is ready" if clean else "; ".join(parts)}
@@ -192,11 +210,20 @@ def _checklist(r: dict) -> str:
             f"{icon.get(c.get('dod'), '?')} | {icon.get(c.get('variants', 'na'), '—')} |")
 
 
+def _question(q: str | dict) -> str:
+    """A question as a line: with the grader's recommended answer and the reason when it gave them."""
+    if isinstance(q, str):
+        return md_cell(q)
+    rec = f" _Recommend: {md_cell(q['recommend'])}" + (f", because {md_cell(q['because'])}" if q.get("because") else "") + "._" if q.get("recommend") else ""
+    return md_cell(q["question"]) + rec
+
+
 def _card(r: dict) -> list[str]:
-    ref = f"[{r['id']}]({r['url']})" if _SAFE_URL.match(r["url"]) and ")" not in r["url"] else md_cell(r["id"])
+    ref = f"[{r['id']}]({r['url']})" if slack_text.SAFE_URL.match(r["url"]) and ")" not in r["url"] else md_cell(r["id"])
     if r["fetch_error"]:
         return [f"### {ref} — (unreadable)", f"{r['status']}", f"**Could not be read:** {md_cell(r['fetch_error'])}", ""]
-    meta_line = " · ".join(x for x in (md_cell(r["type"]), r["status"], "in-flight" if r["in_flight"] else "", md_cell(r["tracker_status"]), md_cell(r["assignee"] or "unassigned")) if x)
+    carried = f"carried over {r['carry_over']['times']}× ({md_cell(', '.join(r['carry_over']['from_sprints']))})" if r["carry_over"]["times"] else ""
+    meta_line = " · ".join(x for x in (md_cell(r["type"]), r["status"], "in-flight" if r["in_flight"] else "", md_cell(r["tracker_status"]), md_cell(r["assignee"] or "unassigned"), carried) if x)
     head = [f"### {ref} — {md_cell(r['title'])}", meta_line]
     lines = [*head, "", _checklist(r), ""]
     if r["says"]:
@@ -206,8 +233,16 @@ def _card(r: dict) -> list[str]:
     lines += [f"- {md_cell(c)}" for c in r["concerns"]] + [f"- _{md_cell(n)}_" for n in r["notes"]]
     if r["enrich_blocked"]:
         lines.append(f"- Not enriched automatically: status is {md_cell(r['enrich_blocked'])}")
+    if r["still_needed"]:
+        sn = r["still_needed"]
+        found = [f"already merged: {md_cell(sn['landed'])}"] if sn.get("landed") else []
+        found += [f"duplicate of {md_cell(sn['duplicate_of'])}"] if sn.get("duplicate_of") else []
+        found += [f"spec and code disagree: {md_cell(sn['spec_drift'])}"] if sn.get("spec_drift") else []
+        lines += ["", f"**Still needed?** {'; '.join(found)}"]
     if r["questions"]:
-        lines += ["", "**Clarify (answer in the ticket):**"] + [f"{i}. {md_cell(q)}" for i, q in enumerate(r["questions"], 1)]
+        lines += ["", "**Clarify (answer in the ticket):**"] + [f"{i}. {_question(q)}" for i, q in enumerate(r["questions"], 1)]
+    if r["decisions_made"]:
+        lines += ["", "**Decisions made for you — confirm:**"] + [f"- {md_cell(d)}" for d in r["decisions_made"]]
     if r["ac_starter"]:
         lines += ["", f"**Paste-ready AC starter:** {md_cell(r['ac_starter'])}"]
     if r["suggested_points"]:
@@ -234,8 +269,8 @@ def pattern_buckets(rows: list[dict]) -> list[tuple[str, list[str]]]:
     return sorted(buckets.items(), key=lambda kv: -len(kv[1]))
 
 
-def action_items(rows: list[dict]) -> list[tuple[str, list[str]]]:
-    """(who, ticket ids) for what has to happen next; empty groups are left out."""
+def action_items(rows: list[dict], sprint: dict | None = None) -> list[tuple[str, list[str]]]:
+    """(who, ticket ids) for what has to happen next, the sprint-load decisions first; empty groups are left out."""
     def ids(*statuses: str) -> list[str]:
         return [r["id"] for r in rows if r["status"] in statuses]
     items = [("Engineers (answer the clarifying questions)", ids("NEEDS_AC_CLARIFICATION")),
@@ -244,8 +279,9 @@ def action_items(rows: list[dict]) -> list[tuple[str, list[str]]]:
              ("Tech lead (missing context or blockers)", ids("BLOCKED", "SUBTASK_NEEDS_CONTEXT", "IMPL_PLAN_LOW_CONFIDENCE")),
              ("Anyone with access (ticket could not be read)", ids("UNREADABLE")),
              ("Grading was not recorded (re-run grading)", ids("UNGRADED")),
+             ("Engineers (work already landed or duplicated; close or narrow the ticket)", [r["id"] for r in rows if r["still_needed"].get("landed") or r["still_needed"].get("duplicate_of")]),
              ("An agent can enrich these (run ygs-enrich-ticket)", [r["id"] for r in rows if r["auto_enrichable"]])]
-    return [(who, tickets) for who, tickets in items if tickets]
+    return [*(load_report.action_items(sprint["summary"], sprint["flags"]) if sprint else []), *((who, tickets) for who, tickets in items if tickets)]
 
 
 def _patterns(rows: list[dict]) -> list[str]:
@@ -255,66 +291,46 @@ def _patterns(rows: list[dict]) -> list[str]:
     return ["| Gap | Count | Tickets |", "| --- | ---: | --- |"] + [f"| {label} | {len(ids)} | {', '.join(ids)} |" for label, ids in buckets]
 
 
-def _actions(rows: list[dict]) -> list[str]:
-    return [f"- **{who}:** {', '.join(ids)}" for who, ids in action_items(rows)] or ["Nothing to do: every ticket is ready."]
+def _actions(rows: list[dict], sprint: dict | None = None) -> list[str]:
+    return [f"- **{who}:** {', '.join(ids)}" for who, ids in action_items(rows, sprint)] or ["Nothing to do: every ticket is ready."]
 
 
 # ── Slack ─────────────────────────────────────────────────────────────────────
 
 SLACK_TICKET_LINES = 15
 SLACK_LINE_CHARS = 160
-SLACK_IDS_SHOWN = 12
 SLACK_MAX_CHARS = 9000
-_SAFE_URL = re.compile(r"^https?://[^\s<>|`]+$")
-
-
-def _slack(text: object) -> str:
-    """Slack control characters in untrusted ticket text made inert (no mentions, channel pings or link markup)."""
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", " ").strip()
-
-
-def _clip(text: object, limit: int) -> str:
-    """Untrusted text for one Slack line: secrets removed first (so a limit cannot leave a fragment of one), cut at a word boundary,
-    and only then escaped (so an entity is never cut in half)."""
-    flat = redact(" ".join(str(text).split()))
-    if len(flat) > limit:
-        cut = flat[:limit]
-        flat = (cut.rsplit(" ", 1)[0] if " " in cut[limit // 2:] else cut).rstrip() + "…"
-    return _slack(flat)
-
-
-def _ids(ids: list[str]) -> str:
-    shown = ", ".join(_slack(i) for i in ids[:SLACK_IDS_SHOWN])
-    return shown + (f" (+{len(ids) - SLACK_IDS_SHOWN} more)" if len(ids) > SLACK_IDS_SHOWN else "")
 
 
 def _slack_ref(r: dict) -> str:
-    ident = _slack(r["id"]).replace("`", "'")
-    return f"<{r['url']}|{ident}>" if _SAFE_URL.match(r["url"]) else f"`{ident}`"
+    ident = slack_text.escape(r["id"]).replace("`", "'")
+    return f"<{r['url']}|{ident}>" if slack_text.SAFE_URL.match(r["url"]) else f"`{ident}`"
 
 
 def _short_gaps(r: dict) -> str:
     if r["fetch_error"]:
-        return _clip(r["fetch_error"], SLACK_LINE_CHARS)
+        return slack_text.clip(r["fetch_error"], SLACK_LINE_CHARS)
     labels = {"why": "Why", "scope": "scope", "acs": "ACs", "dod": "DoD"}
     parts = [f"{labels[name]} {grade}" for name, grade in r["checks"].items() if grade in ("partial", "missing") and name in labels]
-    parts += [_clip(g, 60) for g in r["gaps"] if g.startswith("story points")]
+    parts += [slack_text.clip(g, 60) for g in r["gaps"] if g.startswith("story points")]
     if r["status"] == "BLOCKED" and r["checks"].get("why") != "missing":
         parts.insert(0, "blocked")
     return ", ".join(dict.fromkeys(parts[:4])) or "see the full report"
 
 
-def render_slack(rows: list[dict], meta: dict, previews: dict | None = None) -> str:
+def render_slack(rows: list[dict], meta: dict, previews: dict | None = None, sprint: dict | None = None) -> str:
     """A short mrkdwn summary for Slack: the verdict, who must do what, the biggest gaps and one line per ticket that needs attention
     (tables do not render in Slack; the full cards are in report.md / report.html). Capped for sprints of any size."""
     s = summarize(rows)
-    head = (f"*Ticket readiness* · {_slack(meta.get('tracker', ''))} · {_slack(meta.get('scope', ''))} · {s['total']} ticket(s)"
+    head = (f"*Ticket readiness* · {slack_text.escape(meta.get('tracker', ''))} · {slack_text.escape(meta.get('scope', ''))} · {s['total']} ticket(s)"
             + (" (dry-run)" if meta.get("dry_run") else "") + (" · :warning: scope truncated at the fetch limit" if meta.get("truncated") else ""))
     lines = [head, f":white_check_mark: Ready {s['ready']} · :raising_hand: Needs a person {s['needs_human']} · :wrench: An agent can enrich {s['auto_enrichable']}", ""]
-    lines += ["*By status*"] + [f"• {name} ({n}): " + _ids([r["id"] for r in rows if r["status"] == name]) for name, n in s["by_status"].items()]
-    todo = action_items(rows)
+    if sprint:
+        lines += load_report.slack(sprint["summary"], sprint["flags"], sprint["capacity"]) + [""]
+    lines += ["*By status*"] + [f"• {name} ({n}): " + slack_text.ids([r["id"] for r in rows if r["status"] == name]) for name, n in s["by_status"].items()]
+    todo = action_items(rows, sprint)
     if todo:
-        lines += ["", "*Next*"] + [f"• {who}: {_ids(ids)}" for who, ids in todo]
+        lines += ["", "*Next*"] + [f"• {who}: {slack_text.ids(ids)}" for who, ids in todo]
     top = pattern_buckets(rows)[:3]
     if top:
         lines += ["", "*Most common gaps*: " + "; ".join(f"{label} ({len(ids)})" for label, ids in top)]
@@ -322,7 +338,7 @@ def render_slack(rows: list[dict], meta: dict, previews: dict | None = None) -> 
     if attention:
         lines += ["", "*Tickets that need attention*"]
         for r in attention[:SLACK_TICKET_LINES]:
-            title = _clip(r["title"], 70) if r["title"] else "(unreadable)"
+            title = slack_text.clip(r["title"], 70) if r["title"] else "(unreadable)"
             lines.append(f"• {_slack_ref(r)} {title} · {r['status']} · {_short_gaps(r)}")
         if len(attention) > SLACK_TICKET_LINES:
             lines.append(f"…and {len(attention) - SLACK_TICKET_LINES} more not listed here")
@@ -345,7 +361,7 @@ def load_previews(out_dir: Path, rows: list[dict]) -> dict[str, dict[str, str]]:
     return found
 
 
-def render_markdown(rows: list[dict], meta: dict, previews: dict[str, dict[str, str]] | None = None) -> str:
+def render_markdown(rows: list[dict], meta: dict, previews: dict[str, dict[str, str]] | None = None, sprint: dict | None = None) -> str:
     s = summarize(rows)
     lines = ["# Ticket readiness", f"{md_cell(meta.get('tracker', ''))} · {md_cell(meta.get('scope', ''))} · {s['total']} ticket(s)"
              + (" · dry-run" if meta.get("dry_run") else "") + (" · TRUNCATED at the fetch limit: the scope holds more tickets" if meta.get("truncated") else ""),
@@ -353,6 +369,8 @@ def render_markdown(rows: list[dict], meta: dict, previews: dict[str, dict[str, 
     for status, n in s["by_status"].items():
         lines.append(f"| {status} | {n} | {', '.join(r['id'] for r in rows if r['status'] == status)} |")
     lines += ["", f"Ready: {s['ready']} · Needs a person: {s['needs_human']} · An agent can enrich: {s['auto_enrichable']}", ""]
+    if sprint:
+        lines += load_report.markdown(sprint["summary"], sprint["flags"], sprint["capacity"]) + [""]
     attention = [r for r in rows if r["status"] not in ("READY", "ENRICHED", "SUBTASK_OK")]
     lines += ["## Needs attention", ""]
     for status in ORDER:
@@ -368,7 +386,7 @@ def render_markdown(rows: list[dict], meta: dict, previews: dict[str, dict[str, 
                                   + (" · gaps: " + md_cell("; ".join(r["gaps"])) if r["gaps"] else "") for r in ready] or ["None."])
     subs = [r for r in rows if r["status"] == "SUBTASK_OK"]
     lines += ["", "## Sub-tasks", ""] + ([f"- {r['id']} — {md_cell(r['title'])}" for r in subs] or ["None."])
-    lines += ["", "## Patterns", ""] + _patterns(rows) + ["", "## Action items", ""] + _actions(rows)
+    lines += ["", "## Patterns", ""] + _patterns(rows) + ["", "## Action items", ""] + _actions(rows, sprint)
     if previews:
         lines += ["", "## Previews", "", "Generated text for tickets that were not written (or were): review it, then run again with `--apply`.", ""]
         for ticket_id, texts in previews.items():
@@ -389,9 +407,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--grades", required=True)
     p.add_argument("--actions", default="")
     p.add_argument("--config", default="")
+    p.add_argument("--capacity", default=None, help="team capacity in story points, compared with the open (not done) load")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--out-dir", default="reports")
     a = p.parse_args(argv)
+    try:
+        capacity = float(a.capacity) if a.capacity is not None else None
+        if capacity is not None and not (capacity > 0 and math.isfinite(capacity)):
+            raise ValueError
+    except ValueError:
+        print(json.dumps({"error": f"--capacity must be a number above 0, got {a.capacity!r}"}))
+        return EXIT_USAGE
     try:
         fetched = _load(a.tickets, "tickets")
         grades = index_grades(_load(a.grades, "grades"))
@@ -411,11 +437,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[readiness] warning: grades for tickets that were not fetched are ignored: {', '.join(extra)}", file=sys.stderr)
     rows = evaluate(tickets, grades, cfg, actions)
     meta = {"tracker": fetched.get("tracker", ""), "scope": fetched.get("scope", ""), "dry_run": a.dry_run, "truncated": bool(fetched.get("truncated"))}
-    line = status_line(rows, meta["truncated"])
+    summary_load = fetched.get("load")
+    if capacity is not None and not summary_load:
+        print("[readiness] warning: --capacity ignored: the fetch has no sprint load (only a sprint or milestone scope has one)", file=sys.stderr)
+    sprint = {"summary": summary_load, "capacity": capacity, "flags": load.flags(summary_load, tickets, cfg, capacity)} if summary_load else None
+    line = status_line(rows, meta["truncated"], len(sprint["flags"]) if sprint else 0)
     result = {**{k: v for k, v in line.items() if k != "summary"}, "verdict": line["summary"], "summary": summarize(rows), "tickets": rows, "meta": meta}
+    if sprint:
+        result["load"] = {**sprint["summary"], "capacity": capacity, "flags": sprint["flags"]}
     previews = load_previews(Path(a.out_dir), rows)
-    write_bundle(Path(a.out_dir), "Ticket readiness", render_markdown(rows, meta, previews), result)
-    (Path(a.out_dir) / "slack.md").write_text(redact(render_slack(rows, meta, previews)), encoding="utf-8")
+    write_bundle(Path(a.out_dir), "Ticket readiness", render_markdown(rows, meta, previews, sprint), result)
+    (Path(a.out_dir) / "slack.md").write_text(redact(render_slack(rows, meta, previews, sprint)), encoding="utf-8")
     print(f"[readiness] wrote {a.out_dir}/report.md, report.html, result.json, slack.md", flush=True)
     print(json.dumps(line))
     return EXIT_BLOCKED if line["signal"] == "BLOCKED" else 0

@@ -217,3 +217,29 @@ class TestAuditDesignMetricsRows:
         assert "Avg Instability Score (I)" in dashboard
         assert "ADP Cycle Count" in dashboard
         assert "SRP Violations (confirmed)" in dashboard
+
+
+class TestAuditMetricsAgreeWithTheSharedDefinitions:
+    """shared/sloppiness-metrics.md is the one definition of verbosity and erosion thresholds."""
+
+    def test_signals_use_the_shared_thresholds(self):
+        from scripts.analyze.run_codebase_audit import _audit_metric_signal as sig
+        assert (sig("verbosity_ratio", 0.19), sig("verbosity_ratio", 0.25), sig("verbosity_ratio", 0.31)) == ("🟢", "🟡", "🔴")
+        assert (sig("erosion_score", 0.39), sig("erosion_score", 0.5), sig("erosion_score", 0.56)) == ("🟢", "🟡", "🔴")
+        assert (sig("high_mass_functions", 3), sig("high_mass_functions", 4)) == ("🟡", "🔴")
+        assert (sig("churn_complexity_hotspots", 2), sig("churn_complexity_hotspots", 3)) == ("🟡", "🔴")
+        assert (sig("fix_ratio", 0.2), sig("fix_ratio", 0.3), sig("fix_ratio", 0.45)) == ("🟢", "🟡", "🔴")
+
+    def test_a_null_metric_is_not_assessed_not_dropped(self, tmp_path):
+        import json
+        from scripts.analyze.run_codebase_audit import _AUDIT_METRIC_ROWS, _read_all_audit_metrics
+        (tmp_path / "audit_findings.json").write_text(json.dumps({"metrics": {"verbosity_ratio": 0.4, "erosion_score": None}}))
+        rows = {r[0]: r for r in _read_all_audit_metrics(tmp_path)}
+        assert len(rows) == len(_AUDIT_METRIC_ROWS) and rows["Verbosity Ratio"][3] == "🔴"
+        assert rows["Erosion Score"][1] == "—" and "Not assessed" in rows["Erosion Score"][4]
+
+    def test_the_prompt_asks_for_every_metric_key(self):
+        import scripts.analyze.run_codebase_audit as m
+        from scripts.analyze.run_codebase_audit import _AUDIT_METRIC_ROWS
+        src = open(m.__file__).read()
+        assert all(f'"{k}"' in src for k in _AUDIT_METRIC_ROWS)

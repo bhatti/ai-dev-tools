@@ -185,7 +185,7 @@ def _build_slack_text(findings: dict) -> str:
 
 def _review_metrics_pr(findings: dict, config: dict, workspace: Path) -> dict:
     """PR dict for the metrics table: the review's own finding counts plus the PR's review activity when it can be read."""
-    pr: dict = {"ai_findings": count_findings(findings.get("findings", []))}
+    pr: dict = {"ai_findings": count_findings(findings.get("findings", [])), "sloppiness": findings.get("sloppiness")}
     try:
         number, repo_url = parse_pr_ref(findings.get("pr_url", ""))
         if number.isdigit():

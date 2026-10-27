@@ -52,7 +52,7 @@ def test_render_shows_board_name(tmp_workspace, monkeypatch):
     assert "Sprint 1" in html
 
 
-def test_render_shared_sprint_shows_both_boards(tmp_workspace, monkeypatch):
+def test_render_sprint_on_two_boards_shows_both_boards(tmp_workspace, monkeypatch):
     today = date.today()
     end = (today + timedelta(days=3)).isoformat() + "T00:00:00Z"
     signals = _make_signals(sprints=[
@@ -62,7 +62,6 @@ def test_render_shared_sprint_shows_both_boards(tmp_workspace, monkeypatch):
     html = _run(tmp_workspace, monkeypatch, signals)
     assert "Scope" in html
     assert "AWS &amp; Content" in html
-    assert "shared" in html  # second row says "shared: ..."
 
 
 def test_render_person_rows_via_brief(tmp_workspace, monkeypatch):

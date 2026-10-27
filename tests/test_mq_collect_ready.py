@@ -420,7 +420,7 @@ class TestClassifyPrFlags:
 
     # --- is_test_pr: title signal ---
     def test_sdet_title_detected_as_test_pr(self):
-        pr = {"title": "[SDET][TASK]: ESERV-20916 fix auth tests", "branch": ""}
+        pr = {"title": "[SDET][TASK]: PROJ-123 fix auth tests", "branch": ""}
         flags = _classify_pr_flags(pr)
         assert flags["is_test_pr"] is True
 

@@ -220,14 +220,14 @@ class TestMQSlackSummary:
         result = _build_mq_slack_summary(ctx, prs, [])
         assert "stale" in result.lower()
 
-    def test_cfr_proxy_present(self):
+    def test_post_release_defect_rate_present_with_assumed_count(self):
         from scripts.mq.report import _build_mq_slack_summary
         prs = self._make_mq_prs()
         prs[0]["pr_type"] = "bug"
         prs[1]["pr_type"] = "bug"
         ctx = {"MQ_TOTAL": len(prs), "MQ_HIGH_RISK": 0, "MQ_NEEDS_REVIEW": 0}
         result = _build_mq_slack_summary(ctx, prs, [])
-        assert "CFR" in result
+        assert "queued post-release defect fixes: " in result and "2 assumed" in result and "pre-release" in result
 
     def test_ci_coverage_present_when_known(self):
         from scripts.mq.report import _build_mq_slack_summary

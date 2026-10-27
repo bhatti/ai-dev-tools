@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.analyze.run_pr_audit import _attach_review_signals, _build_metrics_summary_with_claude, _extract_and_strip_metrics_tables
+from scripts.analyze.run_pr_audit import _attach_review_signals, _build_metrics_summary_with_claude
+from scripts.common.pr_classify import extract_and_strip_metrics_tables
 from scripts.analyze.pr_fetcher import classify_comments
 from scripts.common.pr_metrics import TABLE_COLUMNS
 from tests.fakes.bitbucket import FakeBitbucket
@@ -58,7 +59,7 @@ def test_dashboard_is_the_only_metrics_table_and_keeps_every_row(audit_ctx):
     prs = [audited_pr(7)]
     _attach_review_signals(prs, cfg, tmp_path)
     written = "# Audit\n\n## Findings\nx\n\n## Metrics Dashboard\n\n| Metric | Value | Benchmark | Signal | Description |\n|---|---|---|---|---|\n| Spec coverage | 40% | ≥80% | 🔴 | d |\n"
-    md, rows = _extract_and_strip_metrics_tables(written)
+    md, rows = extract_and_strip_metrics_tables(written)
     out = md + "\n" + _build_metrics_summary_with_claude(prs, rows)
     assert out.count("### Metrics Dashboard") == 1 and "## Metrics Dashboard\n" not in md
     for name in ("Spec coverage", "PRs without a human comment", "Review tasks (open/total)", "Avg commits per PR", "Major/critical issues flagged"):

@@ -161,7 +161,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
 
     fields = (
         "number,title,state,body,author,createdAt,mergedAt,url,headRefName,"
-        "comments,reviews,reviewDecision,labels,files"
+        "comments,reviews,reviewDecision,labels,files,baseRefName"
     )
     has_jira_filter = any([
         config.get("JIRA_BOARDS", ""),
@@ -312,6 +312,8 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
             "merged_at": rp.get("mergedAt", ""),
             "url": rp.get("url", ""),
             "branch": rp.get("headRefName", ""),
+            "baseRefName": rp.get("baseRefName", ""),
+            "labels": [lb.get("name", "") for lb in rp.get("labels") or [] if isinstance(lb, dict)],
             "body": rp.get("body", ""),
             "files_changed": files_changed,
             "additions": additions,
@@ -426,7 +428,7 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         print("[pr-fetch] GH_ORG/GH_REPO not set — cannot fetch single GH PR", file=sys.stderr, flush=True)
         return None
 
-    fields = "number,title,body,author,createdAt,mergedAt,state,url,headRefName,comments,reviews,reviewDecision,labels,files"
+    fields = "number,title,body,author,createdAt,mergedAt,state,url,headRefName,baseRefName,comments,reviews,reviewDecision,labels,files"
     cmd = ["gh", "pr", "view", str(pr_number), "-R", f"{org}/{repo}", "--json", fields]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -492,6 +494,8 @@ def _fetch_single_gh_pr(config: dict, pr_number: int) -> dict | None:
         "merged_at": rp.get("mergedAt", ""),
         "url": rp.get("url", ""),
         "branch": rp.get("headRefName", ""),
+        "baseRefName": rp.get("baseRefName", ""),
+        "labels": [lb.get("name", "") for lb in rp.get("labels") or [] if isinstance(lb, dict)],
         "body": rp.get("body", ""),
         "files_changed": files_changed,
         "additions": additions,
@@ -1092,6 +1096,7 @@ def _compute_review_depth(human_comments: list[dict], approvers: list[str]) -> d
         "substantive_human_comment_count": substantive_count,
         "rubber_stamp_approvers": rubber_stamp,
         "has_substantive_review": substantive_count > 0,
+        "review_depth_known": True,   # the defaults on a PR say "no review"; only this flag says the comments were analysed
     }
 
 

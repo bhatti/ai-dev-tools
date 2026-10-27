@@ -186,6 +186,9 @@ def main(pr_number: str) -> None:
         "categories": sorted(categories_set),
         "title": pr_meta.get("title", ""),
         "body": (pr_meta.get("body", "") or "")[:600],
+        "labels": pr_meta.get("labels", []),
+        "branch": pr_meta.get("branch", "") or pr_meta.get("source_branch", ""),
+        "target_branch": pr_meta.get("target_branch", "") or pr_meta.get("baseRefName", ""),
         "issue_ref": issue_ref,
     }
 

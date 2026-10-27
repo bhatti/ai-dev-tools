@@ -98,29 +98,29 @@ def test_parse_slack_flags_bare_small_numbers_without_hash_ignored():
 
 def test_parse_slack_flags_bare_large_numbers_accepted():
     # Large PR numbers (>= 10000) without # are accepted — unambiguously PR refs
-    flags = _parse_slack_flags("resync-prs 48239 48240 --dry-run")
-    assert 48239 in flags["pr_numbers"]
-    assert 48240 in flags["pr_numbers"]
+    flags = _parse_slack_flags("resync-prs 12345 12346 --dry-run")
+    assert 12345 in flags["pr_numbers"]
+    assert 12346 in flags["pr_numbers"]
     assert flags["dry_run"] is True
 
 
 def test_parse_slack_flags_bare_large_number_with_url():
     # Mix of URL and bare large number — both should be captured
     flags = _parse_slack_flags(
-        "resync-prs https://bitbucket.org/ws/repo/pull-requests/48239 49866"
+        "resync-prs https://bitbucket.org/ws/repo/pull-requests/12345 49866"
     )
-    assert "https://bitbucket.org/ws/repo/pull-requests/48239" in flags["pr_urls"]
+    assert "https://bitbucket.org/ws/repo/pull-requests/12345" in flags["pr_urls"]
     # 49866 is a standalone large number in the message (not part of URL)
     assert 49866 in flags["pr_numbers"]
-    # 48239 must not be double-counted (already in pr_urls)
-    assert 48239 not in flags["pr_numbers"]
+    # 12345 must not be double-counted (already in pr_urls)
+    assert 12345 not in flags["pr_numbers"]
 
 
 def test_parse_slack_flags_bb_url_with_overview_suffix():
     # Bitbucket URLs often end in /overview — must still be parsed correctly
-    msg = "https://bitbucket.org/org/repo/pull-requests/48239/overview --dry-run"
+    msg = "https://bitbucket.org/org/repo/pull-requests/12345/overview --dry-run"
     flags = _parse_slack_flags(msg)
-    assert any("48239" in u for u in flags["pr_urls"])
+    assert any("12345" in u for u in flags["pr_urls"])
     assert flags["dry_run"] is True
 
 

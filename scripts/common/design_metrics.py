@@ -17,32 +17,36 @@ def render_design_metrics_table(design_metrics: dict) -> list[str]:
     if not design_metrics:
         return []
 
-    # Use `or` fallback (not just .get default) so explicit null values from Claude also get replaced
-    srp = design_metrics.get("srp_violations") or 0
-    dip = design_metrics.get("dip_violations") or 0
-    adp = design_metrics.get("adp_cycles") or 0
-    layer = design_metrics.get("layer_violations") or 0
-    inst = float(design_metrics.get("avg_instability") or 0.0)
-    hotspot = design_metrics.get("hotspot_coupling") or False
-    readability = design_metrics.get("readability_score") or 0
-    isp = design_metrics.get("isp_violations") or 0
+    def num(key: str):
+        """The reported number, or None: a null or missing value is "not assessed", never a clean zero."""
+        value = design_metrics.get(key)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
-    # Benchmark: < 0.5 healthy — at exactly 0.5 use yellow (boundary is exclusive)
-    inst_sig = "🟢" if inst < 0.5 else ("🟡" if inst < 0.7 else "🔴")
-    read_sig = "🟢" if readability >= 7 else ("🟡" if readability >= 5 else "🔴")
+    def row(name: str, key: str, benchmark: str, fmt, signal, note) -> str:
+        value = num(key)
+        if value is None:
+            return f"| {name} | — | {benchmark} | — | not assessed |"
+        return f"| {name} | {fmt(value)} | {benchmark} | {signal(value)} | {note(value)} |"
 
+    hotspot = design_metrics.get("hotspot_coupling")   # a flag: true / false / null
+    hotspot_row = ("| Hotspot coupling | — | 0 ideal | — | not assessed |" if hotspot is None else
+                   f"| Hotspot coupling | {'1 file' if hotspot else '0'} | 0 ideal | {'🟡' if hotspot else '🟢'} | {'changed file is hotspot' if hotspot else 'none'} |")
+    ladder = lambda warn: (lambda v: "🟢" if v == 0 else ("🟡" if v <= warn else "🔴"))   # noqa: E731
     return [
         "## Design Quality Metrics",
         "",
         "| Principle | Score | Benchmark | Signal | Notes |",
         "|-----------|-------|-----------|--------|-------|",
-        f"| SRP violations | {srp} | 0 ideal | {'🟢' if srp == 0 else ('🟡' if srp <= 2 else '🔴')} | {'none found' if srp == 0 else f'{srp} confirmed'} |",
-        f"| DIP violations | {dip} | 0 ideal | {'🟢' if dip == 0 else ('🟡' if dip == 1 else '🔴')} | {'none found' if dip == 0 else f'{dip} confirmed'} |",
-        f"| Cyclic deps (ADP) | {adp} | 0 | {'🟢' if adp == 0 else '🔴'} | {'none detected' if adp == 0 else f'{adp} cycles'} |",
-        f"| Layer violations | {layer} | 0 ideal | {'🟢' if layer == 0 else ('🟡' if layer <= 2 else '🔴')} | {'none' if layer == 0 else f'{layer} violations'} |",
-        f"| Avg instability (I) | {inst:.2f} | < 0.5 (core) | {inst_sig} | {'N/A' if inst == 0 else f'{inst:.2f} mean'} |",
-        f"| Hotspot coupling | {'1 file' if hotspot else '0'} | 0 ideal | {'🟡' if hotspot else '🟢'} | {'changed file is hotspot' if hotspot else 'none'} |",
-        f"| Readability score | {readability}/10 | ≥ 7 | {read_sig} | {'all good' if readability >= 7 else 'see findings'} |",
-        f"| ISP / fat interface | {isp} | 0 ideal | {'🟢' if isp == 0 else ('🟡' if isp == 1 else '🔴')} | {'none found' if isp == 0 else f'{isp} violations'} |",
+        row("SRP violations", "srp_violations", "0 ideal", str, ladder(2), lambda v: "none found" if v == 0 else f"{v} confirmed"),
+        row("DIP violations", "dip_violations", "0 ideal", str, ladder(1), lambda v: "none found" if v == 0 else f"{v} confirmed"),
+        row("Cyclic deps (ADP)", "adp_cycles", "0", str, lambda v: "🟢" if v == 0 else "🔴", lambda v: "none detected" if v == 0 else f"{v} cycles"),
+        row("Layer violations", "layer_violations", "0 ideal", str, ladder(2), lambda v: "none" if v == 0 else f"{v} violations"),
+        # < 0.5 healthy: exactly 0.5 is yellow (the boundary is exclusive)
+        row("Avg instability (I)", "avg_instability", "< 0.5 (core)", lambda v: f"{v:.2f}", lambda v: "🟢" if v < 0.5 else ("🟡" if v < 0.7 else "🔴"),
+            lambda v: "N/A" if v == 0 else f"{v:.2f} mean"),
+        hotspot_row,
+        row("Readability score", "readability_score", "≥ 7", lambda v: f"{v}/10", lambda v: "🟢" if v >= 7 else ("🟡" if v >= 5 else "🔴"),
+            lambda v: "all good" if v >= 7 else "see findings"),
+        row("ISP / fat interface", "isp_violations", "0 ideal", str, ladder(1), lambda v: "none found" if v == 0 else f"{v} violations"),
         "",
     ]

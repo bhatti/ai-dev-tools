@@ -106,9 +106,22 @@ def _safe_url(url: str) -> str | None:
     return url.replace('"', "%22").replace("'", "%27").replace(" ", "%20")
 
 
-def _link(m: re.Match) -> str:
-    url = _safe_url(m.group(2))
-    return f'<a href="{url}">{m.group(1)}</a>' if url else m.group(1)
+_TITLE_MARK = re.compile(r"\x01(\d+)\x01$")
+
+
+def _link(m: re.Match, titles: list[str] | None = None) -> str:
+    """``[text](url)`` or, with a title parked by the caller, ``[text](url "title")`` as a link with a hover tooltip."""
+    target, title = m.group(2), ""
+    mark = _TITLE_MARK.search(target)
+    if mark and titles is not None and int(mark.group(1)) < len(titles):
+        target, title = target[:mark.start()], titles[int(mark.group(1))]
+    elif mark:
+        target = target[:mark.start()]
+    url = _safe_url(target)
+    if not url:
+        return m.group(1)
+    tip = f' title="{_escape_html(title).replace(chr(34), "&quot;")}"' if title else ""
+    return f'<a href="{url}"{tip}>{m.group(1)}</a>'
 
 
 def _image(m: re.Match) -> str:
@@ -129,7 +142,7 @@ def _inline_md_to_html(text: str) -> str:
     Slack emoji shortcodes (:rocket:, :spiral_calendar_pad:, etc.) are converted
     to Unicode before any further processing so they render correctly in HTML.
     """
-    text = convert_slack_emoji(text)
+    text = convert_slack_emoji(text).replace("\x00", "").replace("\x01", "")   # our own markers must never come from the input
     # Backslash-escaped markdown punctuation is literal text: park it before any markup is interpreted.
     escapes: list[str] = []
 
@@ -138,6 +151,14 @@ def _inline_md_to_html(text: str) -> str:
         return f"\x00{len(escapes) - 1}\x00"
 
     text = re.sub(r"\\([\[\]`<>|*_#])", _park, text)
+    # A link title ([text](url "title")) is plain text for the tooltip: park it so bold/italic/code never touch it.
+    titles: list[str] = []
+
+    def _park_title(m: re.Match) -> str:
+        titles.append(m.group(2))
+        return f"]({m.group(1)}\x01{len(titles) - 1}\x01)"
+
+    text = re.sub(r'\]\(([^)\s"]+)\s+"([^"]*)"\)', _park_title, text)
     # Inline code first (prevents double-processing)
     parts: list[str] = []
     remainder = text
@@ -164,9 +185,11 @@ def _inline_md_to_html(text: str) -> str:
     # Images ![alt](url) — before links so the ! prefix is consumed first
     text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _image, text)
     # Standard markdown links [text](url)
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _link, text)
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', lambda m: _link(m, titles), text)
     # Slack mrkdwn links <url|text> — after HTML escaping appear as &lt;url|text&gt;
     text = re.sub(r'&lt;(https?://[^|&]+)\|([^&]+)&gt;', r'<a href="\1">\2</a>', text)
+    # A title parked inside a code span (or a link that never matched) is restored as the text it was.
+    text = re.sub(r"\x01(\d+)\x01", lambda m: _escape_html(f' "{titles[int(m.group(1))]}"'), text)
     return re.sub(r"\x00(\d+)\x00", lambda m: _escape_html(escapes[int(m.group(1))]), text)
 
 

@@ -15,6 +15,9 @@ _KEY = re.compile(r"[A-Z][A-Z0-9_]+-\d+")
 _CATEGORY = {"new": "todo", "indeterminate": "in_progress", "done": "done"}
 
 
+ROLLOVER_LIMIT = 200  # tickets read from the active sprint for hidden rollover
+
+
 def jql_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -51,7 +54,14 @@ def _blockers(links: list[dict]) -> list[str]:
     return [k for k in out if k]
 
 
-def normalize(issue: dict, base_url: str, point_fields: list[tuple[str, str]] | None) -> dict:
+def _sprints(f: dict, sprint_field: str | None) -> list[dict]:
+    """The sprints a ticket has been in, from the Sprint field: [{id, name, state, board_id}]."""
+    return [{"id": int(x["id"]), "name": x.get("name", ""), "state": x.get("state", ""), "board_id": x.get("boardId")}
+            for x in (f.get(sprint_field) or [])] if sprint_field else []
+
+
+def normalize(issue: dict, base_url: str, point_fields: list[tuple[str, str]] | None, sprint_field: str | None = None,
+              lane_overrides: dict | None = None) -> dict:
     f = issue.get("fields") or {}
     status = f.get("status") or {}
     parent = f.get("parent")
@@ -63,14 +73,26 @@ def normalize(issue: dict, base_url: str, point_fields: list[tuple[str, str]] | 
         labels=f.get("labels") or [], is_subtask=bool((f.get("issuetype") or {}).get("subtask")), blocked_by=_blockers(f.get("issuelinks")),
         parent={"id": parent["key"], "title": (parent.get("fields") or {}).get("summary", "")} if parent else None,
         story_points=story_points.jira_points(f, point_fields), environment=adf.to_text(f.get("environment")).strip(),
-        comments=[adf.to_text(c.get("body")).strip() for c in (f.get("comment") or {}).get("comments", [])])
+        comments=[adf.to_text(c.get("body")).strip() for c in (f.get("comment") or {}).get("comments", [])],
+        sprints=_sprints(f, sprint_field), lane_overrides=lane_overrides)
 
 
 class JiraTickets:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, lane_overrides: dict | None = None):
         self.config = config
+        self.lane_overrides = lane_overrides or {}
         self._points: list[tuple[str, str]] | None | bool = False  # False: not looked up yet
+        self._sprint_field: str | None | bool = False
         self._parents: dict[str, str] = {}
+
+    def sprint_field(self) -> str | None:
+        """Id of the site's Sprint field (it lists every sprint a ticket has been in); None when unreadable or absent."""
+        if self._sprint_field is False:
+            try:
+                self._sprint_field = next((f["id"] for f in jira_api.list_fields(self.config) if f.get("name", "").lower() == "sprint" and f["id"].startswith("customfield_")), None)
+            except JiraError:
+                self._sprint_field = None
+        return self._sprint_field
 
     def point_fields(self) -> list[tuple[str, str]] | None:
         if self._points is False:
@@ -81,13 +103,13 @@ class JiraTickets:
         return self._points
 
     def _fields(self) -> list[str]:
-        return _FIELDS + [fid for fid, _ in (self.point_fields() or [])]
+        return _FIELDS + [fid for fid, _ in (self.point_fields() or [])] + ([self.sprint_field()] if self.sprint_field() else [])
 
     def _normalize(self, issue: dict) -> dict:
         comments = (issue.get("fields") or {}).get("comment") or {}
         if comments.get("total", 0) > len(comments.get("comments", [])):  # the payload embeds only a first page of comments
             issue["fields"]["comment"]["comments"] = self._all_comments(issue["key"])
-        ticket = normalize(issue, self.config["JIRA_BASE_URL"], self.point_fields())
+        ticket = normalize(issue, self.config["JIRA_BASE_URL"], self.point_fields(), self.sprint_field(), self.lane_overrides)
         if ticket["is_subtask"] and ticket["parent"]:
             ticket["parent"]["description"], ticket["parent"]["error"] = self._parent_description(ticket["parent"]["id"])
         return ticket
@@ -107,6 +129,13 @@ class JiraTickets:
                 return "", f"the parent {key} could not be read: {e}"
         return self._parents[key], ""
 
+    def _light(self, issue: dict) -> dict:
+        """An issue normalized from the search payload alone (no comment or parent reads): enough for lane, points and assignee."""
+        try:
+            return normalize(issue, self.config["JIRA_BASE_URL"], self.point_fields(), self.sprint_field(), self.lane_overrides)
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            return unreadable("jira", issue.get("key", "?"), f"unexpected ticket structure ({type(e).__name__}: {e})")
+
     def _safely(self, issue: dict) -> dict:
         """One issue normalized; a ticket that cannot be read completely or has an unexpected structure is kept as UNREADABLE
         instead of failing the whole batch."""
@@ -116,6 +145,34 @@ class JiraTickets:
             return unreadable("jira", issue.get("key", "?"), str(e))
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             return unreadable("jira", issue.get("key", "?"), f"unexpected ticket structure ({type(e).__name__}: {e})")
+
+    def pending_rollover(self, target: dict, have: set[str], project: str = "") -> tuple[dict | None, str]:
+        """(unfinished work of the active sprint in the same series as ``target``, a note when it could not be read). Only meaningful for a
+        future ``target``: this is what will roll over if nobody acts. A board can host several teams' sprints, so only the sprint whose name
+        matches the target's name without its number counts."""
+        if target.get("state") != "future" or not target.get("board_id"):
+            return None, ""
+        series = re.sub(r"\d+\s*$", "", target["name"]).strip()
+        if not series:
+            return None, "pending rollover was not computed: the sprint name has no series to match the active sprint by"
+        try:
+            active = [s for s in jira_api.list_board_sprints(self.config, int(target["board_id"]), "active") if s["name"].startswith(series)]
+            if not active:
+                return None, ""
+            if len(active) > 1:
+                return None, f"pending rollover was not computed: {len(active)} active sprints match '{series}'"
+            jql = f"sprint = {active[0]['id']} AND statusCategory != Done" + (f" AND project = {jql_quote(project)}" if project else "")
+            issues = jira_api.search_issues_all(self.config, jql, self._fields(), ROLLOVER_LIMIT)
+        except JiraError as e:
+            return None, f"pending rollover could not be read: {e}"
+        tickets = [self._light(i) for i in issues]
+        note = f"pending rollover read is capped at {ROLLOVER_LIMIT} tickets; more may roll over" if len(issues) >= ROLLOVER_LIMIT else ""
+        unreadable_n = sum(1 for t in tickets if t["fetch_error"])
+        if unreadable_n:
+            note = (note + "; " if note else "") + f"{unreadable_n} unfinished ticket(s) of the active sprint could not be read and are not listed"
+        return {"from_sprint": active[0]["name"], "tickets": [
+            {"id": t["id"], "title": t["title"], "status": t["status"], "lane": t["lane"], "story_points": t["story_points"]["value"], "assignee": t["assignee"],
+             "already_in_target": t["id"] in have} for t in tickets if not t["fetch_error"] and not t["is_subtask"]]}, note
 
     def search(self, jql: str, limit: int) -> list[dict]:
         try:

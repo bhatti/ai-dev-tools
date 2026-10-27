@@ -687,7 +687,7 @@ def test_pr_queue_to_markdown_group_section_has_badge():
 def test_pr_queue_to_markdown_pr_rows_have_links():
     md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
     assert "[#42](https://github.com/org/repo/pull/42)" in md
-    assert "[PROJ-100](https://org.atlassian.net/browse/PROJ-100)" in md
+    assert "[PROJ-100](https://org.atlassian.net/browse/PROJ-100 " in md   # the Jira summary is its hover text
 
 
 def test_pr_queue_to_markdown_priority_badge():
@@ -811,3 +811,9 @@ def test_slack_client_main_shows_job_link_when_no_report(tmp_path):
     })
     assert "View job in Formicary" in posted_text
     assert "View report.html" not in posted_text
+
+
+def test_pr_queue_report_ends_with_the_shared_dashboard_and_has_no_title_column():
+    md = _pr_queue_to_markdown(_PR_DATA_SAMPLE, "PR Queue")
+    assert "### Metrics Dashboard" in md and "| Defect Rate (proxy) |" in md and "| Change Failure Rate | n/a |" in md
+    assert "| Title |" not in md

@@ -85,8 +85,8 @@ class TestResolvePrNumber:
     @patch("scripts.mq._shared._bb_find_pr_by_jira_key", return_value="99")
     def test_jira_key_resolved(self, mock_find):
         cfg = {"DEFAULT_TRACKER": "jira", "BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "r"}
-        assert resolve_pr_number(cfg, "PROJ-40913") == "99"
-        mock_find.assert_called_once_with(cfg, "PROJ-40913")
+        assert resolve_pr_number(cfg, "PROJ-913") == "99"
+        mock_find.assert_called_once_with(cfg, "PROJ-913")
 
     @patch("scripts.mq._shared._bb_find_pr_by_jira_key", return_value=None)
     def test_jira_key_not_found(self, mock_find):
@@ -108,7 +108,7 @@ class TestBbFindPrByJiraKey:
         mock_get.return_value = mock_resp
         cfg = {"BITBUCKET_WORKSPACE": "ws", "BITBUCKET_REPO": "r",
                "BITBUCKET_USERNAME": "u", "BITBUCKET_TOKEN": "t"}
-        result = _bb_find_pr_by_jira_key(cfg, "PROJ-40913")
+        result = _bb_find_pr_by_jira_key(cfg, "PROJ-913")
         assert result == "42"
         assert mock_get.call_count == 1
 

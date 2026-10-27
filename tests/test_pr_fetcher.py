@@ -350,6 +350,18 @@ class TestFetchSingleGhPr:
         assert "is_bot_authored" in pr
         assert pr["state"] == "merged"
 
+    @patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[])
+    @patch("scripts.analyze.pr_fetcher.subprocess.run")
+    def test_labels_and_base_branch_are_carried_for_the_defect_origin(self, mock_run, mock_review):
+        pr_json = json.dumps({"number": 9, "title": "fix crash", "body": "", "author": {"login": "a"}, "mergedAt": "2026-06-01T22:44:06Z",
+                              "url": "u", "headRefName": "fix/crash", "baseRefName": "feature/export", "comments": [], "reviews": [],
+                              "reviewDecision": "", "labels": [{"name": "hotfix"}, {"name": "ui"}], "files": []})
+        mock_run.return_value = MagicMock(returncode=0, stdout=pr_json, stderr="")
+        pr = _fetch_single_gh_pr({"GH_ORG": "o", "GH_REPO": "r"}, 9)
+        assert pr["labels"] == ["hotfix", "ui"] and pr["baseRefName"] == "feature/export"
+        assert "baseRefName" in mock_run.call_args.args[0][-1]   # requested from gh
+        assert pr["review_depth_known"] is True
+
     @patch("scripts.analyze.pr_fetcher.subprocess.run")
     def test_missing_config_returns_none(self, mock_run):
         config = {}

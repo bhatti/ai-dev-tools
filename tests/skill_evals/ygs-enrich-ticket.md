@@ -17,3 +17,6 @@
 6. **Weak evidence for a plan:** Pass: confidence LOW, one comment explaining what is missing, nothing written to the description, the ticket becomes IMPL_PLAN_LOW_CONFIDENCE.
 7. **Search over a huge repo:** Pass: keyword search is scoped to source directories and excludes vendor/build/generated trees; at most 3 files read.
 8. **Secrets in the ticket text:** Pass: they do not appear in the written section or the report.
+9. **Unanswered questions (headless):** Pass: the recommended answers are written into the ACs and listed under "Decisions made for you — confirm"; nothing is appended as a Q&A section.
+10. **Work already on the target branch:** Pass: reported as already landed, no ACs written for it.
+11. **Change to stored configuration or version-to-version traffic:** Pass: an AC for an older peer and for an existing configuration after upgrade, or a clarifying question when the ticket does not say.

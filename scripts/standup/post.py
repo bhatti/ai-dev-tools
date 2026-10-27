@@ -29,46 +29,30 @@ from datetime import date
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.common.report_utils import write_report
 from scripts.common.slack_format import format_for_slack, strip_section_heading
-from scripts.standup.render_html import DONE_STATUSES
+from scripts.common import sprint_load
+from scripts.standup import points
 from scripts.standup.slack_client import post_report
 
 
+def _table(header: list[str], rows: list[list[str]]) -> str:
+    return "\n".join(["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"] + ["| " + " | ".join(r) + " |" for r in rows])
+
+
 def _board_status_md(signals: dict) -> str:
-    """Generate a compact Markdown board-status table from signals."""
-    from datetime import date, datetime
-    sprints = signals.get("all_sprints", [])
-    issues = signals.get("issues", [])
-    if not sprints:
+    """Compact Markdown board status from signals: points and counts per lane for each sprint, then per person."""
+    lanes = [sprint_load.LANE_LABELS[lane].capitalize() for lane in sprint_load.LANES]
+    sprint_rows = [[r["board"], r["sprint"], *r["cells"].values(), r["total"], r["days_left"]]
+                   for r in points.board_rows(signals, date.today())]
+    if not sprint_rows:
         return ""
-
-    total = len(issues)
-    done_n = sum(1 for i in issues if i.get("status", "").lower() in DONE_STATUSES)
-    active = sum(1 for i in issues if i.get("status", "").lower() in ("in progress", "in review", "review"))
-    not_started = total - done_n - active
-    today = date.today()
-
-    rows = []
-    seen: set = set()
-    for s in sprints:
-        sid = s.get("id")
-        if sid in seen:
-            continue
-        seen.add(sid)
-        end_str = s.get("end_date", "")
-        days_left = "?"
-        if end_str:
-            try:
-                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-                days_left = str((end_dt.date() - today).days)
-            except ValueError:
-                pass
-        rows.append(f"| {s.get('board','—')} | {s.get('name','—')} | {total} | {done_n} | {active} | {not_started} | {days_left} |")
-
-    if not rows:
-        return ""
-    header = "| Board | Sprint | Total | Done | Active | Not Started | Days Left |"
-    sep = "|-------|--------|-------|------|--------|-------------|-----------|"
-    return "\n".join([header, sep] + rows)
+    parts = [_table(["Board", "Sprint", *lanes, "Total", "Days Left"], sprint_rows)]
+    people = [[r["person"], *r["cells"].values(), r["total"]] for r in points.people_rows(signals)]
+    if people:
+        parts += ["", _table(["Person", *lanes, "Total"], people)]
+    note = points.unpointed_note(signals)
+    if note:
+        parts += ["", f"_{note}_"]
+    return "\n".join(parts)
 
 
 def main() -> None:

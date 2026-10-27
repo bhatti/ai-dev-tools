@@ -40,7 +40,8 @@ from scripts.common.config import get_workspace_dir, load_config, validate_claud
 from scripts.common.models import ModelError, resolve_run_model
 from scripts.common.repo_utils import resolve_repo_url, repo_label as compute_repo_label, clone_for_audit
 from scripts.common.pr_signals import collect_signals, pr_number, enabled as pr_signals_enabled, from_classified_comments, tracker_name
-from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution, build_pr_metrics_table, build_metrics_dashboard, build_stale_pr_table
+from scripts.common.pr_metrics import NOT_ASSESSED
+from scripts.common.pr_classify import extract_and_strip_metrics_tables, build_category_breakdown, build_work_type_distribution, build_pr_metrics_table, build_metrics_dashboard, build_stale_pr_table
 from scripts.common.report_renderer import render_simple_html
 from scripts.common.report_utils import write_report
 from scripts.common.skills import apply_project_skills, inline_shared_refs
@@ -78,38 +79,6 @@ def _build_metrics_summary_with_claude(prs: list[dict], extra_rows: list[tuple])
     if dashboard:
         lines.append(dashboard)
     return "\n".join(lines) if len(lines) > 2 else ""
-
-
-_DASHBOARD_HEADING = r"(?:metrics dashboard|process metrics|claude-assessed[^\n]*)"
-_DASHBOARD_SECTION_RE = re.compile(rf"^#{{1,6}}[^\n]*{_DASHBOARD_HEADING}[^\n]*\n.*?(?=^#{{1,6}} |\Z)", re.IGNORECASE | re.MULTILINE | re.DOTALL)
-_PRECOMPUTED_HEADING = "## Pre-Computed PR Metrics Summary"
-
-
-def _extract_and_strip_metrics_tables(md: str) -> tuple[str, list[tuple]]:
-    """Remove the metrics tables of an audit report and return the model-written rows.
-
-    The pipeline appends one regenerated summary with one dashboard, so what is removed here is (a) a previously
-    appended summary (a re-run) and (b) dashboard-style sections the model wrote ("Metrics Dashboard",
-    "Process Metrics", "Claude-Assessed ..."). Rows are ``(metric, value, benchmark, signal, description)`` from (b)
-    only: (a) is recomputed. Other sections that merely mention metrics (design metrics, discussion) stay.
-    """
-    cut = md.find(_PRECOMPUTED_HEADING)
-    if cut != -1:
-        md = md[:cut].rstrip() + "\n"
-    rows: list[tuple] = []
-
-    def take(m: re.Match) -> str:
-        found = []
-        for line in m.group(0).splitlines():
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if line.lstrip().startswith("|") and len(cells) == 5 and cells[0].lower() != "metric" and not set(cells[0]) <= set("-: "):
-                found.append(tuple(cells))
-        if not found:
-            return m.group(0)
-        rows.extend(found)
-        return ""
-
-    return _DASHBOARD_SECTION_RE.sub(take, md), rows
 
 
 def _attach_review_signals(prs: list[dict], config: dict, workspace: Path) -> None:
@@ -224,12 +193,14 @@ def _read_all_claude_metrics(reports_dir: Path) -> list[tuple]:
         rows: list[tuple] = []
         for key, (name, benchmark, desc) in _CLAUDE_METRIC_ROWS.items():
             val = metrics.get(key)
-            if val is None:
+            if val is None:   # shown, not dropped: a metric nobody assessed must be visible as such
+                rows.append((name, "—", benchmark, "—", NOT_ASSESSED))
                 continue
             try:
                 fval = float(val)
-            except (TypeError, ValueError):
-                fval = 0.0
+            except (TypeError, ValueError):   # "n/a", "unknown", "": not a measurement, so not a green zero
+                rows.append((name, "—", benchmark, "—", NOT_ASSESSED))
+                continue
             signal = _metric_signal(key, fval)
             if "pct" in key or "rate" in key:
                 display = f"{fval:.1f}%"
@@ -628,7 +599,7 @@ positive. Only count PRs where you can actually read the issue and confirm it la
 
 ## CRITICAL: Include PR IDs everywhere
 
-Every finding MUST reference specific PR numbers (e.g., "PR #46468", "PRs #47554, #47533").
+Every finding MUST reference specific PR numbers (e.g., "PR #1468", "PRs #1554, #1533").
 The report header MUST include the count of PRs analyzed.
 The findings JSON MUST include `pr_number` or `prs` array for every finding.
 
@@ -764,16 +735,17 @@ Write these files using relative paths from the repo root (the `reports/` symlin
       "frequency":N,"pr_number":N,"prs":[N,M],"pr_state":"merged|open|declined","title":"...","evidence":"specific finding","recommendation":"specific action"}}],
     "patterns":[{{"pattern":"description","frequency":N,"prs":[1,2,3],"gap_type":"team_skill|process|tooling","recommendation":"..."}}],
     "skills_assessment":{{"coding":"Strong|Developing|Gap","review":"...","testing":"...","sre":"...","security":"...","architecture":"..."}},
-    "metrics":{{"spec_coverage_pct":0.0,"ci_catch_rate":0.0,"code_review_skill_catch_rate":0.0,
-      "bot_finding_follow_through_rate":0.0,"human_review_burden":0.0,
+    "metrics":{{"spec_coverage_pct":null,"ci_catch_rate":null,"code_review_skill_catch_rate":null,
+      "bot_finding_follow_through_rate":null,"human_review_burden":null,
       "pr_state_merged":0,"pr_state_open":0,"pr_state_declined":0,
       "avg_pr_size_loc":0,"median_pr_size_loc":0,
       "size_bucket_xs":0,"size_bucket_s":0,"size_bucket_m":0,"size_bucket_l":0,"size_bucket_xl":0,
-      "large_pr_review_depth":0.0,"xl_pr_review_coverage_pct":0.0,
-      "large_pr_human_comments_avg":0.0,
-      "security_review_invocation_rate":0.0,
-      "rubber_stamp_rate":0.0,"revert_followup_rate":0.0,
-      "verbosity_accumulation_rate":0.0,"complexity_creep_pr_count":0}}}}
+      "large_pr_review_depth":null,"xl_pr_review_coverage_pct":null,
+      "large_pr_human_comments_avg":null,
+      "security_review_invocation_rate":null,
+      "rubber_stamp_rate":null,"revert_followup_rate":null,
+      "verbosity_accumulation_rate":null,"complexity_creep_pr_count":null}}}}
+   Metrics that are Claude-assessed (everything above except the pr_state_*, size and bucket counts) must be a number or null; use null for one you could not assess (never an estimate, never 0): the report shows it as "not assessed".
 
    Severity definitions (use these — do not invent your own):
    - CRITICAL: security vulnerability, data loss, or production outage risk
@@ -804,7 +776,7 @@ Write these files using relative paths from the repo root (the `reports/` symlin
    - If you cannot cite 3+ PRs, do not propose a skill change — add it to the single-PR observations appendix instead
    - Rule text in `content_to_add` and `full_content` must be GENERALIZABLE — write instructions for future
      developers, not incident reports about specific PRs. PR numbers go in `reason`, NEVER in rule text.
-   - BAD content: "PR #49628 had a missing null check in the auth handler"
+   - BAD content: "PR #1628 had a missing null check in the auth handler"
    - GOOD content: "Always validate nullable fields before dereferencing, especially in authentication paths"
 
 DO NOT emit any ::add-task-context markers yourself -- the orchestrator script reads
@@ -1221,11 +1193,11 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
         #    and must not be skipped when Claude already wrote its own dashboard.
         report_md_path = reports_dir / "pr_audit_report.md"
         if report_md_path.exists() and prs:
-            md_content, written_rows = _extract_and_strip_metrics_tables(report_md_path.read_text(encoding="utf-8"))
+            md_content, written_rows = extract_and_strip_metrics_tables(report_md_path.read_text(encoding="utf-8"))
             # ONE dashboard: computed rows + review-signal rows + the model's rows (report table and findings JSON, by name).
             rows: list[tuple] = []
             seen: set[str] = set()
-            for row in written_rows + _read_all_claude_metrics(reports_dir):
+            for row in _read_all_claude_metrics(reports_dir) + written_rows:   # the findings-JSON value wins over a hand-written row
                 if row[0].lower() not in seen:
                     seen.add(row[0].lower())
                     rows.append(row)

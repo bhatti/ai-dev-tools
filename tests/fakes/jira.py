@@ -3,7 +3,8 @@
 ``with FakeJira(monkeypatch) as jira:`` sets JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN. Issues live in ``jira.issues``
 and PUT/POST calls change them, so a test can read the description back after a write exactly like production code does.
 
-* ``add_issue(key, title, description=<markdown str | ADF dict | None>, points=3, ...)`` registers an issue
+* ``add_issue(key, title, description=<markdown str | ADF dict | None>, points=3, sprints=[{id,name,state,boardId}], ...)`` registers an issue;
+  ``add_board_sprint(board_id, {id, name, state})`` registers a sprint of a board (agile API)
 * ``jira.page_size`` controls search pagination (``nextPageToken``); ``add_search(jql_fragment, [keys])`` selects the
   result of a search whose JQL contains the fragment (default: every issue)
 * ``fail(path_suffix, status, times, headers, method=None)`` makes the next matching calls fail first; ``requests`` is the ordered request log
@@ -24,7 +25,8 @@ class FakeJira:
     def __init__(self, monkeypatch):
         self.issues: dict[str, dict] = {}
         self.fields: list[dict] = [{"id": "customfield_10016", "name": "Story point estimate"},
-                                   {"id": "customfield_10020", "name": "Sprint"}]
+                                   {"id": "customfield_10020", "name": "Sprint", "custom": True}]
+        self.board_sprints: dict[int, list[dict]] = {}
         self.searches: list[tuple[str, list[str]]] = []
         self.failures: dict[str, list] = {}
         self.requests: list[tuple[str, str, object]] = []
@@ -80,7 +82,7 @@ class FakeJira:
     def add_issue(self, key: str, title: str, description: object = None, points: float | None = None, status: str = "To Do",
                   category: str = "new", issue_type: str = "Story", assignee: str | None = "Alex Doe", labels: list[str] | None = None,
                   parent: str | None = None, links: list[dict] | None = None, comments: list[str] | None = None,
-                  points_field: str = "customfield_10016") -> "FakeJira":
+                  points_field: str = "customfield_10016", sprints: list[dict] | None = None) -> "FakeJira":
         if isinstance(description, str):
             description = {"type": "doc", "version": 1, "content": adf.from_markdown(description)}
         fields = {"summary": title, "description": description, "labels": labels or [], "assignee": {"displayName": assignee} if assignee else None,
@@ -88,8 +90,12 @@ class FakeJira:
                   "issuetype": {"name": issue_type, "subtask": issue_type.lower() in ("sub-task", "subtask")},
                   "parent": {"key": parent} if parent else None, "issuelinks": links or [],
                   "comment": {"comments": [{"body": {"type": "doc", "version": 1, "content": adf.from_markdown(c)}} for c in comments or []]},
-                  points_field: points}
+                  points_field: points, "customfield_10020": sprints or []}
         self.issues[key] = {"key": key, "fields": fields}
+        return self
+
+    def add_board_sprint(self, board_id: int, sprint: dict) -> "FakeJira":
+        self.board_sprints.setdefault(board_id, []).append(sprint)
         return self
 
     def add_field(self, field_id: str, name: str) -> "FakeJira":
@@ -122,6 +128,13 @@ class FakeJira:
     def _route(self, method: str, path: str, query: dict, body: object):
         if method == "GET" and path == "/rest/api/3/field":
             return 200, self.fields
+        if method == "GET" and path == "/rest/api/3/myself":
+            return 200, {"displayName": "Test User", "accountId": "acc-1"}
+        board = re.fullmatch(r"/rest/agile/1.0/board/(\d+)/sprint", path)
+        if method == "GET" and board:
+            wanted = (query.get("state") or [""])[0]
+            values = [sp for sp in self.board_sprints.get(int(board.group(1)), []) if not wanted or sp.get("state") == wanted]
+            return 200, {"values": values, "isLast": True}
         if method == "POST" and path == "/rest/api/3/search/jql":
             return self._search(body or {})
         match = re.fullmatch(r"/rest/api/3/issue/([A-Z][A-Z0-9]+-\d+)(/comment)?", path)

@@ -66,8 +66,10 @@ class TestJira:
         code, out = run(tmp_path, "--sprint", "S", "--project", "PROJ", "--tracker", "jira")
         assert code == 0 and out["count"] == 5
         jql = next(b["jql"] for m, p, b in jira.requests if p.endswith("/search/jql"))
-        assert 'sprint = "S"' in jql and 'project = "PROJ"' in jql and "statusCategory != Done" in jql
-        run(tmp_path, "--sprint", "S", "--project", "PROJ", "--tracker", "jira", "--include-done")
+        assert 'sprint = "S"' in jql and 'project = "PROJ"' in jql and "statusCategory" not in jql   # a sprint is read whole: finished work is the velocity
+        run(tmp_path, "--label", "x", "--project", "PROJ", "--tracker", "jira")
+        assert "statusCategory != Done" in [b["jql"] for m, p, b in jira.requests if p.endswith("/search/jql")][-1]   # other scopes still hide finished work
+        run(tmp_path, "--label", "x", "--project", "PROJ", "--tracker", "jira", "--include-done")
         assert "statusCategory" not in [b["jql"] for m, p, b in jira.requests if p.endswith("/search/jql")][-1]
 
     def test_story_points_come_from_the_site_field_whatever_its_name(self, tmp_path, jira):
@@ -141,8 +143,10 @@ class TestGitHub:
 
     def test_closed_issues_need_include_done(self, tmp_path, gh):
         gh.add_issue(1, "open", body="x", milestone="M").add_issue(2, "closed", body="x", milestone="M", state="CLOSED")
-        assert run(tmp_path, "--milestone", "M", "--tracker", "github")[1]["count"] == 1
-        assert run(tmp_path, "--milestone", "M", "--tracker", "github", "--include-done")[1]["count"] == 2
+        out = run(tmp_path, "--milestone", "M", "--tracker", "github")[1]
+        assert out["count"] == 2 and out["evaluated"] == 1 and [t["id"] for t in out["tickets"]] == ["#1"]   # finished work is read for the totals, not graded
+        assert out["load"]["lanes"]["done"]["count"] == 1
+        assert run(tmp_path, "--milestone", "M", "--tracker", "github", "--include-done")[1]["evaluated"] == 2
 
     def test_a_repository_is_required_for_a_search(self, tmp_path, gh, monkeypatch, capsys):
         monkeypatch.delenv("GH_ORG")
@@ -365,3 +369,138 @@ class TestReadableTextFiles:
         jira.add_issue("PROJ-1", "t", description="x")
         t = run(tmp_path, "PROJ-1", "--tracker", "jira")[1]["tickets"][0]
         assert t["text_file"].endswith("tickets/PROJ-1.txt") and (tmp_path / "tickets" / "PROJ-1.txt").exists()
+
+
+S29 = {"id": 29, "name": "Sprint 29", "state": "closed", "boardId": 7}
+S30 = {"id": 30, "name": "Sprint 30", "state": "future", "boardId": 7}
+S28 = {"id": 28, "name": "Sprint 28", "state": "closed", "boardId": 7}
+
+
+class TestJiraSprintLoad:
+    def _sprint(self, jira):
+        jira.add_issue("PROJ-1", "not started", description="x", points=3, status="To Do", category="new", sprints=[S29, S30])
+        jira.add_issue("PROJ-2", "coding", description="x", points=5, status="In Progress", category="indeterminate", sprints=[S28, S29, S30])
+        jira.add_issue("PROJ-3", "reviewing", description="x", points=8, status="Code Complete", category="indeterminate", sprints=[S30])
+        jira.add_issue("PROJ-4", "shipped", description="x", points=2, status="Done", category="done", sprints=[S29, S30])
+        jira.add_issue("PROJ-5", "no points", description="x", points=None, status="QA", category="indeterminate", sprints=[S30])
+        jira.add_issue("PROJ-6", "waiting", description="x", points=1, status="Blocked", category="indeterminate", sprints=[S30])
+        jira.add_issue("PROJ-6A", "a sub-task", description="x", points=99, issue_type="Sub-task", parent="PROJ-6", sprints=[S30])
+        jira.add_search("Sprint 30", ["PROJ-1", "PROJ-2", "PROJ-3", "PROJ-4", "PROJ-5", "PROJ-6", "PROJ-6A"])
+
+    def test_points_per_lane_come_from_every_ticket_in_the_sprint_but_only_unfinished_ones_are_graded(self, tmp_path, jira):
+        self._sprint(jira)
+        code, out = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")
+        lanes = out["load"]["lanes"]
+        assert code == 0 and out["count"] == 7 and out["evaluated"] == 6 and "PROJ-4" not in [t["id"] for t in out["tickets"]]
+        assert (lanes["pending"]["points"], lanes["pending"]["count"]) == (4.0, 2)        # To Do (3) + Blocked (1)
+        assert (lanes["in_progress"]["points"], lanes["review"]["points"], lanes["done"]["points"]) == (5.0, 8.0, 2.0)
+        assert lanes["review"]["unpointed"] == ["PROJ-5"] and out["load"]["total"]["points"] == 19.0   # the sub-task's 99 is not counted
+        assert {t["id"]: t["lane"] for t in out["tickets"]}["PROJ-3"] == "review"
+
+    def test_carry_over_comes_from_the_sprint_history(self, tmp_path, jira):
+        self._sprint(jira)
+        out = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")[1]
+        c = out["load"]["carry_over"]
+        assert c["count"] == 3 and c["chronic"] == ["PROJ-2"] and c["by_lane"]["pending"] == ["PROJ-1"] and c["by_lane"]["done"] == ["PROJ-4"]
+        by_id = {t["id"]: t for t in out["tickets"]}
+        assert by_id["PROJ-2"]["carry_over"] == {"times": 2, "from_sprints": ["Sprint 28", "Sprint 29"]} and by_id["PROJ-3"]["carry_over"]["times"] == 0
+        assert out["load"]["target_sprint"]["name"] == "Sprint 30"
+
+    def test_unfinished_work_of_the_active_sprint_that_is_missing_from_a_future_sprint_is_reported(self, tmp_path, jira):
+        self._sprint(jira)
+        jira.add_board_sprint(7, {"id": 29, "name": "Sprint 29", "state": "active"}).add_board_sprint(7, {"id": 99, "name": "Other Team Sprint 5", "state": "active"})
+        jira.add_issue("PROJ-7", "left behind", description="x", points=3, status="In Progress", category="indeterminate", sprints=[S29])
+        jira.add_search("sprint = 29", ["PROJ-1", "PROJ-7"])      # PROJ-1 is already in Sprint 30, PROJ-7 is not
+        roll = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")[1]["load"]["pending_rollover"]
+        assert roll["from_sprint"] == "Sprint 29"
+        assert {t["id"]: t["already_in_target"] for t in roll["tickets"]} == {"PROJ-1": True, "PROJ-7": False}
+        assert any('"Sprint 29"' not in str(b) and "sprint = 29" in str(b) for m, p, b in jira.requests if p.endswith("/search/jql"))
+
+    def test_an_active_target_sprint_has_no_rollover(self, tmp_path, jira):
+        jira.add_issue("PROJ-1", "x", description="x", points=3, sprints=[{**S30, "state": "active"}])
+        out = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")[1]
+        assert out["load"]["pending_rollover"] is None and out["load"]["carry_over"]["count"] == 0
+
+    def test_a_failed_rollover_lookup_is_reported_not_hidden(self, tmp_path, jira):
+        self._sprint(jira)
+        jira.add_board_sprint(7, {"id": 29, "name": "Sprint 29", "state": "active"})
+        jira.fail("/rest/agile/1.0/board/7/sprint", 500, times=20, headers={"Retry-After": "0"}, method="GET")
+        out = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")[1]
+        assert out["load"]["pending_rollover"] is None and any("rollover could not be read" in n for n in out["load"]["notes"])
+
+    def test_a_site_without_a_sprint_field_still_gets_lanes_and_says_carry_over_is_unknown(self, tmp_path, jira):
+        jira.fields = [f for f in jira.fields if f["name"] != "Sprint"]
+        jira.add_issue("PROJ-1", "x", description="x", points=3)
+        out = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")[1]
+        assert out["load"]["lanes"]["pending"]["points"] == 3.0 and out["load"]["carry_over"] is None and out["load"]["notes"]
+
+    def test_an_all_finished_sprint_is_reported_not_called_empty(self, tmp_path, jira, capsys):
+        jira.add_issue("PROJ-1", "x", description="x", points=3, status="Done", category="done", sprints=[S30])
+        code, out = run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")
+        assert code == 0 and out["count"] == 1 and out["evaluated"] == 0 and out["load"]["lanes"]["done"]["points"] == 3.0
+
+    def test_workflow_names_the_defaults_do_not_know_can_be_mapped(self, tmp_path, jira, monkeypatch):
+        monkeypatch.setenv("SPRINT_LANES", '{"review": ["Ready to Ship"]}')
+        jira.add_issue("PROJ-1", "x", description="x", points=3, status="Ready to Ship", category="indeterminate", sprints=[S30])
+        assert run(tmp_path, "--sprint", "Sprint 30", "--project", "PROJ", "--tracker", "jira")[1]["load"]["lanes"]["review"]["points"] == 3.0
+
+
+class TestGitHubSprintLoad:
+    def test_lanes_come_from_state_and_workflow_labels(self, tmp_path, gh):
+        gh.add_issue(1, "todo", body="x", labels=["sp:3"], milestone="M")
+        gh.add_issue(2, "coding", body="x", labels=["sp:5", "in progress"], milestone="M")
+        gh.add_issue(3, "reviewing", body="x", labels=["sp:8", "in review"], milestone="M")
+        gh.add_issue(4, "done", body="x", labels=["sp:2"], milestone="M", state="CLOSED")
+        gh.add_issue(5, "stuck", body="x", labels=["sp:1", "blocked"], milestone="M")
+        gh.add_issue(6, "area label only", body="x", labels=["sp:1", "testing", "documentation"], milestone="M")
+        out = run(tmp_path, "--milestone", "M", "--tracker", "github")[1]
+        lanes = out["load"]["lanes"]
+        assert [lanes[l]["points"] for l in ("pending", "in_progress", "review", "done")] == [3.0 + 1.0 + 1.0, 5.0, 8.0, 2.0]
+        assert out["load"]["carry_over"] is None and any("GitHub" in n for n in out["load"]["notes"])
+
+    def test_unpointed_issues_are_named(self, tmp_path, gh):
+        gh.add_issue(1, "no points", body="x", milestone="M")
+        assert run(tmp_path, "--milestone", "M", "--tracker", "github")[1]["load"]["lanes"]["pending"]["unpointed"] == ["#1"]
+
+    def test_explicit_refs_have_no_load(self, tmp_path, gh):
+        gh.add_issue(1, "t", body="x")
+        assert run(tmp_path, "1", "--tracker", "github")[1]["load"] is None
+
+
+class TestCredentialsCheck:
+    def test_jira_ok_names_the_user_and_never_the_token(self, jira, capsys):
+        assert fetch.main(["--check", "--tracker", "jira"]) == 0
+        out = capsys.readouterr().out
+        assert json.loads(out) == {"ok": True, "tracker": "jira", "user": "Test User"} and "test-token-123" not in out
+
+    def test_bad_jira_credentials_are_blocked_with_a_clear_message(self, jira, capsys):
+        jira.fail("/rest/api/3/myself", 401)
+        assert fetch.main(["--check", "--tracker", "jira"]) == 3
+        out = json.loads(capsys.readouterr().out)
+        assert out["ok"] is False and "do not work" in out["error"] and "test-token-123" not in json.dumps(out)
+
+    def test_missing_jira_credentials_are_named_by_variable(self, jira, monkeypatch, capsys):
+        monkeypatch.delenv("JIRA_API_TOKEN")
+        assert fetch.main(["--check", "--tracker", "jira"]) == 3
+        assert "JIRA_API_TOKEN" in capsys.readouterr().out
+
+    def test_github_ok_and_failing(self, gh, capsys, monkeypatch):
+        gh.set("whoami", "octocat")
+        assert fetch.main(["--check", "--tracker", "github"]) == 0 and json.loads(capsys.readouterr().out)["user"] == "octocat"
+        gh.set("whoami_fail", "HTTP 401: Bad credentials")
+        assert fetch.main(["--check", "--tracker", "github"]) == 3
+        assert "do not work" in capsys.readouterr().out
+
+
+class TestTargetSprint:
+    TICKETS = [{"sprints": [{"id": 30, "name": "Sprint 30"}, {"id": 31, "name": "Sprint 31"}]}, {"sprints": [{"id": 77, "name": "Sprint 30"}]}]
+
+    def test_a_numeric_sprint_is_found_by_id(self):
+        assert fetch.target_sprint(self.TICKETS, "31") == ({"id": 31, "name": "Sprint 31"}, "")
+
+    def test_a_name_shared_by_two_sprints_is_ambiguous_and_says_so(self):
+        target, note = fetch.target_sprint(self.TICKETS, "Sprint 30")
+        assert target is None and "2 sprints are named 'Sprint 30'" in note and "30, 77" in note
+
+    def test_an_unknown_sprint_is_none_without_a_note(self):
+        assert fetch.target_sprint(self.TICKETS, "Sprint 99") == (None, "")

@@ -20,7 +20,9 @@ from pathlib import Path
 
 from scripts.common.slack_emoji import convert_slack_emoji
 
+from scripts.common import sprint_load
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.standup import points
 from scripts.common.report_utils import write_report
 from scripts.common.slack_format import strip_section_heading
 
@@ -155,48 +157,36 @@ def _inline_md(s: str) -> str:
 # Board status table from signals
 # ---------------------------------------------------------------------------
 
-DONE_STATUSES: frozenset[str] = frozenset({"done", "closed", "resolved", "won't fix", "wont fix", "rejected"})
-
-
 def _board_status_rows(signals: dict) -> str:
-    sprints = signals.get("all_sprints", [])
-    issues = signals.get("issues", [])
-    today = date.today()
-
-    total = len(issues)
-    done_n = sum(1 for i in issues if i.get("status", "").lower() in DONE_STATUSES)
-    in_progress = sum(1 for i in issues if i.get("status", "").lower() in ("in progress", "in review", "review"))
-    not_started = total - done_n - in_progress
-
+    """Sprint rows: points and issue count per lane (pending / in progress / review / done), total and days left."""
     rows = ""
-    seen_sprint_ids: set = set()
-    for s in sprints:
-        sid = s.get("id")
-        board = _esc(s.get("board", "—"))
-        sprint_name = _esc(s.get("name", "—"))
-        end_date_str = s.get("end_date", "")
-        days_left = "?"
-        if end_date_str:
-            try:
-                end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-                days_left = str((end_dt.date() - today).days)
-            except ValueError:
-                pass
-
-        if sid in seen_sprint_ids:
-            # Same sprint, different board — show board alias
-            rows += f"<tr><td>{board}</td><td><em>shared: {sprint_name}</em></td><td colspan='5' class='text-muted'>same issue pool as above</td></tr>"
-        else:
-            seen_sprint_ids.add(sid)
-            rows += (
-                f"<tr><td>{board}</td><td>{sprint_name}</td>"
-                f"<td class='text-center'>{total}</td>"
-                f"<td class='text-center text-success'>{done_n}</td>"
-                f"<td class='text-center text-warning'>{in_progress}</td>"
-                f"<td class='text-center'>{not_started}</td>"
-                f"<td class='text-center'>{days_left}</td></tr>"
-            )
+    for r in points.board_rows(signals, date.today()):
+        board, sprint = _esc(r["board"]), _esc(r["sprint"])
+        cells = "".join(f"<td class='text-center {_LANE_CLASS.get(lane, '')}'>{_esc(text)}</td>" for lane, text in r["cells"].items())
+        rows += f"<tr><td>{board}</td><td>{sprint}</td>{cells}<td class='text-center'><strong>{_esc(r['total'])}</strong></td><td class='text-center'>{_esc(r['days_left'])}</td></tr>"
     return rows
+
+
+def _people_rows(signals: dict) -> str:
+    rows = ""
+    for r in points.people_rows(signals):
+        cells = "".join(f"<td class='text-center {_LANE_CLASS.get(lane, '')}'>{_esc(text)}</td>" for lane, text in r["cells"].items())
+        rows += f"<tr><td>{_esc(r['person'])}</td>{cells}<td class='text-center'><strong>{_esc(r['total'])}</strong></td></tr>"
+    return rows
+
+
+def _people_section(signals: dict) -> str:
+    rows = _people_rows(signals)
+    note = points.unpointed_note(signals)
+    if not rows:
+        return ""
+    lanes = "".join(f"<th class='text-center'>{sprint_load.LANE_LABELS[lane].capitalize()}</th>" for lane in sprint_load.LANES)
+    return (f"<h3>Points by person</h3>\n<table class='table table-bordered table-sm'>\n<thead class='table-dark'><tr><th>Person</th>{lanes}"
+            f"<th class='text-center'>Total</th></tr></thead>\n<tbody>{rows}</tbody>\n</table>"
+            + (f"\n<p class='text-muted small'>{_esc(note)}</p>" if note else ""))
+
+
+_LANE_CLASS = {"in_progress": "text-warning", "review": "text-warning", "done": "text-success"}
 
 
 # ---------------------------------------------------------------------------
@@ -270,10 +260,11 @@ _HTML = """\
   <thead class="table-dark">
     <tr>
       <th>Board</th><th>Sprint</th>
-      <th class="text-center">Total</th>
+      <th class="text-center">Pending</th>
+      <th class="text-center">In progress</th>
+      <th class="text-center">Review</th>
       <th class="text-center">Done</th>
-      <th class="text-center">Active</th>
-      <th class="text-center">Not Started</th>
+      <th class="text-center">Total</th>
       <th class="text-center">Days Left</th>
     </tr>
   </thead>
@@ -281,6 +272,8 @@ _HTML = """\
     {board_rows}
   </tbody>
 </table>
+
+{people_section}
 
 {brief_html}
 
@@ -328,6 +321,7 @@ def main() -> None:
         report_date=report_date,
         generated_at=generated_at,
         board_rows=_board_status_rows(signals),
+        people_section=_people_section(signals),
         brief_html=brief_html,
         risk_section=risk_section,
     )

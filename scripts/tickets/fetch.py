@@ -5,7 +5,11 @@ Usage:
     python3 -m scripts.tickets.fetch --milestone "Sprint 12" [--repo owner/name] --out ready-out/tickets.json (GitHub)
     python3 -m scripts.tickets.fetch PROJ-123 https://github.com/o/r/issues/42 --out tickets.json
 
-Scope: refs, or one of --sprint / --label / --milestone / --jql. Done tickets are skipped unless --include-done (an explicit --jql is used as written).
+Scope: refs, or one of --sprint / --label / --milestone / --jql. For a sprint or milestone the finished tickets are read too, because they
+are the velocity: `load` holds story points per lane (pending / in_progress / review / done, unpointed tickets named), and for a Jira sprint
+carry-over (tickets that were in earlier sprints) and, for a future sprint, the unfinished work of the active sprint that will roll over.
+Only unfinished tickets are listed in `tickets` (to be graded) unless --include-done; an explicit --jql is used as written.
+--check verifies the credentials and exits.
 Tracker: --tracker, else the refs' URLs, else DEFAULT_TRACKER. Credentials: JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN, or
 `gh auth`; GitHub repository: --repo or GH_ORG and GH_REPO; optional GH_PROJECT_NUMBER reads points from a Projects number field.
 With --out, every ticket is also written as <out dir>/tickets/<id>.txt (real line breaks, long lines wrapped): the file to read when
@@ -18,14 +22,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
+from scripts.common import jira_api
 from scripts.common.config import load_config
 from scripts.common.exit_codes import EXIT_BLOCKED, EXIT_USAGE
+from scripts.common.redact import redact
 from scripts.skill.flags import SkillFlags, resolve_tracker
-from scripts.tickets import github, jira
+from scripts.common.shell import run_cmd
+from scripts.tickets import config as readiness_config
+from scripts.tickets import github, jira, load
 from scripts.tickets.model import TicketError, unreadable
 
 JIRA_REQUIRED = ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
@@ -65,19 +74,39 @@ def connect(ref: str, tracker_flag: str, repo_flag: str, config: dict) -> tuple[
     return github.GitHubTickets(repo, config.get("GH_PROJECT_NUMBER", "")), number, tracker
 
 
-def _jira(args: argparse.Namespace, config: dict) -> tuple[list[dict], str]:
+def target_sprint(tickets: list[dict], wanted: str) -> tuple[dict | None, str]:
+    """The sprint being prepared, found in the tickets' Sprint fields by id (``--sprint 123``) or by name; (None, why) when absent or ambiguous."""
+    seen = {s["id"]: s for t in tickets for s in t["sprints"]}
+    found = [seen[int(wanted)]] if wanted.isdigit() and int(wanted) in seen else [s for s in seen.values() if s["name"] == wanted]
+    if len(found) > 1:
+        return None, f"carry-over was not computed: {len(found)} sprints are named '{wanted}' (ids {', '.join(str(s['id']) for s in found)}); pass the sprint id"
+    return (found[0], "") if found else (None, "")
+
+
+def _jira(args: argparse.Namespace, config: dict, overrides: dict) -> tuple[list[dict], str, dict]:
     missing = [k for k in JIRA_REQUIRED if not config.get(k)]
     if missing:
         raise TicketError(f"missing Jira credentials: {', '.join(missing)}", "access")
-    source = jira.JiraTickets(config)
+    source = jira.JiraTickets(config, overrides)
     if args.refs:
-        return [source.get(r) for r in args.refs], " ".join(args.refs)
-    query = jira.build_jql(sprint=args.sprint, label=args.label, project=args.project or config.get("JIRA_PROJECT", ""),
-                           jql=args.jql, include_done=args.include_done)
-    return source.search(query, args.limit), query
+        return [source.get(r) for r in args.refs], " ".join(args.refs), {}
+    project = args.project or config.get("JIRA_PROJECT", "")
+    query = jira.build_jql(sprint=args.sprint, label=args.label, project=project, jql=args.jql, include_done=args.include_done or bool(args.sprint))
+    tickets = source.search(query, args.limit)
+    extras: dict = {}
+    if args.sprint:  # the sprint being prepared: its finished tickets are read for the totals, its history for carry-over
+        target, note = target_sprint(tickets, args.sprint)
+        if target and args.label:
+            rollover, note = None, "pending rollover was not computed: --label narrows the scope, so unfinished work could not be compared with it"
+        elif target:
+            rollover, note = source.pending_rollover(target, {t["id"] for t in tickets}, project)
+        else:
+            rollover = None
+        extras = {"target": target, "rollover": rollover, "notes": [note] if note else []}
+    return tickets, query, extras
 
 
-def _github(args: argparse.Namespace, config: dict) -> tuple[list[dict], str]:
+def _github(args: argparse.Namespace, config: dict, overrides: dict) -> tuple[list[dict], str, dict]:
     project = config.get("GH_PROJECT_NUMBER", "")
     default_repo = repo_of(args.repo, config)
     if args.refs:
@@ -89,22 +118,61 @@ def _github(args: argparse.Namespace, config: dict) -> tuple[list[dict], str]:
                 tickets.append(unreadable("github", ref, str(e)))
                 continue
             tickets.append(client.get(number))
-        return tickets, " ".join(args.refs)
+        return tickets, " ".join(args.refs), {}
     if args.jql:
         raise ValueError("--jql is Jira only")
     milestone = args.milestone or args.sprint  # GitHub has no sprints: the milestone is the sprint
-    tickets = github.GitHubTickets(default_repo, project).search(label=args.label, milestone=milestone, include_done=args.include_done, limit=args.limit)
-    return tickets, f"{default_repo} label={args.label} milestone={milestone}".strip()
+    tickets = github.GitHubTickets(default_repo, project, overrides).search(
+        label=args.label, milestone=milestone, include_done=args.include_done or bool(milestone), limit=args.limit)
+    extras = {"target": None, "rollover": None} if milestone else {}
+    return tickets, f"{default_repo} label={args.label} milestone={milestone}".strip(), extras
+
+
+GITHUB_NO_HISTORY = "carry-over and rollover are not computed for GitHub: an issue's earlier milestones are not part of the issue data"
 
 
 def collect(args: argparse.Namespace, config: dict) -> dict:
     tracker = detect_tracker(args.refs, args.tracker, config)
-    tickets, scope = (_jira if tracker == "jira" else _github)(args, config)
+    overrides = readiness_config.load_config().lanes
+    tickets, scope, extras = (_jira if tracker == "jira" else _github)(args, config, overrides)
     truncated = not args.refs and len(tickets) >= args.limit
     if truncated:
         print(f"[tickets] warning: {len(tickets)} tickets is the --limit; the scope may hold more. Re-run with a higher --limit.", file=sys.stderr)
-    return {"tracker": tracker, "scope": scope, "count": len(tickets), "truncated": truncated, "tickets": tickets,
+    sprint_scope = "target" in extras
+    graded = [t for t in tickets if args.include_done or t["lane"] != "done" or t["fetch_error"]] if sprint_scope else tickets
+    readable = [t for t in tickets if not t["fetch_error"]]
+    summary = None
+    if not args.refs:
+        summary = load.sprint_summary(readable, extras.get("target"), extras.get("rollover"), no_history=GITHUB_NO_HISTORY if tracker == "github" else load.NO_HISTORY)
+        summary["notes"] += extras.get("notes", [])
+        summary["unreadable"] = [t["id"] for t in tickets if t["fetch_error"]]
+        if summary["unreadable"]:
+            summary["notes"].append(f"{len(summary['unreadable'])} ticket(s) could not be read and are not in these totals: {', '.join(summary['unreadable'][:12])}")
+    return {"tracker": tracker, "scope": scope, "count": len(tickets), "evaluated": len(graded), "truncated": truncated, "load": summary, "tickets": graded,
             "errors": [{"id": t["id"], "error": t["fetch_error"]} for t in tickets if t["fetch_error"]]}
+
+
+def check(args: argparse.Namespace, config: dict) -> int:
+    """--check: the credentials work (so a sprint-sized run does not fail halfway). Prints who is authenticated; never a token."""
+    tracker = detect_tracker([], args.tracker, config)
+    try:
+        if tracker == "jira":
+            missing = [k for k in JIRA_REQUIRED if not config.get(k)]
+            if missing:
+                raise TicketError(f"missing Jira credentials: {', '.join(missing)}", "access")
+            user = jira_api.whoami(config)
+        else:
+            user = run_cmd(["gh", "api", "user", "--jq", ".login"], timeout=60).stdout.strip()
+    except jira_api.JiraError as e:
+        print(json.dumps({"ok": False, "tracker": tracker, "error": f"the Jira credentials do not work: {e}"}))
+        return EXIT_BLOCKED
+    except (TicketError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        stderr = getattr(e, "stderr", "")  # a command's output may carry a token; our own messages name variables only
+        detail = (redact(str(stderr)) if stderr else str(e)).strip()[:200]
+        print(json.dumps({"ok": False, "tracker": tracker, "error": f"the {tracker} credentials do not work: {detail}"}))
+        return EXIT_BLOCKED
+    print(json.dumps({"ok": True, "tracker": tracker, "user": user}))
+    return 0
 
 
 READABLE_LINE = 1200  # lines longer than this are wrapped in the text files (the model's file reader cuts very long lines)
@@ -168,7 +236,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--include-done", action="store_true")
     p.add_argument("--limit", type=int, default=200)
     p.add_argument("--out", default="")
+    p.add_argument("--check", action="store_true", help="verify the credentials and exit")
     a = p.parse_args(argv)
+    if a.check:
+        try:
+            return check(a, load_config())
+        except ValueError as e:
+            print(json.dumps({"error": str(e)}))
+            return EXIT_USAGE
     scopes = [bool(a.sprint), bool(a.label), bool(a.milestone), bool(a.jql)]
     if (not a.refs and not any(scopes)) or (a.refs and any(scopes)) or (a.jql and sum(scopes) > 1) or (a.milestone and a.sprint):
         print(json.dumps({"error": "give ticket refs, or --jql alone, or --sprint / --label (Jira) or --milestone / --label (GitHub)"}))
@@ -184,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     except TicketError as e:
         print(json.dumps({"error": str(e), "kind": e.kind}))
         return EXIT_BLOCKED
-    if not result["tickets"]:
+    if not result["count"]:
         print(json.dumps({"error": f"no tickets matched ({result['scope']}); check the sprint, label or milestone name"}))
         return EXIT_BLOCKED
     if a.out:
@@ -193,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     text = json.dumps(result, indent=2)
     if a.out:
         Path(a.out).write_text(text, encoding="utf-8")
-        print(f"[tickets] wrote {a.out} (tracker={result['tracker']} tickets={result['count']} unreadable={len(result['errors'])})")
+        print(f"[tickets] wrote {a.out} (tracker={result['tracker']} tickets={result['count']} to grade={result['evaluated']} unreadable={len(result['errors'])})")
     else:
         print(text)
     return 0

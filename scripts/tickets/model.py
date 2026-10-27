@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from scripts.common.sprint_load import lane_of
 from scripts.tickets.sections import has_plan
 from scripts.tickets.signals import signals
 
@@ -18,15 +19,19 @@ class TicketError(RuntimeError):
 def new_ticket(*, tracker: str, id: str, url: str, title: str, description: str, status: str, status_category: str,
                issue_type: str = "issue", assignee: str | None = None, labels: list[str] | None = None, parent: dict | None = None,
                is_subtask: bool = False, blocked_by: list[str] | None = None, story_points: dict, comments: list[str] | None = None,
-               sprint: str | None = None, environment: str = "") -> dict:
-    """A normalized ticket. ``status_category`` is ``todo``, ``in_progress`` or ``done``; ``blocked`` is derived from labels and links."""
+               sprint: str | None = None, environment: str = "", sprints: list[dict] | None = None,
+               lane_overrides: dict | None = None) -> dict:
+    """A normalized ticket. ``status_category`` is ``todo``, ``in_progress`` or ``done``; ``lane`` (pending / in_progress / review / done)
+    comes from the status (see ``scripts.common.sprint_load``); ``blocked`` is derived from labels, links and a Blocked status;
+    ``sprints`` are the sprints the ticket has been in ({id, name, state, board_id}), oldest ids first."""
     labels = labels or []
     blocked_by = blocked_by or []
     all_comments = [c.strip() for c in (comments or []) if c and c.strip()]
     return {
         "tracker": tracker, "id": id, "url": url, "title": title, "type": issue_type, "status": status, "status_category": status_category,
         "assignee": assignee, "labels": labels, "sprint": sprint, "parent": parent, "is_subtask": is_subtask,
-        "blocked": bool(blocked_by) or any(l.lower() in ("blocked", "status: blocked", "status/blocked") for l in labels),
+        "blocked": bool(blocked_by) or status.strip().lower() == "blocked" or any(l.lower() in ("blocked", "status: blocked", "status/blocked") for l in labels),
+        "lane": lane_of(status, status_category, lane_overrides), "sprints": sprints or [], "carry_over": {"times": 0, "from_sprints": []},
         "blocked_by": blocked_by, "in_flight": status_category == "in_progress",
         "story_points": story_points, "description": description, "signals": signals(description), "has_impl_plan": has_plan(description),
         "description_chars": len(description), "comments": all_comments, "comments_total": len(all_comments), "environment": environment,

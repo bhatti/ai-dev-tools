@@ -41,7 +41,15 @@ class TestPerPrTable:
         assert row["Major/Critical"] == "5 (ai 2 · bot 2 · human 1)"
         assert row["Commits"] == "6"
         assert row["Reviewers"] == "1/1 ✅ · 1 🤖"
-        assert row["Title"] == "Add \\| pipe"
+        assert "Title" not in row   # the title is the PR link's hover text, not a column
+        assert row["PR"] == '[#12](https://x/pull/12 "Add \\| pipe")'   # a pipe is escaped so the tooltip cannot end the cell
+
+    def test_the_pr_and_jira_links_carry_the_title_and_the_jira_summary_as_tooltips(self):
+        p = pr(title='Fix "quoted"\n title', jira_key="PROJ-9", jira_url="https://j/browse/PROJ-9", jira_summary="Login fails on SSO")
+        assert pm.REGISTRY["pr"].cell(p, {}) == '[#12](https://x/pull/12 "Fix \'quoted\' title")'
+        assert pm.REGISTRY["jira"].cell(p, {}) == '[PROJ-9](https://j/browse/PROJ-9 "Login fails on SSO")'
+        assert pm.REGISTRY["pr"].cell(pr(title=""), {}) == "[#12](https://x/pull/12)"
+        assert len(pm.tooltip("x" * 1000)) == pm.TOOLTIP_MAX
 
     def test_unfetched_signals_are_dashes_and_failed_ones_are_na(self):
         no_sig = dict(zip([pm.REGISTRY[c].header for c in pm.TABLE_COLUMNS], cells(pm.build_pr_table([pr(signals=None, ai_findings=None)])[2])))
@@ -108,7 +116,7 @@ class TestSignalsPlumbing:
         assert [p.get("signals", {}).get("x") for p in prs] == [1, 2, 3, None] and prs[1]["ai_findings"] == {"major": 1}
 
     def test_needs_follow_the_columns_shown(self):
-        assert pm.needs_for(["pr", "title"]) == set()
+        assert pm.needs_for(["pr", "category"]) == set()
         assert pm.needs_for(pm.STANDUP_COLUMNS) == {"reviewers", "comments", "tasks"}
         assert pm.needs_for(pm.TABLE_COLUMNS) == {"reviewers", "comments", "tasks", "commits"}
 
@@ -139,3 +147,24 @@ def test_every_review_metric_is_a_row_of_the_shared_skill_definition_table():
     for metric_id in ("comments", "tasks", "major", "reviewers", "commits"):
         label = pm.REGISTRY[metric_id].label
         assert label in rows, f"{metric_id}: '{label}' is not a row of the definition table in shared/pr-metrics.md"
+
+
+class TestSloppinessRows:
+    def _rows(self, **kw):
+        return {c[0]: c[1:] for c in (cells(l) for l in pm.build_single_pr_metrics(pr(**kw), ("verbosity", "high_cc"))[2:])}
+
+    def test_assessed_values_are_graded_with_the_shared_sloppiness_thresholds(self):
+        rows = self._rows(sloppiness={"verbosity_pct": 35, "high_cc_functions": 2})
+        assert rows["Verbosity (added lines)"][0] == "35%" and rows["Verbosity (added lines)"][2] == "🔴"
+        assert rows["High-CC functions (CC>10)"][0] == "2" and rows["High-CC functions (CC>10)"][2] == "🟡"
+        assert self._rows(sloppiness={"verbosity_pct": 12, "high_cc_functions": 0})["Verbosity (added lines)"][2] == "🟢"
+
+    def test_an_unassessed_value_is_a_dash_never_zero(self):
+        for sloppiness in (None, {}, {"verbosity_pct": None, "high_cc_functions": None}, {"verbosity_pct": True}):
+            rows = self._rows(sloppiness=sloppiness)
+            assert rows["Verbosity (added lines)"][0] == "—" and "Not assessed" in rows["Verbosity (added lines)"][3]
+            assert rows["High-CC functions (CC>10)"][0] == "—"
+
+
+def test_a_title_ending_in_a_backslash_cannot_escape_the_closing_quote():
+    assert pm.link_with_tip("#1", "https://x/1", "path C:\\dir\\") == '[#1](https://x/1 "path C:\\dir")'

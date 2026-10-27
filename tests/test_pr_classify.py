@@ -116,7 +116,7 @@ class TestClassifyPrType:
 
     def test_jira_summary_used_when_title_is_bare_key(self):
         # BB PRs from gather_pr_queue store Jira key as title; jira_summary has the real text
-        pr = {"title": "PROJ-44875", "jira_summary": "[Flaky Test] fix test instability in auth"}
+        pr = {"title": "PROJ-875", "jira_summary": "[Flaky Test] fix test instability in auth"}
         assert classify_pr_type(pr) == "test"
 
     def test_flaky_test_title_is_test_not_bug(self):
@@ -663,7 +663,7 @@ class TestBuildPrMetricsTable:
                 "complexity": "low", "is_hotspot": False}]
         lines = build_pr_metrics_table(prs)
         header = lines[2]
-        for col in ["Status", "PR", "Title", "Category", "Type", "Blast", "Risk", "LOC", "Files", "CI", "Age", "Reviewers", "Issues"]:
+        for col in ["Status", "PR", "Category", "Type", "Blast", "Risk", "LOC", "Files", "CI", "Age", "Reviewers", "Issues"]:
             assert col in header, f"Missing column: {col}"
         assert "Hotspot" not in header, "Hotspot is shown as 🔥 prefix on Category, not a separate column"
 
@@ -821,12 +821,17 @@ class TestBuildMetricsDashboard:
         result = build_metrics_dashboard(prs)
         assert "≤1d elite" in result
 
-    def test_dora_rows_absent_without_merged_data(self):
-        # Open PRs with no merged_at → compute_throughput_metrics returns {} → no DORA rows
-        prs = [self._pr(), self._pr(), self._pr()]
+    def test_dora_rows_say_why_without_merged_data(self):
+        # Open PRs have no merged_at: the four rows stay, as n/a with the reason, so every report has the same rows
+        result = build_metrics_dashboard([self._pr(), self._pr(), self._pr()])
+        for name in ("Deployment Frequency", "Change Failure Rate", "Lead Time (P50)", "PR Survival Rate"):
+            assert f"| {name} | n/a |" in result
+        assert "Needs 3+ merged PRs with dates in the report (0 here)" in result
+
+    def test_defect_rate_and_feature_bug_ratio_come_from_every_batch(self):
+        prs = [{**self._pr(), "pr_type": t} for t in ("bug", "feature", "feature", "feature", "security")]
         result = build_metrics_dashboard(prs)
-        assert "Deployment Frequency" not in result
-        assert "Lead Time (P50)" not in result
+        assert "| Defect Rate (proxy) | 40.0% (2/5) |" in result and "| Feature:Bug Ratio | 1.5:1 (3 feature / 2 bug) |" in result
 
 
 # ---------------------------------------------------------------------------
@@ -988,3 +993,50 @@ class TestPrMetricsTableNewColumns:
         lines = build_pr_metrics_table([pr])
         text = "\n".join(lines)
         assert "PENDING" in text
+
+
+class TestReviewRowsNeedAnalysedComments:
+    def _pr(self, **kw):
+        return {"pr_number": 1, "state": "open", "pr_type": "feature", "total_loc": 10, "has_substantive_review": False,
+                "approvers": ["bob"], "rubber_stamp_approvers": [], **kw}
+
+    def _rows(self, prs):
+        return {l.split("|")[1].strip(): l for l in build_metrics_dashboard(prs).splitlines() if l.startswith("| ")}
+
+    def test_prs_whose_comments_were_never_analysed_are_n_a_not_a_red_zero(self):
+        rows = self._rows([self._pr(), self._pr()])
+        assert "| Review Coverage | n/a |" in rows["Review Coverage"] and "| Rubber-Stamp Rate | n/a |" in rows["Rubber-Stamp Rate"]
+
+    def test_analysed_prs_count_and_the_rest_are_left_out(self):
+        rows = self._rows([self._pr(review_depth_known=True, has_substantive_review=True), self._pr(review_depth_known=True), self._pr()])
+        assert "| Review Coverage | 1/2 (50.0%) |" in rows["Review Coverage"]
+
+    def test_review_signals_stand_in_for_the_comment_analysis(self):
+        sig = {"groups": ["comments"], "comments_human": 3, "comments_bot": 0}
+        quiet = {"groups": ["comments"], "comments_human": 0, "comments_bot": 2}
+        rows = self._rows([self._pr(signals=sig), self._pr(signals=quiet)])
+        assert "| Review Coverage | 1/2 (50.0%) |" in rows["Review Coverage"]
+
+
+class TestDashboardRowsAreUniqueAndAboutOpenWork:
+    def _pr(self, **kw):
+        return {"pr_number": 1, "pr_type": "feature", "total_loc": 10, "created_at": "2020-01-01T00:00:00Z", **kw}
+
+    def _names(self, text):
+        return [l.split("|")[1].strip() for l in text.splitlines() if l.startswith("| ") and not l.startswith("| Metric")]
+
+    def test_a_model_row_with_a_computed_name_does_not_duplicate_it_but_fills_an_na(self):
+        prs = [self._pr(state="open", review_depth_known=True, has_substantive_review=True, approvers=["a"], rubber_stamp_approvers=["a"])]
+        out = build_metrics_dashboard(prs, extra_rows=[("Stale PRs (>7d)", "99", "0", "🔴", "model"), ("Rubber-Stamp Rate", "5%", "≤10%", "🟢", "model"), ("Spec Coverage", "80%", "≥80%", "🟢", "m")])
+        names = self._names(out)
+        assert len(names) == len(set(names))
+        assert "| Stale PRs (>7d) | 1/1 |" in out and "99" not in out        # computed wins
+        out2 = build_metrics_dashboard([self._pr(state="open")], extra_rows=[("Rubber-Stamp Rate", "5.0%", "≤10%", "🟢", "model")])
+        assert "| Rubber-Stamp Rate | 5.0% |" in out2 and "| Rubber-Stamp Rate | n/a |" not in out2   # computed was n/a: the model's value fills it
+
+    def test_stale_and_avg_age_count_open_prs_only(self):
+        prs = [self._pr(state="merged", merged_at="2020-01-02T00:00:00Z") for _ in range(4)] + [self._pr(state="open", created_at=None, age_hours=48)]
+        out = build_metrics_dashboard(prs)
+        assert "| Stale PRs (>7d) | 0/1 |" in out and "| Avg Age | 2d |" in out
+        assert "| Stale PRs (>7d) | n/a |" in build_metrics_dashboard([self._pr(state="merged", merged_at="2020-01-02T00:00:00Z")])
+        assert build_stale_pr_table(prs) == []

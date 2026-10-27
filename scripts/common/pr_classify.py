@@ -28,7 +28,8 @@ from statistics import median
 # Shared helpers re-exported from pr_metadata (single source of truth).
 # Import here at module level — no circular risk since pr_metadata imports
 # pr_classify only lazily inside function bodies (enrich_pr_fast, enrich_pr_full).
-from scripts.common.pr_metrics import PR_TYPE_EMOJI, RISK_EMOJI, age_days as pr_age_days, aggregate_rows, build_pr_table
+from scripts.common import defect_origin
+from scripts.common.pr_metrics import PR_TYPE_EMOJI, RISK_EMOJI, age_days as pr_age_days, aggregate_rows, build_pr_table, link_with_tip
 from scripts.common.pr_metadata import (
     format_pr_status,  # noqa: F401 — re-exported; callers import from pr_classify
     _size_bucket as _size_bucket_fn,
@@ -712,16 +713,94 @@ def build_work_type_distribution(prs: list[dict]) -> list[str]:
     return lines
 
 
-def _ci_emoji(ci_status: str) -> str:
-    return {"pass": "✅", "fail": "❌", "pending": "⏳"}.get(ci_status, "-")
-
-
 def build_pr_metrics_table(prs: list[dict]) -> list[str]:
     """Per-PR metrics table with the canonical column set (``pr_metrics.TABLE_COLUMNS``), highest risk first."""
     if not prs:
         return []
     ordered = sorted(prs, key=lambda p: -p.get("risk_score", 0))
     return ["### Per-PR Metrics", "", *build_pr_table(ordered, index=True), ""]
+
+
+DASHBOARD_HEADING = r"(?:metrics dashboard|process metrics|claude-assessed[^\n]*)"
+DASHBOARD_SECTION_RE = re.compile(rf"^#{{1,6}}[^\n]*{DASHBOARD_HEADING}[^\n]*\n.*?(?=^#{{1,6}} |\Z)", re.IGNORECASE | re.MULTILINE | re.DOTALL)
+PRECOMPUTED_HEADING = "## Pre-Computed PR Metrics Summary"
+
+
+def extract_and_strip_metrics_tables(md: str) -> tuple[str, list[tuple]]:
+    """Remove the metrics tables of an audit report and return the model-written rows.
+
+    The pipeline appends one regenerated summary with one dashboard, so what is removed here is (a) a previously
+    appended summary (a re-run) and (b) dashboard-style sections the model wrote ("Metrics Dashboard",
+    "Process Metrics", "Claude-Assessed ..."). Rows are ``(metric, value, benchmark, signal, description)`` from (b)
+    only: (a) is recomputed. Other sections that merely mention metrics (design metrics, discussion) stay.
+    """
+    cut = md.find(PRECOMPUTED_HEADING)
+    if cut != -1:
+        md = md[:cut].rstrip() + "\n"
+    rows: list[tuple] = []
+
+    def take(m: re.Match) -> str:
+        found = []
+        for line in m.group(0).splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if line.lstrip().startswith("|") and len(cells) == 5 and cells[0].lower() != "metric" and not set(cells[0]) <= set("-: "):
+                found.append(tuple(cells))
+        if not found:
+            return m.group(0)
+        rows.extend(found)
+        return ""
+
+    return DASHBOARD_SECTION_RE.sub(take, md), rows
+
+
+_NO_COMMENTS = "Needs the PRs' comment history, which this report did not analyse"
+
+
+def _row_key(name: str) -> str:
+    """A dashboard metric name for matching: lower case, without a parenthetical or punctuation ("Stale PRs (>7d)" == "stale prs")."""
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"\(.*?\)", "", name.lower()))
+
+
+def _cfr_detail(throughput: dict) -> str:
+    d = throughput.get("change_failure_detail") or {}
+    evidenced = d.get("escaped", 0) - d.get("assumed", 0)
+    return f"{d.get('escaped', 0)}/{throughput.get('merged_count', 0)}; {evidenced} with evidence, {d.get('assumed', 0)} assumed"
+
+
+def _defect_origin_rows(prs: list[dict]) -> list[str]:
+    """Escaped (post-release) vs pre-release defect rows. A defect fix is assumed to fix released code unless the evidence says it was
+    caught before release, and the row says how much of the count is assumed."""
+    d = defect_origin.summarize(prs)
+    if not d["defects"]:
+        return ["| Escaped Defects (post-release) | 0 | 0 ideal | 🟢 | No bug, security or revert PRs in this report |"]
+    pct = round(d["escaped"] / len(prs) * 100, 1)
+    signal = "🟢" if pct <= 10 else ("🟡" if pct <= 25 else "🔴")
+    evidenced = d["escaped"] - d["assumed"]
+    return [
+        f"| Escaped Defects (post-release) | {d['escaped']}/{d['defects']} defect PRs ({pct}% of {len(prs)}) | ≤10% of PRs | {signal} | "
+        f"Defect fixes that fix released code: {d['high']} high, {d['medium']} medium, {d['low']} low confidence; {evidenced} backed by evidence "
+        f"(hotfix/incident label or branch, revert, regression/production wording), {d['assumed']} assumed because nothing says otherwise |",
+        f"| Pre-release Fixes | {d['pre_release']} | — | — | Defect fixes caught before release (found in review/QA/CI, or aimed at an unreleased feature branch) |",
+    ]
+
+
+def _is_open(pr: dict) -> bool:
+    """Not merged and not declined/closed (a PR without a state counts as open, as elsewhere in the dashboard)."""
+    return not pr.get("merged_at") and pr.get("state", "").lower() not in ("merged", "declined", "closed")
+
+
+def _reviewed(pr: dict) -> bool | None:
+    """Did a human review this PR? True/False from the analysed comments (substantive ones) or the review signals (any human comment);
+    None when neither was collected: the PR's own defaults say "no review", which is not a finding."""
+    if pr.get("review_depth_known"):
+        return bool(pr.get("has_substantive_review"))
+    s = pr.get("signals")
+    if isinstance(s, dict) and "comments" in s.get("groups", []) and not s.get("error") and "comments" not in s.get("group_errors", {}):
+        return s.get("comments_human", 0) > 0
+    return None
+
+
+_MIN_MERGED = 3  # merged PRs needed before the DORA rows mean anything
 
 
 def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> str:
@@ -796,66 +875,95 @@ def build_metrics_dashboard(prs: list[dict], extra_rows: list | None = None) -> 
         else:
             lines.append(f"| CI Pass Rate | N/A | ≥90% | — | CI status not available from bulk API |")
 
-        # Review Coverage
+        # Review Coverage / Rubber-Stamp: only for PRs whose comments were analysed (a PR's defaults say "no review", which is not a finding)
         reviewable = [p for p in prs if not p.get("is_bot_authored") and p.get("state", "").lower() != "declined"]
-        if reviewable:
-            substantive = sum(1 for p in reviewable if p.get("has_substantive_review"))
-            cov_pct = round(substantive / len(reviewable) * 100, 1)
+        reviewed = [(p, _reviewed(p)) for p in reviewable]
+        reviewed = [(p, r) for p, r in reviewed if r is not None]
+        if reviewed:
+            substantive = sum(1 for _, r in reviewed if r)
+            cov_pct = round(substantive / len(reviewed) * 100, 1)
             cov_signal = "🟢" if cov_pct >= 80 else ("🟡" if cov_pct >= 60 else "🔴")
-            lines.append(f"| Review Coverage | {substantive}/{len(reviewable)} ({cov_pct}%) | ≥80% | {cov_signal} | PRs with at least one substantive human review |")
+            lines.append(f"| Review Coverage | {substantive}/{len(reviewed)} ({cov_pct}%) | ≥80% | {cov_signal} | PRs with at least one substantive human review |")
+        else:
+            lines.append(f"| Review Coverage | n/a | ≥80% | — | {_NO_COMMENTS} |")
 
-        # Rubber-Stamp Rate
-        approved_prs = [p for p in prs if p.get("approvers") or p.get("review_decision") == "APPROVED"]
+        approved_prs = [p for p in prs if (p.get("approvers") or p.get("review_decision") == "APPROVED") and p.get("review_depth_known")]
         if approved_prs:
             rubber_stamp = sum(1 for p in approved_prs if p.get("rubber_stamp_approvers"))
             rs_pct = round(rubber_stamp / len(approved_prs) * 100, 1)
             rs_signal = "🟢" if rs_pct <= 10 else ("🟡" if rs_pct <= 30 else "🔴")
             lines.append(f"| Rubber-Stamp Rate | {rubber_stamp}/{len(approved_prs)} ({rs_pct}%) | ≤10% | {rs_signal} | Approvals with zero substantive review comments |")
+        else:
+            lines.append(f"| Rubber-Stamp Rate | n/a | ≤10% | — | {_NO_COMMENTS} |")
 
-        # Stale PRs
-        stale = sum(1 for p in prs if pr_age_days(p) > 7)
-        stale_signal = "🟢" if stale == 0 else ("🟡" if stale <= total * 0.2 else "🔴")
-        lines.append(f"| Stale PRs (>7d) | {stale}/{total} | 0 | {stale_signal} | PRs open longer than 7 days |")
+        # Stale PRs and Avg Age describe open work: a merged or declined PR is not "open for 299 days"
+        still_open = [p for p in prs if _is_open(p)]
+        if still_open:
+            stale = sum(1 for p in still_open if pr_age_days(p) > 7)
+            stale_signal = "🟢" if stale == 0 else ("🟡" if stale <= len(still_open) * 0.2 else "🔴")
+            lines.append(f"| Stale PRs (>7d) | {stale}/{len(still_open)} | 0 | {stale_signal} | Open PRs older than 7 days |")
+        else:
+            lines.append("| Stale PRs (>7d) | n/a | 0 | — | No open PRs in this report |")
 
         # Hotspot Count
         hotspots = sum(1 for p in prs if p.get("is_hotspot"))
         hotspot_signal = "🟢" if hotspots == 0 else ("🟡" if hotspots <= 2 else "🔴")
         lines.append(f"| Hotspot Count | {hotspots}/{total} | 0 | {hotspot_signal} | PRs touching sensitive paths (auth/billing/crypto) |")
 
-        # Avg Age
-        ages = [pr_age_days(p) for p in prs]
-        avg_age = round(sum(ages) / total) if total else 0
-        age_signal = "🟢" if avg_age <= 3 else ("🟡" if avg_age <= 7 else "🔴")
-        lines.append(f"| Avg Age | {avg_age}d | ≤3d | {age_signal} | Mean days since PR was opened |")
+        if still_open:
+            avg_age = round(sum(pr_age_days(p) for p in still_open) / len(still_open))
+            age_signal = "🟢" if avg_age <= 3 else ("🟡" if avg_age <= 7 else "🔴")
+            lines.append(f"| Avg Age | {avg_age}d | ≤3d | {age_signal} | Mean days since the open PRs were opened |")
+        else:
+            lines.append("| Avg Age | n/a | ≤3d | — | No open PRs in this report |")
 
-        # DORA / Throughput rows
+        # Defect rate and work mix: from pr_type, so they exist for open batches too (bug + security PRs over the batch)
+        type_counts = Counter(p.get("pr_type", "unknown") for p in prs)
+        bugs = defect_origin.summarize(prs)["defects"]   # bug + security fixes and reverts, the same set the origin rows split
+        defect_pct = round(bugs / total * 100, 1)
+        defect_signal = "🟢" if defect_pct <= 10 else ("🟡" if defect_pct <= 25 else "🔴")
+        lines.append(f"| Defect Rate (proxy) | {defect_pct}% ({bugs}/{total}) | ≤10% | {defect_signal} | Bug, security and revert PRs as % of the PRs in this report, whether the defect escaped or was caught before release |")
+        lines += _defect_origin_rows(prs)
+        features = type_counts.get("feature", 0)
+        ratio = f"{round(features / bugs, 1)}:1" if bugs else ("no bugs" if features else "N/A")
+        ratio_signal = "—" if not bugs else ("🟢" if features / bugs >= 3 else ("🟡" if features / bugs >= 1 else "🔴"))
+        lines.append(f"| Feature:Bug Ratio | {ratio} ({features} feature / {bugs} bug) | ≥3:1 | {ratio_signal} | Feature PRs per bug+security PR |")
+
+        # DORA / throughput rows: always shown; "n/a" says why when the batch cannot support them
         throughput = compute_throughput_metrics(prs)
-        if throughput:
-            deploy_freq = throughput.get("deployment_frequency", 0)
-            freq_signal = "🟢" if deploy_freq >= 5 else ("🟡" if deploy_freq >= 2 else "🔴")
-            lines.append(f"| Deployment Frequency | {deploy_freq}/wk | ≥5/wk | {freq_signal} | Merged PRs per week |")
+        merged_n = sum(1 for p in prs if p.get("merged_at") or p.get("state", "").lower() == "merged")
+        why = f"Needs {_MIN_MERGED}+ merged PRs with dates in the report ({merged_n} here)"
 
-            cfr = throughput.get("change_failure_rate_pct", 0)
-            cfr_signal = "🟢" if cfr <= 10 else ("🟡" if cfr <= 25 else "🔴")
-            lines.append(f"| Change Failure Rate | {cfr}% | ≤10% | {cfr_signal} | Bug+security PRs as % of merged |")
+        def dora(name: str, key: str, fmt, benchmark: str, signal_fn, description: str, gap: str = "") -> None:
+            if key in throughput:
+                value = throughput[key]
+                lines.append(f"| {name} | {fmt(value)} | {benchmark} | {signal_fn(value)} | {description} |")
+            else:
+                lines.append(f"| {name} | n/a | {benchmark} | — | {why if not throughput else gap} |")
 
-            if "lead_time_p50_days" in throughput:
-                lt = throughput["lead_time_p50_days"]
-                lt_signal = "🟢" if lt <= 1 else ("🟡" if lt <= 7 else "🔴")
-                lines.append(f"| Lead Time (P50) | {lt}d | ≤1d elite | {lt_signal} | Median days from PR opened to merged |")
+        dora("Deployment Frequency", "deployment_frequency", lambda v: f"{v}/wk", "≥5/wk",
+             lambda v: "🟢" if v >= 5 else ("🟡" if v >= 2 else "🔴"), "Merged PRs per week", "The merged PRs span less than half a week")
+        dora("Change Failure Rate", "change_failure_rate_pct", lambda v: f"{v}% ({_cfr_detail(throughput)})", "≤10%",
+             lambda v: "🟢" if v <= 10 else ("🟡" if v <= 25 else "🔴"),
+             "Merged defect fixes that fix released code (post-release) as % of merged; fixes of unreleased work do not count. Origin is estimated from labels, branches, text and target branch; evidence vs assumed in brackets", "No merged PRs")
+        dora("Lead Time (P50)", "lead_time_p50_days", lambda v: f"{v}d", "≤1d elite",
+             lambda v: "🟢" if v <= 1 else ("🟡" if v <= 7 else "🔴"), "Median days from PR opened to merged", "The merged PRs carry no opened/merged dates")
+        dora("PR Survival Rate", "pr_survival_rate_pct", lambda v: f"{v}%", "≥80%",
+             lambda v: "🟢" if v >= 80 else ("🟡" if v >= 60 else "🔴"), "Merged / (merged+declined)", "No merged or declined PRs")
 
-            survival = throughput.get("pr_survival_rate_pct", 0)
-            surv_signal = "🟢" if survival >= 80 else ("🟡" if survival >= 60 else "🔴")
-            lines.append(f"| PR Survival Rate | {survival}% | ≥80% | {surv_signal} | Merged / (merged+declined) |")
-
-    # Workflow-specific extra rows (appended last regardless of prs)
+    # Workflow-specific extra rows (appended last regardless of prs). A row the pipeline computed itself wins over a model-written
+    # one of the same name, unless the computed one is n/a (then the model's value replaces it): one row per metric.
     if extra_rows:
+        computed = {_row_key(l.split("|")[1]): i for i, l in enumerate(lines) if l.startswith("| ") and i > 3}
         for row in extra_rows:
-            if len(row) >= 5:
-                metric, value, benchmark, signal, description = row[0], row[1], row[2], row[3], row[4]
-                lines.append(f"| {metric} | {value} | {benchmark} | {signal} | {description} |")
-            elif len(row) == 4:
-                lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | |")
+            if len(row) < 4:
+                continue
+            text = f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4] if len(row) >= 5 else ''} |"
+            at = computed.get(_row_key(row[0]))
+            if at is None:
+                lines.append(text)
+            elif lines[at].split("|")[2].strip() == "n/a":
+                lines[at] = text
 
     lines.append("")
     return "\n".join(lines)
@@ -869,7 +977,7 @@ def compute_throughput_metrics(prs: list[dict]) -> dict:
     merged_at, created_at, pr_type, state.
     """
     merged = [p for p in prs if p.get("merged_at") or p.get("state", "").lower() == "merged"]
-    if len(merged) < 3:
+    if len(merged) < _MIN_MERGED:
         return {}
 
     def _to_dt(s: str | None):
@@ -902,9 +1010,10 @@ def compute_throughput_metrics(prs: list[dict]) -> dict:
         if span_weeks >= 0.5:
             deployment_freq = round(len(merged) / span_weeks, 1)
 
-    # CFR proxy: bug + security PRs as % of merged
-    failure_prs = [p for p in merged if p.get("pr_type") in ("bug", "security")]
-    cfr_pct = round(len(failure_prs) / len(merged) * 100, 1) if merged else 0.0
+    # Change failure rate (proxy): merged defect-fix PRs that fix released code (post-release), as % of merged. Fixes of work found
+    # before release do not count; the origin is estimated with a confidence (scripts.common.defect_origin).
+    defects = defect_origin.summarize(merged)
+    cfr_pct = round(defects["escaped"] / len(merged) * 100, 1) if merged else 0.0
 
     # Survival rate: merged / (merged + declined)
     declined_prs = [p for p in prs if p.get("state", "").lower() in ("declined", "closed") and not p.get("merged_at")]
@@ -913,6 +1022,8 @@ def compute_throughput_metrics(prs: list[dict]) -> dict:
 
     result: dict = {
         "change_failure_rate_pct": cfr_pct,
+        "change_failure_detail": defects,
+        "merged_count": len(merged),
         "pr_survival_rate_pct": survival_pct,
     }
     if deployment_freq is not None:
@@ -926,10 +1037,10 @@ def compute_throughput_metrics(prs: list[dict]) -> dict:
 def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:
     """Build a markdown table of PRs older than threshold_days.
 
-    Columns: PR | Title | Author | Age | Status | Risk
+    Columns: PR (the title is its hover text) | Author | Age | Status | Risk
     Sorted by age descending (oldest first).
     """
-    stale = [p for p in prs if pr_age_days(p) > threshold_days]
+    stale = [p for p in prs if _is_open(p) and pr_age_days(p) > threshold_days]
     if not stale:
         return []
 
@@ -940,14 +1051,13 @@ def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:
         "",
         f"**{len(stale)}** PR{'s' if len(stale) != 1 else ''} older than {threshold_days} days",
         "",
-        "| PR | Title | Author | Age | Status | Risk |",
-        "|----|-------|--------|-----|--------|------|",
+        "| PR | Author | Age | Status | Risk |",
+        "|----|--------|-----|--------|------|",
     ]
     for p in stale_sorted[:20]:
         pr_num = p.get("pr_number", p.get("number", p.get("id", "?")))
         pr_url = p.get("url", "")
-        pr_cell = f"[#{pr_num}]({pr_url})" if pr_url else f"#{pr_num}"
-        title = (p.get("title") or "")[:50]
+        pr_cell = link_with_tip(f"#{pr_num}", pr_url, p.get("title") or "") if pr_url else f"#{pr_num}"
         author = p.get("author", "—")
         age_days = pr_age_days(p)
         age_emoji = "⛔ " if age_days >= 60 else ("🔴 " if age_days >= 30 else ("🟡 " if age_days >= 14 else ""))
@@ -956,10 +1066,10 @@ def build_stale_pr_table(prs: list[dict], threshold_days: int = 7) -> list[str]:
         status = _status_full.split(" ", 1)[1] if " " in _status_full else _status_full
         risk_tier = p.get("risk_tier", "low")
         risk_emoji = RISK_EMOJI.get(risk_tier, "")
-        lines.append(f"| {pr_cell} | {title} | {author} | {age_cell} | {status} | {risk_emoji} {risk_tier} |")
+        lines.append(f"| {pr_cell} | {author} | {age_cell} | {status} | {risk_emoji} {risk_tier} |")
 
     if len(stale) > 20:
-        lines.append(f"| | _+{len(stale) - 20} more stale PRs_ | | | | |")
+        lines.append(f"| _+{len(stale) - 20} more stale PRs_ | | | | |")
     lines.append("")
     return lines
 

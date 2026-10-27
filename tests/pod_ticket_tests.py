@@ -15,7 +15,8 @@ from types import ModuleType
 SCRIPTS = [
     "scripts/tickets/__init__.py", "scripts/tickets/config.py", "scripts/tickets/fetch.py", "scripts/tickets/github.py", "scripts/tickets/jira.py",
     "scripts/tickets/model.py", "scripts/tickets/readiness.py", "scripts/tickets/sections.py", "scripts/tickets/signals.py",
-    "scripts/tickets/story_points.py", "scripts/tickets/write.py", "scripts/common/adf.py", "scripts/common/jira_api.py",
+    "scripts/tickets/story_points.py", "scripts/tickets/write.py", "scripts/tickets/load.py", "scripts/tickets/load_report.py",
+    "scripts/tickets/slack_text.py", "scripts/common/sprint_load.py", "scripts/common/adf.py", "scripts/common/jira_api.py",
     "scripts/common/http_retry.py", "scripts/common/claude_runner.py", "scripts/common/report_bundle.py", "scripts/common/redact.py",
     "scripts/common/pr_signals/github.py", "scripts/common/pr_signals/bitbucket.py",
     "tests/__init__.py", "tests/fakes/__init__.py", "tests/fakes/jira.py", "tests/fakes/ticket_story.py",
@@ -62,6 +63,9 @@ mark("READINESS_RC", r.returncode)
 res = json.load(open(f"{W}/reports/result.json"))
 mark("STATUSES", ",".join(f"{t['id']}={t['status']}" for t in res["tickets"]))
 mark("SIGNAL", json.loads(r.stdout.strip().splitlines()[-1])["signal"])
+load = res.get("load") or {}
+mark("LOAD_LANES", ",".join(f"{k}={v['count']}" for k, v in (load.get("lanes") or {}).items()))
+mark("LOAD_IN_REPORT", "## Sprint load" in open(f"{W}/reports/report.md").read())
 slack = open(f"{W}/reports/slack.md").read()
 mark("REPORT_FILES", ",".join(sorted(n for n in ("report.md", "report.html", "result.json", "slack.md") if os.path.exists(f"{W}/reports/{n}"))))
 mark("SLACK_SHORT_NO_TABLES", len(slack) < 3500 and not any(ln.lstrip().startswith("|") for ln in slack.splitlines()))
@@ -130,7 +134,7 @@ def build_tests(h: ModuleType) -> dict:
                 "STATUSES": "PROJ-1=READY,PROJ-2=NEEDS_AC_CLARIFICATION,PROJ-3=NEEDS_AC_WORK,PROJ-4=BLOCKED",
                 "REPORT_FILES": "report.html,report.md,result.json,slack.md", "SLACK_SHORT_NO_TABLES": "True",
                 "DRY_ACTION": "dry_run", "DRY_UNCHANGED": "True", "APPLY_ACTION": "appended", "KEPT_ORIGINAL": "True",
-                "SECOND_ACTION": "exists", "SECTIONS": "1", "UNPOINTED_RC": "3"})
+                "SECOND_ACTION": "exists", "SECTIONS": "1", "UNPOINTED_RC": "3", "LOAD_IN_REPORT": "True"})
             if err:
                 return h._fail(result, step, err)
         return h._pass(result, "fake Jira in the pod: fetch, verdicts, dry run changes nothing, apply appends once and keeps the original, a re-run does nothing, unpointed tickets are refused")

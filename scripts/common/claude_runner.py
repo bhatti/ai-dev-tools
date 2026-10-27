@@ -460,7 +460,7 @@ CLAUDE_ENV_VARS = {
     # Tracker credentials — needed by you-got-skills that call APIs via Bash
     "GH_TOKEN", "GITHUB_TOKEN",
     "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_HOST", "JIRA_API_TOKEN", "JIRA_AUTH",
-    "JIRA_PROJECT", "JIRA_STORY_POINT_FIELDS", "GH_PROJECT_NUMBER",
+    "JIRA_PROJECT", "JIRA_STORY_POINT_FIELDS", "GH_PROJECT_NUMBER", "SPRINT_LANES",
     "BITBUCKET_WORKSPACE", "BITBUCKET_REPO", "BITBUCKET_TOKEN", "BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD",
     "DEFAULT_TRACKER",
     # Slack — needed by skills that read standup channel signals

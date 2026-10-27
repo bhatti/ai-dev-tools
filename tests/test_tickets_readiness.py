@@ -15,9 +15,12 @@ POINTS = {"value": 3.0, "source": "Story Points", "known": True}
 UNSET = {"value": None, "source": "Story Points", "known": True}
 
 
-def ticket(id="PROJ-1", description=FULL_TEXT + "## Implementation Plan\nsteps", points=POINTS, **kw):
-    return new_ticket(tracker="jira", id=id, url=f"https://jira.example/browse/{id}", title=f"title {id}", description=description,
-                      status=kw.pop("status", "To Do"), status_category=kw.pop("status_category", "todo"), story_points=points, **kw)
+def ticket(id="PROJ-1", description=FULL_TEXT + "## Implementation Plan\nsteps", points=POINTS, sprints=None, carry_over=None, **kw):
+    t = new_ticket(tracker="jira", id=id, url=f"https://jira.example/browse/{id}", title=f"title {id}", description=description,
+                   status=kw.pop("status", "To Do"), status_category=kw.pop("status_category", "todo"), story_points=points, sprints=sprints, **kw)
+    if carry_over:
+        t["carry_over"] = carry_over
+    return t
 
 
 def grade(id="PROJ-1", why="pass", scope="pass", acs="pass", dod="pass", variants="na", **kw):
@@ -448,3 +451,96 @@ class TestActionsAndPreviews:
         rows = rd.evaluate([t], {"PROJ-1": grade(acs="missing")}, ReadinessConfig(), {})
         text = rd.render_slack(rows, {"tracker": "jira", "scope": "Sprint <!here>", "dry_run": False})
         assert "<!here>" not in text and "<!channel>" not in text and "<@U1>" not in text
+
+
+from scripts.tickets import load as sprint_load_mod  # noqa: E402
+
+
+def _fetched_with_load(tmp_path, capacity=None, tickets=None):
+    target = {"id": 30, "name": "Sprint 30", "state": "future", "board_id": 7}
+    S = lambda id, name: {"id": id, "name": name, "state": "closed", "board_id": 7}   # noqa: E731
+    t1 = ticket("PROJ-1", sprints=[S(28, "Sprint 28"), S(29, "Sprint 29"), target], status="To Do", status_category="todo")
+    t2 = ticket("PROJ-2", sprints=[target], status="In Review", status_category="in_progress", points={"value": 8.0, "source": "f", "known": True})
+    t3 = ticket("PROJ-3", sprints=[target], status="Done", status_category="done", points={"value": 5.0, "source": "f", "known": True})
+    all_tickets = [t1, t2, t3]
+    roll = {"from_sprint": "Sprint 29", "tickets": [{"id": "PROJ-9", "lane": "in_progress", "story_points": 3.0, "already_in_target": False}]}
+    summary = sprint_load_mod.sprint_summary(all_tickets, target=target, rollover=roll)
+    graded = tickets or [t for t in all_tickets if t["status_category"] != "done"]
+    (tmp_path / "t.json").write_text(json.dumps({"tracker": "jira", "scope": "s", "load": summary, "tickets": graded}))
+    (tmp_path / "g.json").write_text(json.dumps({"tickets": [grade(t["id"]) for t in graded]}))
+    args = ["--tickets", str(tmp_path / "t.json"), "--grades", str(tmp_path / "g.json"), "--out-dir", str(tmp_path / "reports")]
+    return args + (["--capacity", str(capacity)] if capacity is not None else [])
+
+
+class TestSprintLoadInTheReport:
+    def test_all_four_outputs_carry_the_load_and_the_line_is_a_concern_when_a_decision_is_open(self, tmp_path, capsys):
+        assert rd.main(_fetched_with_load(tmp_path, capacity=5)) == 0
+        reports = tmp_path / "reports"
+        md, slack = (reports / "report.md").read_text(), (reports / "slack.md").read_text()
+        assert md.index("## Sprint load") < md.index("## Ready") and "over by 6" in md and "### Hidden rollover" in md and "PROJ-9" in md
+        assert "*Sprint load*" in slack and "pending 3 pts (1) · in progress 0 pts (0) · review 8 pts (1) · done 5 pts (1) · total 16 pts (3)" in slack and "over by 6" in slack
+        result = json.loads((reports / "result.json").read_text())
+        assert result["load"]["lanes"]["review"]["points"] == 8.0 and result["load"]["capacity"] == 5.0
+        assert {f["flag"] for f in result["load"]["flags"]} >= {"over_capacity", "hidden_rollover", "chronic_carry_over"}
+        assert "Sprint load" in (reports / "report.html").read_text()
+        assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["signal"] == "DONE_WITH_CONCERNS"
+
+    def test_a_clean_sprint_with_no_open_decisions_is_still_done(self, tmp_path, capsys):
+        args = _fetched_with_load(tmp_path, capacity=100)
+        data = json.loads((tmp_path / "t.json").read_text())
+        data["load"]["pending_rollover"] = None
+        data["load"]["carry_over"] = None
+        data["load"]["notes"] = ["carry-over was not computed"]
+        (tmp_path / "t.json").write_text(json.dumps(data))
+        rd.main(args)
+        assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["signal"] == "DONE"
+
+    def test_no_load_in_the_fetch_means_no_load_section(self, tmp_path):
+        rd.main(cli_files(tmp_path, [ticket()], [grade()]))
+        assert "Sprint load" not in (tmp_path / "reports" / "report.md").read_text() and "Sprint load" not in (tmp_path / "reports" / "slack.md").read_text()
+
+    def test_action_items_include_the_team_and_tech_lead_decisions(self, tmp_path):
+        rd.main(_fetched_with_load(tmp_path))
+        md = (tmp_path / "reports" / "report.md").read_text()
+        assert "Team (carry-over decisions" in md and "Tech lead (unfinished work missing from this sprint):** PROJ-9" in md
+
+    def test_a_carried_over_ticket_says_so_on_its_card(self, tmp_path):
+        data = _fetched_with_load(tmp_path, tickets=[ticket("PROJ-1", description="Nice.", sprints=[], carry_over={"times": 2, "from_sprints": ["Sprint 28", "Sprint 29"]})])
+        (tmp_path / "g.json").write_text(json.dumps({"tickets": [grade("PROJ-1", acs="missing")]}))
+        rd.main(data)
+        assert "carried over 2× (Sprint 28, Sprint 29)" in (tmp_path / "reports" / "report.md").read_text()
+
+    def test_a_negative_or_unreadable_capacity_is_a_usage_error(self, tmp_path):
+        for bad in ("-5", "abc", "0", "inf", "nan"):
+            assert rd.main([*_fetched_with_load(tmp_path)[:6], "--capacity", bad]) == 2
+
+
+class TestQuestionsCarryTheirRecommendation:
+    def _md(self, tmp_path, **g):
+        t = ticket(description="Nice.")
+        (tmp_path / "t.json").write_text(json.dumps({"tracker": "jira", "scope": "s", "tickets": [t]}))
+        (tmp_path / "g.json").write_text(json.dumps({"tickets": [grade(acs="partial", **g)]}))
+        rd.main(["--tickets", str(tmp_path / "t.json"), "--grades", str(tmp_path / "g.json"), "--out-dir", str(tmp_path / "reports")])
+        return (tmp_path / "reports" / "report.md").read_text()
+
+    def test_a_question_shows_what_the_grader_recommends_and_why(self, tmp_path):
+        md = self._md(tmp_path, questions=[{"question": "Empty result: text or empty list?", "recommend": "text", "because": "the other lists show one"}, "Plain question?"])
+        assert "1. Empty result: text or empty list? _Recommend: text, because the other lists show one._" in md and "2. Plain question?" in md
+
+    def test_decisions_made_for_the_engineer_are_listed_for_confirmation(self, tmp_path):
+        md = self._md(tmp_path, decisions_made=["Empty result returns an empty list (unanswered; recommended)"])
+        assert "**Decisions made for you — confirm:**" in md and "Empty result returns an empty list" in md
+
+    def test_still_needed_findings_are_shown(self, tmp_path):
+        md = self._md(tmp_path, still_needed={"landed": "a1b2c3d", "duplicate_of": "PROJ-77", "spec_drift": "the design doc says X, the code does Y"})
+        assert "**Still needed?**" in md and "already merged: a1b2c3d" in md and "duplicate of PROJ-77" in md and "the design doc says X" in md
+
+    def test_malformed_questions_are_rejected_not_rendered_as_garbage(self, tmp_path):
+        (tmp_path / "t.json").write_text(json.dumps({"tracker": "jira", "scope": "s", "tickets": [ticket()]}))
+        for bad in ({"questions": "one string"}, {"questions": [{"recommend": "x"}]}, {"questions": [3]}, {"still_needed": "yes"}, {"decisions_made": "x"}):
+            (tmp_path / "g.json").write_text(json.dumps({"tickets": [grade(**bad)]}))
+            assert rd.main(["--tickets", str(tmp_path / "t.json"), "--grades", str(tmp_path / "g.json"), "--out-dir", str(tmp_path / "r")]) == 2
+
+    def test_landed_work_becomes_an_action_item(self, tmp_path):
+        md = self._md(tmp_path, still_needed={"landed": "a1b2c3d", "duplicate_of": None, "spec_drift": None})
+        assert "Engineers (work already landed" in md and "PROJ-1" in md.split("Engineers (work already landed")[1][:200]

@@ -371,7 +371,6 @@ class TestPromptTemplate:
         assert "🔥" in summary
         assert "Cat" in summary
         assert "Issue" in summary
-        assert "Title" in summary
         assert "[PROJ-1]" in summary
         assert "Pre-Computed PR Metrics Summary" in summary
 
@@ -709,20 +708,21 @@ keep me
 """
 
     def test_model_written_tables_are_lifted_out_with_their_rows(self):
-        from scripts.analyze.run_pr_audit import _extract_and_strip_metrics_tables
-        md, rows = _extract_and_strip_metrics_tables(self.MD)
+        from scripts.common.pr_classify import extract_and_strip_metrics_tables
+        md, rows = extract_and_strip_metrics_tables(self.MD)
         assert "| Metric |" not in md and "keep me" in md and "text" in md
         assert [r[0] for r in rows] == ["Spec coverage", "Rubber-stamp rate", "Verbosity Rate"]
         assert rows[0] == ("Spec coverage", "40%", "≥80%", "🔴", "linked issues")
 
     def test_sections_without_a_table_are_kept(self):
-        from scripts.analyze.run_pr_audit import _extract_and_strip_metrics_tables
-        md, rows = _extract_and_strip_metrics_tables("## Metrics discussion\nonly prose\n\n## Next\nx\n")
+        from scripts.common.pr_classify import extract_and_strip_metrics_tables
+        md, rows = extract_and_strip_metrics_tables("## Metrics discussion\nonly prose\n\n## Next\nx\n")
         assert "only prose" in md and rows == []
 
     def test_report_ends_with_exactly_one_dashboard_containing_every_row(self):
-        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude, _extract_and_strip_metrics_tables
-        md, rows = _extract_and_strip_metrics_tables(self.MD)
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude
+        from scripts.common.pr_classify import extract_and_strip_metrics_tables
+        md, rows = extract_and_strip_metrics_tables(self.MD)
         pr = {"number": 1, "state": "merged", "signals": {"groups": ["comments", "commits"], "truncated": [], "error": "",
                                                           "comments_human": 0, "comments_bot": 2, "major_comments_human": 0,
                                                           "major_comments_bot": 1, "commits": 3}}
@@ -734,16 +734,36 @@ keep me
 
 class TestReportAssembly:
     def test_a_second_pass_replaces_the_appended_summary_instead_of_duplicating_it(self):
-        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude, _extract_and_strip_metrics_tables
+        from scripts.analyze.run_pr_audit import _build_metrics_summary_with_claude
+        from scripts.common.pr_classify import extract_and_strip_metrics_tables
         pr = {"number": 1, "state": "merged"}
         first = "# Audit\n\n## Findings\nx\n\n" + _build_metrics_summary_with_claude([pr], [("Spec coverage", "40%", "≥80%", "🔴", "d")])
-        md, rows = _extract_and_strip_metrics_tables(first)
+        md, rows = extract_and_strip_metrics_tables(first)
         assert "Pre-Computed PR Metrics" not in md and "## Findings" in md and rows == []     # regenerated, not parsed back
         second = md + "\n\n" + _build_metrics_summary_with_claude([pr], [("Spec coverage", "40%", "≥80%", "🔴", "d")])
         assert second.count("### Metrics Dashboard") == 1 and second.count("Pre-Computed PR Metrics Summary") == 1
 
     def test_other_sections_that_mention_metrics_are_kept(self):
-        from scripts.analyze.run_pr_audit import _extract_and_strip_metrics_tables
+        from scripts.common.pr_classify import extract_and_strip_metrics_tables
         text = "# A\n\n## Design Metrics\n\n| Metric | Value | Benchmark | Signal | Description |\n|---|---|---|---|---|\n| SRP | 1 | 0 | 🟡 | d |\n\n## Metrics Dashboard\n\n| Metric | Value | Benchmark | Signal | Description |\n|---|---|---|---|---|\n| Spec | 1% | x | 🔴 | d |\n"
-        md, rows = _extract_and_strip_metrics_tables(text)
+        md, rows = extract_and_strip_metrics_tables(text)
         assert "## Design Metrics" in md and "| SRP |" in md and [r[0] for r in rows] == ["Spec"]
+
+
+class TestUnassessedMetricsAreShown:
+    def test_a_metric_the_model_left_null_is_listed_as_not_assessed_not_dropped(self, tmp_path):
+        import json
+        from scripts.analyze.run_pr_audit import _CLAUDE_METRIC_ROWS, _read_all_claude_metrics
+        (tmp_path / "pr_audit_findings.json").write_text(json.dumps({"metrics": {"verbosity_accumulation_rate": 12.0, "complexity_creep_pr_count": None}}))
+        rows = {r[0]: r for r in _read_all_claude_metrics(tmp_path)}
+        assert len(rows) == len(_CLAUDE_METRIC_ROWS)
+        assert rows["Verbosity Rate"][1] == "12.0%" and rows["Verbosity Rate"][3] == "🟡"
+        assert rows["Complexity Creep"][1:4] == ("—", "0 ideal", "—") and "Not assessed" in rows["Complexity Creep"][4]
+
+
+def test_a_value_that_is_not_a_number_is_not_assessed_not_a_green_zero(tmp_path):
+    import json
+    from scripts.analyze.run_pr_audit import _read_all_claude_metrics
+    (tmp_path / "pr_audit_findings.json").write_text(json.dumps({"metrics": {"rubber_stamp_rate": "n/a", "verbosity_accumulation_rate": ""}}))
+    rows = {r[0]: r for r in _read_all_claude_metrics(tmp_path)}
+    assert rows["Rubber-Stamp Rate"][1] == "—" and rows["Verbosity Rate"][1] == "—" and rows["Verbosity Rate"][3] == "—"

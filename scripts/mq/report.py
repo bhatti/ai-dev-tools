@@ -264,8 +264,9 @@ from scripts.common.pr_classify import (
     build_work_type_distribution as _build_work_type_distribution_shared,
     build_metrics_dashboard as _build_metrics_dashboard,
     build_stale_pr_table as _build_stale_pr_table,
-    compute_throughput_metrics as _compute_throughput_metrics,
+    classify_pr_type,
 )
+from scripts.common.defect_origin import summarize as _defect_origin_summary
 
 _RISK_TIER_ORDER: list[str] = ["high", "medium", "low"]
 
@@ -426,33 +427,12 @@ def _valley_of_calm_section(prs: list[dict], lanes: list[dict] | None = None) ->
                          f"| ready to merge |")
         lines.append("")
 
-    # Metrics Dashboard — consistent with pr-audit format
-    defect_pct_for_dash = round(n_bugs / total * 100, 1) if total else 0.0
-    cfr_signal = "🟢" if defect_pct_for_dash <= 10 else ("🟡" if defect_pct_for_dash <= 25 else "🔴")
-
-    feature_count_for_dash = type_counts.get("feature", 0)
-    fb_ratio = round(feature_count_for_dash / n_bugs, 1) if n_bugs else None
-    fb_signal = "🟢" if (fb_ratio is not None and fb_ratio >= 3) else ("🟡" if fb_ratio is not None else "—")
-    fb_value = f"{fb_ratio}:1" if fb_ratio is not None else "N/A"
-
+    # Metrics Dashboard — the shared one (defect rate, feature:bug and the DORA rows come from it)
     mq_extra_rows = [
         ("Queue Depth", str(total), "≤20", "🟢" if total <= 20 else "🔴", "Total PRs in the merge queue"),
-        ("CFR Proxy", f"{defect_pct_for_dash}%", "≤10% healthy", cfr_signal,
-         "Bug+security PRs as % of queue — proxy for change failure rate"),
-        ("Feature:Bug Ratio", fb_value, "≥3:1 healthy", fb_signal,
-         "Feature PRs / bug+security PRs — healthy teams ship more value than fixes"),
     ]
     if lanes:
         mq_extra_rows.append(("Lane Count", str(len(lanes)), "—", "—", "Active merge queue lanes"))
-    # DORA rows: computed from merged PRs; if queue has only open PRs, show N/A so the
-    # dashboard remains structurally consistent with pr-audit reports.
-    if not _compute_throughput_metrics(prs):
-        mq_extra_rows.extend([
-            ("Deployment Frequency", "N/A", "≥5/wk", "—", "Requires merged PR history (queue shows open PRs only)"),
-            ("Change Failure Rate", "N/A", "≤10%", "—", "Requires merged PR history (queue shows open PRs only)"),
-            ("Lead Time (P50)", "N/A", "≤1d elite", "—", "Requires merged PR history (queue shows open PRs only)"),
-            ("PR Survival Rate", "N/A", "≥80%", "—", "Requires merged PR history (queue shows open PRs only)"),
-        ])
     lines.append(_build_metrics_dashboard(prs, extra_rows=mq_extra_rows))
 
     # Stale / obsolete PR flagging — use shared builder (>14 days)
@@ -716,7 +696,11 @@ def _build_report(workspace: Path, pr_number: str, title: str) -> tuple[str, dic
             "created_at": scope.get("created_at", ""),
             "signals": _read_signals(pr_number, workspace),
             "ai_findings": _count_findings(_list) if (_ff or _rr) else None,
+            "sloppiness": (_ff or {}).get("sloppiness"),
+            "title": scope.get("title", ""), "description": scope.get("body", ""), "labels": scope.get("labels", []),
+            "branch": scope.get("branch", ""), "target_branch": scope.get("target_branch", ""),
         }
+        _pr_for_metrics["pr_type"] = classify_pr_type(_pr_for_metrics)   # decides whether the defect-origin row applies
         if risk:
             _pr_for_metrics.update(risk_score=risk.get("score", 0), risk_tier=risk.get("tier", "LOW"))
         sections.append("## PR Metrics")
@@ -1546,9 +1530,10 @@ def _build_mq_slack_summary(ctx: dict, all_prs: list[dict], lanes: list[dict]) -
         ages = [age_days(p) for p in all_prs]
         avg_age = round(sum(ages) / len(ages), 1) if ages else 0
         throughput_parts.append(f"{avg_age}d avg age")
-        cfr = round(len(bug_sec_prs) / len(all_prs) * 100, 1)
+        origin = _defect_origin_summary(all_prs)
+        cfr = round(origin["escaped"] / len(all_prs) * 100, 1)
         cfr_emoji = "✅" if cfr <= 10 else ("⚠️" if cfr <= 25 else "🔴")
-        throughput_parts.append(f"CFR proxy: {cfr}% {cfr_emoji}")
+        throughput_parts.append(f"queued post-release defect fixes: {cfr}% of queue ({origin['escaped']}, {origin['assumed']} assumed) {cfr_emoji} · {origin['pre_release']} pre-release")
     if throughput_parts:
         lines_out.append("*Throughput*: " + " · ".join(throughput_parts))
 

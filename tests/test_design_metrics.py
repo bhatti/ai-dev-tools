@@ -55,13 +55,13 @@ class TestRenderDesignMetricsTable:
         """avg_instability: null from Claude must not crash with TypeError."""
         lines = render_design_metrics_table(_full_metrics(avg_instability=None))
         text = "\n".join(lines)
-        assert "Avg instability (I)" in text
-        assert "0.00" in text  # falls back to 0.0
+        assert "| Avg instability (I) | — | < 0.5 (core) | — | not assessed |" in text   # unassessed is not 0.00
 
     def test_null_srp_violations_does_not_raise(self):
         lines = render_design_metrics_table(_full_metrics(srp_violations=None))
         text = "\n".join(lines)
-        assert "SRP violations" in text
+        assert "| SRP violations | — | 0 ideal | — | not assessed |" in text
+        assert "| DIP violations | 0 |" in text   # a reported zero is still a zero
 
     def test_null_adp_cycles_does_not_raise(self):
         lines = render_design_metrics_table(_full_metrics(adp_cycles=None))

@@ -36,6 +36,10 @@ if state.get("transient", 0) > 0:
 if state.get("garbage"):
     sys.stdout.write("<html>not json</html>"); sys.exit(0)
 
+if args[:2] == ["api", "user"]:
+    if state.get("whoami_fail"):
+        sys.stderr.write(state["whoami_fail"] + "\n"); sys.exit(1)
+    sys.stdout.write(state.get("whoami", "someone") + "\n"); sys.exit(0)
 if args[:2] == ["api", "graphql"]:
     if state.get("graphql_fail"):
         sys.stderr.write(state["graphql_fail"]); sys.exit(1)

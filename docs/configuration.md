@@ -87,7 +87,7 @@ Required only when running the Slack agent router (`scripts/slack/router.py`).
 
 ## Standup Variables
 
-Used by `scripts/standup/gather_jira.py` and `scripts/standup/synthesize.py`.
+Used by `scripts/standup/gather_jira.py`, `gather_gh.py` and `synthesize.py`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -95,6 +95,8 @@ Used by `scripts/standup/gather_jira.py` and `scripts/standup/synthesize.py`.
 | `STANDUP_TEAM_MEMBERS` | No | `""` | Comma/newline-separated list of display names to restrict standup output to. When empty, team is auto-derived from sprint board assignees. Example: `"Alice Smith,Bob Jones"`. |
 | `STANDUP_LOOKBACK_HOURS` | No | `26` | How many hours back to fetch Slack messages and activity for the standup context window. |
 | `STANDUP_STALE_DAYS` | No | `2` | Issues with no update older than this many days are flagged as stale. |
+| `GH_MILESTONE` | No | `""` | GitHub standup only (job variable `GHMilestone`, deploy flag `--gh-milestone`): the milestone that is the sprint. When set, open issues are limited to it and its closed issues are counted as done in the story-point totals. |
+| `SPRINT_LANES` | No | `""` | JSON that maps lanes to status names, e.g. `{"review": ["QA Ready"]}`, for workflows whose status names the defaults get wrong (pending / in progress / review / done). Standup and sprint-ready read it (set it in the credentials secret, `EXTRA_SECRET_VARS`); sprint-ready also reads `lanes:` in `.ygs/readiness.yml`, the standup only this variable. A malformed value is an error. |
 
 ### Board auto-discovery
 
@@ -252,5 +254,6 @@ The skill's shell (the Claude subprocess) does not inherit the whole pod environ
 |----------|----------|---------|-------------|
 | `JIRA_STORY_POINT_FIELDS` | No | any field named "Story point…" | Comma separated Jira field names or ids that hold story points |
 | `GH_PROJECT_NUMBER` | No | — | GitHub Projects (v2) number whose number field holds the points; without it, labels such as `sp:3` are used |
+| `SPRINT_LANES` | No | — | JSON lane overrides (see Standup Variables); `.ygs/readiness.yml` also takes `lanes:` and `carry_over_share` |
 
 Credentials are the usual `JIRA_*` and `GH_*` variables; per-project settings live in `.ygs/readiness.yml` (see [ticket readiness](ticket-readiness.md)).

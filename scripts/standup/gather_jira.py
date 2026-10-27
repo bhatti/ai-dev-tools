@@ -33,6 +33,8 @@ import requests
 
 from scripts.common.pr_metrics import STANDUP_COLUMNS, enrich_with_signals
 from scripts.common.config import load_config, get_workspace_dir
+from scripts.common import sprint_load
+from scripts.standup import points
 from scripts.standup.slack_client import get_standup_messages
 from scripts.standup.bb_helpers import get_open_prs
 
@@ -245,11 +247,45 @@ def get_active_sprint(config: dict, me: dict | None = None) -> dict | None:
     return sprints[0] if sprints else None
 
 
+def _get_all_pages(url: str, headers: dict, params: dict, label: str) -> list[dict] | None:
+    """Every issue of an agile endpoint (``startAt`` paging until ``total``); None when a page fails. A response without a numeric
+    ``total`` is taken as complete, so one request is made."""
+    issues: list[dict] = []
+    while True:
+        resp = requests.get(url, headers=headers, params={**params, "startAt": len(issues)}, timeout=30)
+        if not resp.ok:
+            print(f"[gather_jira] {label} error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+            return None
+        body = resp.json()
+        page = body.get("issues", [])
+        issues += page
+        total = body.get("total")
+        if not page or not isinstance(total, int) or len(issues) >= total:
+            return issues
+
+
+def _search_all(url: str, headers: dict, params: dict, label: str) -> list[dict] | None:
+    """Every issue of a ``/search/jql`` query (``nextPageToken`` paging); None when a page fails."""
+    issues: list[dict] = []
+    token = None
+    while True:
+        resp = requests.get(url, headers=headers, params={**params, **({"nextPageToken": token} if token else {})}, timeout=30)
+        if not resp.ok:
+            print(f"[gather_jira] {label} error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+            return None
+        body = resp.json()
+        issues += body.get("issues", [])
+        token = body.get("nextPageToken")
+        if not token or body.get("isLast") is True:
+            return issues
+
+
 def get_sprint_issues(
     config: dict,
     sprint_id: int | None = None,
     team_filter: list[str] | None = None,
     board_id: int | None = None,
+    extra_fields: str = "",
 ) -> list[dict]:
     """Fetch sprint issues for a board sprint or project-wide open sprints.
 
@@ -263,19 +299,16 @@ def get_sprint_issues(
     project = config.get("JIRA_PROJECT", "")
     base = _jira_base(config)
     headers = _jira_headers(config)
-    field_list = "summary,status,assignee,updated,labels,priority,comment"
+    field_list = "summary,status,assignee,updated,labels,priority,comment" + extra_fields
 
     if board_id is not None:
         # Board-scoped fetch: returns only issues currently on that board
         endpoint = f"{base}/rest/agile/1.0/board/{board_id}/issue"
         if sprint_id is not None:
             endpoint = f"{base}/rest/agile/1.0/sprint/{sprint_id}/issue"
-        params: dict = {"fields": field_list, "maxResults": 200}
-        resp = requests.get(endpoint, headers=headers, params=params, timeout=30)
-        if not resp.ok:
-            print(f"[gather_jira] board {board_id} issues error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+        issues = _get_all_pages(endpoint, headers, {"fields": field_list, "maxResults": 200}, f"board {board_id} issues")
+        if issues is None:
             return []
-        issues = resp.json().get("issues", [])
         for i in issues:
             i["_board_id"] = board_id
         return issues
@@ -292,19 +325,11 @@ def get_sprint_issues(
     else:
         jql = f"{sprint_clause} AND assignee is not EMPTY"
 
-    resp = requests.get(
-        f"{base}/rest/api/3/search/jql",
-        headers=headers,
-        params={"jql": jql, "fields": field_list, "maxResults": 200},
-        timeout=30,
-    )
-    if not resp.ok:
-        print(f"[gather_jira] sprint issues JQL error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
-        return []
-    return resp.json().get("issues", [])
+    issues = _search_all(f"{base}/rest/api/3/search/jql", headers, {"jql": jql, "fields": field_list, "maxResults": 200}, "sprint issues JQL")
+    return issues or []
 
 
-def search_open_issues(config: dict, team_filter: list[str] | None = None) -> list[dict]:
+def search_open_issues(config: dict, team_filter: list[str] | None = None, extra_fields: str = "") -> list[dict]:
     """JQL fallback when there is no active sprint. Scoped to team or all assignees."""
     project = config.get("JIRA_PROJECT", "")
     if not project:
@@ -318,20 +343,11 @@ def search_open_issues(config: dict, team_filter: list[str] | None = None) -> li
     jql = (
         f'project = "{project}" {assignee_clause} AND statusCategory != Done ORDER BY updated DESC'
     )
-    resp = requests.get(
-        f"{_jira_base(config)}/rest/api/3/search/jql",
-        headers=_jira_headers(config),
-        params={
-            "jql": jql,
-            "maxResults": 100,
-            "fields": "summary,status,assignee,updated,labels,priority,comment",
-        },
-        timeout=30,
+    issues = _search_all(
+        f"{_jira_base(config)}/rest/api/3/search/jql", _jira_headers(config),
+        {"jql": jql, "maxResults": 100, "fields": "summary,status,assignee,updated,labels,priority,comment" + extra_fields}, "search",
     )
-    if not resp.ok:
-        print(f"[gather_jira] search error {resp.status_code}: {resp.text}", file=sys.stderr)
-        return []
-    return resp.json().get("issues", [])
+    return issues or []
 
 
 def search_my_open_issues(config: dict) -> list[dict]:
@@ -391,7 +407,8 @@ def _adf_text(node: dict) -> str:
 # Issue normalisation
 # ---------------------------------------------------------------------------
 
-def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_hours: int) -> dict:
+def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_hours: int,
+                     point_fields: list[tuple[str, str]] | None = None, lane_overrides: dict | None = None) -> dict:
     key = raw.get("key", "")
     fields = raw.get("fields", {})
     updated_str = fields.get("updated", "")
@@ -429,6 +446,7 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, config: dict, lookback_h
         "recent_comments": recent_comments,
         "url": f"{_jira_base(config)}/browse/{key}",
         "board_id": raw.get("_board_id"),   # None when not board-scoped
+        **points.jira_lane_and_points(fields, point_fields, lane_overrides),
     }
 
 
@@ -478,6 +496,9 @@ def main() -> None:
 
     # Auto-discover boards where the current user or configured team has active work.
     # No manual JIRA_BOARDS config required.
+    point_fields = points.jira_point_fields(config)
+    extra_fields = points.jira_fields(point_fields)
+    lane_overrides = sprint_load.overrides_from_env()
     active_sprints = get_active_sprints(config, me=me, team_filter=team_filter or None)
     sprint_info: dict = {}
     all_sprint_infos: list[dict] = []
@@ -525,26 +546,26 @@ def main() -> None:
                 sid = sprint_for_board["id"] if sprint_for_board else None
                 print(f"[gather_jira] fetching issues for board {bid} sprint {sid}...", flush=True)
                 for issue in get_sprint_issues(
-                    config, sprint_id=sid, team_filter=team_filter or None, board_id=bid
+                    config, sprint_id=sid, team_filter=team_filter or None, board_id=bid, extra_fields=extra_fields
                 ):
                     if issue.get("key") not in seen_keys:
                         seen_keys.add(issue["key"])
                         raw_issues.append(issue)
         else:
             print("[gather_jira] fetching all open-sprint issues (project-wide fallback)...", flush=True)
-            for issue in get_sprint_issues(config, sprint_id=None, team_filter=team_filter or None):
+            for issue in get_sprint_issues(config, sprint_id=None, team_filter=team_filter or None, extra_fields=extra_fields):
                 if issue.get("key") not in seen_keys:
                     seen_keys.add(issue["key"])
                     raw_issues.append(issue)
     else:
         print("[gather_jira] no active sprint — querying open project issues", flush=True)
-        for issue in search_open_issues(config, team_filter or None):
+        for issue in search_open_issues(config, team_filter or None, extra_fields):
             if issue.get("key") not in seen_keys:
                 seen_keys.add(issue["key"])
                 raw_issues.append(issue)
 
     print(f"[gather_jira] {len(raw_issues)} issues total (raw)", flush=True)
-    issues = [_normalise_issue(r, stale_cutoff, config, lookback_hours) for r in raw_issues]
+    issues = [_normalise_issue(r, stale_cutoff, config, lookback_hours, point_fields, lane_overrides) for r in raw_issues]
 
     if team_filter:
         issues = [i for i in issues if i["assignee"] in team_filter]
@@ -584,6 +605,7 @@ def main() -> None:
         "all_sprints": all_sprint_infos,
         "board_sprint_map": {str(k): v for k, v in board_sprint_map.items()},
         "issues": issues,
+        "points_known": points.points_known(issues),
         "open_prs": open_prs,
         "slack_messages": slack_messages,
         "config_summary": {

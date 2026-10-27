@@ -28,6 +28,8 @@ from datetime import datetime, timezone, timedelta
 from scripts.common.pr_metrics import STANDUP_COLUMNS, enrich_with_signals
 from scripts.common.config import load_config, get_workspace_dir
 from scripts.common.shell import run_cmd as _run
+from scripts.common import sprint_load
+from scripts.standup import points
 from scripts.standup.slack_client import get_standup_messages
 
 
@@ -42,8 +44,8 @@ def _parse_team_filter(config: dict) -> list[str]:
 # GitHub helpers (gh CLI)
 # ---------------------------------------------------------------------------
 
-def get_open_issues(config: dict) -> list[dict]:
-    """Return open issues scoped to the team's sprint (milestone) or assignees.
+def get_open_issues(config: dict, state: str = "open") -> list[dict]:
+    """Return open (or, with ``state="closed"``, finished) issues scoped to the team's sprint (milestone) or assignees.
 
     Filtering strategy:
     1. If GH_MILESTONE is set, fetch only issues in that milestone (sprint equivalent)
@@ -57,7 +59,7 @@ def get_open_issues(config: dict) -> list[dict]:
     cmd = [
         "gh", "issue", "list",
         "-R", f"{org}/{repo}",
-        "--state", "open",
+        "--state", state,
         "--limit", "200",
         "--json", "number,title,body,url,labels,assignees,updatedAt,createdAt,comments,milestone",
     ]
@@ -206,7 +208,8 @@ def get_open_prs(config: dict, target_branch: str = "") -> list[dict]:
 # Issue normalisation
 # ---------------------------------------------------------------------------
 
-def _normalise_issue(raw: dict, stale_cutoff: datetime, lookback_cutoff: datetime | None = None) -> dict:
+def _normalise_issue(raw: dict, stale_cutoff: datetime, lookback_cutoff: datetime | None = None, closed: bool = False,
+                     lane_overrides: dict | None = None) -> dict:
     if lookback_cutoff is None:
         lookback_cutoff = datetime.now(timezone.utc) - timedelta(hours=26)
     updated_str = raw.get("updatedAt", "")
@@ -241,7 +244,7 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, lookback_cutoff: datetim
         "key": f"#{raw['number']}",
         "number": raw["number"],
         "summary": raw.get("title", ""),
-        "status": "open",
+        "status": "closed" if closed else "open",
         "assignee": assignees[0] if assignees else "unassigned",
         "assignees": assignees,
         "updated": updated_str,
@@ -251,6 +254,7 @@ def _normalise_issue(raw: dict, stale_cutoff: datetime, lookback_cutoff: datetim
         "labels": label_names,
         "recent_comments": recent_comments,
         "url": raw.get("url", ""),
+        **points.github_lane_and_points(label_names, closed, lane_overrides),
     }
 
 
@@ -277,7 +281,8 @@ def main() -> None:
 
     raw_issues = get_open_issues(config)
     print(f"[gather_gh] {len(raw_issues)} open issues fetched", flush=True)
-    issues = [_normalise_issue(r, stale_cutoff, lookback_cutoff) for r in raw_issues]
+    lane_overrides = sprint_load.overrides_from_env()
+    issues = [_normalise_issue(r, stale_cutoff, lookback_cutoff, lane_overrides=lane_overrides) for r in raw_issues]
 
     # Derive team members from actual issue assignees so PR filtering is board-scoped
     team_members = sorted({i["assignee"] for i in issues if i["assignee"] != "unassigned"})
@@ -301,6 +306,9 @@ def main() -> None:
         print(f"[gather_gh] {len(open_prs)} open PRs (no team filter)", flush=True)
     enrich_with_signals(open_prs, "github", config, columns=STANDUP_COLUMNS)
 
+    # Finished work counts toward the sprint's points, but only a milestone says which sprint it belongs to.
+    closed_issues = [_normalise_issue(r, stale_cutoff, lookback_cutoff, closed=True, lane_overrides=lane_overrides) for r in get_open_issues(config, state="closed")] if config.get("GH_MILESTONE", "").strip() else []
+
     slack_messages = get_standup_messages(config, lookback_hours)
 
     signals = {
@@ -312,6 +320,8 @@ def main() -> None:
         "sprint": {},
         "all_sprints": [],
         "issues": issues,
+        "points_known": points.points_known(issues + closed_issues),
+        "done_issues": closed_issues,
         "open_prs": open_prs,
         "slack_messages": slack_messages,
         "config_summary": {

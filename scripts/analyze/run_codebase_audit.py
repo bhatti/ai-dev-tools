@@ -198,16 +198,18 @@ def _emit_finding_counts(findings_path: Path, fallback_repo: str = "", fallback_
         print(f"[audit] could not parse findings for markers: {e}", flush=True)
 
 
+from scripts.common.pr_metrics import NOT_ASSESSED
+
 # Mapping from audit_findings.json metrics keys to (display_name, benchmark, description)
 _AUDIT_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
-    "fix_ratio": ("Fix:Commit Ratio", "<15% healthy", "fix/bug/hotfix commits ÷ total commits — high ratio means firefighting, not building"),
+    "fix_ratio": ("Fix:Commit Ratio", "<25% healthy · >40% reactive", "fix/bug/hotfix commits ÷ total commits — high ratio means firefighting, not building"),
     "avg_files_per_commit": ("Avg Files/Commit", "<5 healthy", "mean files changed per commit — large commits are harder to review and revert"),
     "single_author_hotspots": ("Single-Author Hotspots", "0 ideal", "# hot files changed by only one author (bus factor risk — no shared ownership)"),
     "temporal_coupling_pairs": ("Temporal Coupling", "0 ideal", "# cross-module file pairs that always change together (hidden coupling, brittle design)"),
     "test_gap_files": ("Test Gap Files", "0 ideal", "# high-churn production files with no corresponding test file (computed from file paths)"),
-    "verbosity_ratio": ("Verbosity Ratio", "<0.30 healthy", "(comment+blank lines) ÷ total lines — above 0.30 indicates doc debt or dead code accumulation"),
-    "erosion_score": ("Erosion Score", "<0.55 healthy", "composite signal: branch density × churn × size — measures architectural degradation"),
-    "high_mass_functions": ("High-Mass Functions (CC>10)", "0 ideal", "# functions with estimated cyclomatic complexity >10 (>50 branch points) — split them"),
+    "verbosity_ratio": ("Verbosity Ratio", "<0.20 healthy · >0.30 high", "|AST-Grep flagged lines ∪ clone lines| ÷ LOC — trivial delegators, wrapper-of-wrappers, duplicated guards, duplicate blocks (AI code averages 0.33, established repos 0.15)"),
+    "erosion_score": ("Erosion Score", "<0.40 healthy · >0.55 high", "Σ mass(f) for CC(f)>10 ÷ Σ mass(f), mass = CC × √SLOC — the share of the code in dense, hard-to-test functions (AI code averages 0.68, established repos 0.31)"),
+    "high_mass_functions": ("High-Mass Functions (CC>10)", "0 ideal", "# functions with cyclomatic complexity above 10 — each branch needs a test; above 15 is virtually untestable"),
     "churn_complexity_hotspots": ("Churn×Complexity Hotspots", "0 ideal", "# files in risk quadrant: high commit frequency AND high branch density — highest change-failure risk"),
     "disabled_skipped_tests": ("Disabled/Skipped Tests", "0 ideal", "# xit/it.skip/describe.skip/@Ignore/@Disabled — each is a hole in the test safety net"),
     "avg_instability_score": ("Avg Instability Score (I)", "< 0.5 healthy", "Mean I = Ce/(Ca+Ce) across non-leaf, non-test modules. I > 0.7 for core/shared modules = high outbound coupling, fragile design. See shared/design-principles.md."),
@@ -219,16 +221,19 @@ _AUDIT_METRIC_ROWS: dict[str, tuple[str, str, str]] = {
 def _audit_metric_signal(key: str, val: float) -> str:
     """Return 🟢/🟡/🔴 for audit metrics."""
     if key == "fix_ratio":
-        return "🟢" if val <= 0.15 else ("🟡" if val <= 0.30 else "🔴")
+        return "🟢" if val < 0.25 else ("🟡" if val <= 0.40 else "🔴")
     if key == "avg_files_per_commit":
         return "🟢" if val <= 5 else ("🟡" if val <= 10 else "🔴")
-    if key in ("single_author_hotspots", "temporal_coupling_pairs", "test_gap_files",
-               "high_mass_functions", "churn_complexity_hotspots", "disabled_skipped_tests"):
+    if key in ("single_author_hotspots", "temporal_coupling_pairs", "test_gap_files", "disabled_skipped_tests"):
         return "🟢" if val == 0 else ("🟡" if val <= 3 else "🔴")
+    if key == "high_mass_functions":   # shared/sloppiness-metrics.md: 0 / 1-3 / 4+
+        return "🟢" if val == 0 else ("🟡" if val <= 3 else "🔴")
+    if key == "churn_complexity_hotspots":   # 0 / 1-2 / 3+
+        return "🟢" if val == 0 else ("🟡" if val <= 2 else "🔴")
     if key == "verbosity_ratio":
-        return "🟢" if val <= 0.30 else ("🟡" if val <= 0.50 else "🔴")
+        return "🟢" if val < 0.20 else ("🟡" if val <= 0.30 else "🔴")
     if key == "erosion_score":
-        return "🟢" if val <= 0.35 else ("🟡" if val <= 0.55 else "🔴")
+        return "🟢" if val < 0.40 else ("🟡" if val <= 0.55 else "🔴")
     if key == "avg_instability_score":
         return "🟢" if val <= 0.5 else ("🟡" if val <= 0.7 else "🔴")
     if key == "adp_cycle_count":
@@ -271,12 +276,14 @@ def _read_all_audit_metrics(reports_dir: Path) -> list[tuple]:
         rows: list[tuple] = []
         for key, (name, benchmark, desc) in _AUDIT_METRIC_ROWS.items():
             val = metrics.get(key)
-            if val is None:
+            if val is None:   # shown, not dropped: a metric nobody assessed must be visible as such
+                rows.append((name, "—", benchmark, "—", NOT_ASSESSED))
                 continue
             try:
                 fval = float(val)
-            except (TypeError, ValueError):
-                fval = 0.0
+            except (TypeError, ValueError):   # "n/a", "unknown", "": not a measurement, so not a green zero
+                rows.append((name, "—", benchmark, "—", NOT_ASSESSED))
+                continue
             signal = _audit_metric_signal(key, fval)
             if "ratio" in key or "score" in key:
                 display = f"{fval:.3f}"
@@ -395,8 +402,10 @@ Write these files using relative paths from the repo root (the `reports/` symlin
       "location":"path/to/file:line or module","evidence":"command → output snippet",
       "recommendation":"specific action targeting this exact file/module"}}],
     "patterns":[{{"pattern":"description seen in N files/commits","locations":["a","b"],"recommendation":"..."}}],
-    "metrics":{{"fix_ratio":0.0,"avg_files_per_commit":0.0,"single_author_hotspots":0,"temporal_coupling_pairs":0,"test_gap_files":0,
-      "verbosity_ratio":0.0,"erosion_score":0.0,"high_mass_functions":0,"churn_complexity_hotspots":0,"disabled_skipped_tests":0}}}}
+    "metrics":{{"fix_ratio":null,"avg_files_per_commit":null,"single_author_hotspots":null,"temporal_coupling_pairs":null,"test_gap_files":null,
+      "verbosity_ratio":null,"erosion_score":null,"high_mass_functions":null,"churn_complexity_hotspots":null,"disabled_skipped_tests":null,
+      "avg_instability_score":null,"adp_cycle_count":null,"solid_srp_violations":null}}}}
+   Every metrics key is required; use null for a metric you could not measure (never an estimate): the report shows it as "not assessed".
 
 DO NOT emit any ::add-task-context markers yourself — the orchestrator script reads
 your JSON output and emits them automatically. Focus only on writing the two report files.
@@ -760,20 +769,29 @@ def main(repo_url: str | None, branch: str | None, commits: int | None, focus: s
         report_md_path = reports_dir / "audit_report.md"
         if report_md_path.exists():
             md_content = report_md_path.read_text(encoding="utf-8")
-            if "Metrics Dashboard" not in md_content:
-                audit_extra_rows = _read_all_audit_metrics(reports_dir)
-                from scripts.common.pr_classify import build_metrics_dashboard
-                try:
-                    n_prs_for_metrics = int(config.get("N_PRS", "50"))
-                except (ValueError, TypeError):
-                    n_prs_for_metrics = 50
-                prs_for_metrics = _fetch_prs_for_metrics(config, n_prs=n_prs_for_metrics)
-                dashboard = build_metrics_dashboard(prs_for_metrics, extra_rows=audit_extra_rows)
-                if dashboard:
-                    md_content += f"\n\n## Codebase Health Metrics\n\n{dashboard}\n"
-                    report_md_path.write_text(md_content, encoding="utf-8")
-                    print(f"[audit] appended metrics dashboard ({len(prs_for_metrics)} PRs, "
-                          f"{len(audit_extra_rows)} audit rows)", flush=True)
+            # ONE dashboard, built by the pipeline: the model's own dashboard table is removed and its rows kept (by name),
+            # then the shared rows (PR-level, DORA) and the findings-JSON metrics are added.
+            from scripts.common.pr_classify import build_metrics_dashboard, extract_and_strip_metrics_tables
+            heading = md_content.find("## Codebase Health Metrics")   # a re-run: the previous appended section is regenerated
+            if heading != -1:
+                md_content = md_content[:heading].rstrip() + "\n"
+            md_content, written_rows = extract_and_strip_metrics_tables(md_content)
+            audit_extra_rows: list[tuple] = []
+            seen_names: set[str] = set()
+            for row in _read_all_audit_metrics(reports_dir) + written_rows:   # the JSON value wins over a hand-written row
+                if row[0].lower() not in seen_names:
+                    seen_names.add(row[0].lower())
+                    audit_extra_rows.append(row)
+            try:
+                n_prs_for_metrics = int(config.get("N_PRS", "50"))
+            except (ValueError, TypeError):
+                n_prs_for_metrics = 50
+            prs_for_metrics = _fetch_prs_for_metrics(config, n_prs=n_prs_for_metrics)
+            dashboard = build_metrics_dashboard(prs_for_metrics, extra_rows=audit_extra_rows)
+            if dashboard:
+                md_content = md_content.rstrip() + f"\n\n## Codebase Health Metrics\n\n{dashboard}\n"
+            report_md_path.write_text(md_content, encoding="utf-8")
+            print(f"[audit] metrics dashboard ({len(prs_for_metrics)} PRs, {len(audit_extra_rows)} audit rows)", flush=True)
 
         # Generate HTML report from Markdown
         report_html_path = reports_dir / "audit_report.html"

@@ -534,3 +534,24 @@ def test_main_no_sprint_fallback(
     signals = json.loads((tmp_workspace / "signals.json").read_text())
     assert signals["sprint"] == {}
     assert len(signals["issues"]) == 1
+
+
+@patch("scripts.standup.gather_jira.requests.get")
+def test_get_sprint_issues_reads_every_page(mock_get, jira_config):
+    def page(start, n, total):
+        r = MagicMock(ok=True)
+        r.json.return_value = {"total": total, "issues": [{"key": f"P-{start + i}"} for i in range(n)]}
+        return r
+    mock_get.side_effect = [page(0, 200, 450), page(200, 200, 450), page(400, 50, 450)]
+    issues = get_sprint_issues(jira_config, sprint_id=1, board_id=5)
+    assert len(issues) == 450 and [c.kwargs["params"]["startAt"] for c in mock_get.call_args_list] == [0, 200, 400]
+
+
+@patch("scripts.standup.gather_jira.requests.get")
+def test_jql_search_follows_next_page_token(mock_get, jira_config):
+    first, second = MagicMock(ok=True), MagicMock(ok=True)
+    first.json.return_value = {"issues": [{"key": "P-1"}], "nextPageToken": "t2"}
+    second.json.return_value = {"issues": [{"key": "P-2"}], "isLast": True}
+    mock_get.side_effect = [first, second]
+    assert [i["key"] for i in get_sprint_issues(jira_config, sprint_id=None)] == ["P-1", "P-2"]
+    assert mock_get.call_args_list[1].kwargs["params"]["nextPageToken"] == "t2"

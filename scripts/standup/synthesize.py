@@ -26,6 +26,7 @@ from pathlib import Path
 
 from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_skills
 from scripts.common.config import load_config, get_workspace_dir, validate_claude_config
+from scripts.standup import points
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,9 @@ TEAM: {team_members_note}
 
 BOARDS: {boards_json}
 
+STORY POINTS (computed from the tracker; quote these figures, never add or estimate points yourself; pending = not started or blocked):
+{points_block}
+
 STRICT DATA RULES:
 • Use ONLY data from signals.json — never fetch or invent additional issues or PRs.
 • Report on all sprint assignees — do NOT add notes about team roster or configuration files.
@@ -100,6 +104,9 @@ TEAM: {team_members_note}
 
 BOARDS: {boards_json}
 
+STORY POINTS (computed from the tracker; quote these figures, never add or estimate points yourself; pending = not started or blocked):
+{points_block}
+
 STRICT DATA RULES:
 • Use ONLY data from signals.json — never fetch or invent additional issues or PRs.
 • Report on all sprint assignees — do NOT add notes about team roster or configuration files.
@@ -112,7 +119,7 @@ STRICT DATA RULES:
 
 1. Read signals.json from the current working directory.
 2. For each team member in TEAM ROSTER, summarise:
-   - Issues they are working on (status, blockers)
+   - Issues they are working on (status, blockers) and their points by lane (pending / in progress / review / done) from STORY POINTS
    - Open PRs awaiting review
    - Any stale items (not updated in 2+ days)
 3. Identify risks: sprint burn-down, blocked issues, PRs with no reviewer.
@@ -165,6 +172,7 @@ def _build_prompt(signals: dict, skill_md: str | None = None) -> str:
         today=date.today().isoformat(),
         team_members_note=team_members_note,
         boards_json=json.dumps(boards_map, indent=2),
+        points_block=points.prompt_block(signals),
     )
 
     if skill_md is None:

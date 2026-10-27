@@ -39,19 +39,37 @@ def parse_ref(ref: str, default_repo: str = "") -> tuple[str, str]:
     raise TicketError(f"cannot interpret {ref!r} as a GitHub issue (use a URL, owner/repo#N, or set --repo / GH_ORG and GH_REPO)", "not_found")
 
 
-def normalize(raw: dict, project_points: tuple[float | None, bool] = (None, True)) -> dict:
+_REVIEW_LABEL = re.compile(r"^(?:in[ -]?review|review|needs?[ -]review|code[ -]review|ready[ -]for[ -]review|in[ -]?qa|qa)$", re.I)
+
+
+def _workflow_label(labels: list[str], overrides: dict | None) -> tuple[str, str]:
+    """(status, category) for the workflow state GitHub does not have, read from labels: an override or review label, an in-progress label,
+    a blocked label; otherwise plain 'open'. Narrow on purpose: an area label such as 'testing' must not move an issue to review."""
+    named = {n.strip().lower() for names in (overrides or {}).values() for n in names}
+    for label in labels:
+        if label.strip().lower() in named or _REVIEW_LABEL.match(label.strip()):
+            return label, "in_progress"
+    for label in labels:
+        if _IN_PROGRESS.search(label):
+            return label, "in_progress"
+    return next(((label, "todo") for label in labels if label.strip().lower() == "blocked"), ("open", "todo"))
+
+
+def normalize(raw: dict, project_points: tuple[float | None, bool] = (None, True), lane_overrides: dict | None = None) -> dict:
     labels = [l["name"] for l in raw.get("labels", [])]
     closed = raw.get("state", "").upper() == "CLOSED"
-    category = "done" if closed else "in_progress" if any(_IN_PROGRESS.search(l) for l in labels) else "todo"
+    state_label, state_category = _workflow_label(labels, lane_overrides)
+    category = "done" if closed else state_category
     return new_ticket(
         tracker="github", id=f"#{raw['number']}", url=raw.get("url", ""), title=raw.get("title", ""), description=(raw.get("body") or "").strip(),
-        status="closed" if closed else "open", status_category=category, assignee=", ".join(a["login"] for a in raw.get("assignees", [])) or None,
+        status="closed" if closed else state_label, status_category=category, lane_overrides=lane_overrides, assignee=", ".join(a["login"] for a in raw.get("assignees", [])) or None,
         labels=labels, sprint=(raw.get("milestone") or {}).get("title"),
         story_points=story_points.github_points(labels, *project_points), comments=[c.get("body", "") for c in raw.get("comments", [])])
 
 
 class GitHubTickets:
-    def __init__(self, repo: str, project_number: str = ""):
+    def __init__(self, repo: str, project_number: str = "", lane_overrides: dict | None = None):
+        self.lane_overrides = lane_overrides or {}
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo or ""):
             raise TicketError(f"a GitHub repository is required as owner/name, got {repo!r} (--repo, or GH_ORG and GH_REPO)")
         self.repo, self.project_number = repo, project_number
@@ -114,7 +132,7 @@ class GitHubTickets:
         return None, True
 
     def _normalize(self, raw: dict) -> dict:
-        return normalize(raw, self._project_points(str(raw["number"])))
+        return normalize(raw, self._project_points(str(raw["number"])), self.lane_overrides)
 
     def search(self, *, label: str = "", milestone: str = "", include_done: bool = False, limit: int = 200) -> list[dict]:
         args = ["issue", "list", "--repo", self.repo, "--state", "all" if include_done else "open", "--limit", str(limit), "--json", FIELDS]

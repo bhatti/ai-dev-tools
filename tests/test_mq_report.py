@@ -517,14 +517,14 @@ class TestDeploymentRiskSection:
         prs = _make_prs(5, age_hours=400, is_hotspot=True)
         result = _valley_of_calm_section(prs)
         # Stale PR table now uses canonical columns from build_stale_pr_table()
-        assert "| PR | Title | Author | Age | Status | Risk |" in result
+        assert "| PR | Author | Age | Status | Risk |" in result
 
     def test_cfr_proxy_in_metrics_dashboard(self):
         # 4 bug PRs out of 10 total → 40% CFR proxy should appear in Metrics Dashboard
         prs = _make_prs(6, pr_type="feature") + _make_prs(4, pr_type="bug")
         result = _valley_of_calm_section(prs)
-        assert "CFR Proxy" in result
-        assert "40.0%" in result
+        assert "Defect Rate (proxy) | 40.0% (4/10)" in result
+        assert "Change Failure Rate | n/a" in result   # no merged PRs: the real CFR says why it is absent
 
     def test_feature_bug_ratio_in_metrics_dashboard(self):
         prs = _make_prs(9, pr_type="feature") + _make_prs(1, pr_type="bug")
@@ -535,15 +535,14 @@ class TestDeploymentRiskSection:
     def test_cfr_proxy_zero_when_no_bugs(self):
         prs = _make_prs(5, pr_type="feature")
         result = _valley_of_calm_section(prs)
-        assert "CFR Proxy" in result
-        assert "0.0%" in result
+        assert "Defect Rate (proxy) | 0.0% (0/5)" in result
 
     def test_dora_na_rows_present_for_open_only_queue(self):
         # Open PRs have no merged_at → DORA cannot be computed; N/A rows must appear
         prs = _make_prs(10, pr_type="feature")
         result = _valley_of_calm_section(prs)
         assert "Deployment Frequency" in result
-        assert "N/A" in result
+        assert "n/a" in result and "Needs 3+ merged PRs" in result
         assert "Change Failure Rate" in result
         assert "Lead Time (P50)" in result
         assert "PR Survival Rate" in result
@@ -781,7 +780,7 @@ class TestBuildMqSlackSummary:
         text = _build_mq_slack_summary(ctx, prs, lanes)
         assert "Throughput" in text
         assert "avg age" in text
-        assert "CFR proxy" in text
+        assert "queued post-release defect fixes" in text
 
     def test_no_deploy_risk_when_zero_defects(self):
         prs = self._make_prs(n_feature=20, n_bug=0, n_test=5)

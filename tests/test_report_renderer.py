@@ -40,17 +40,17 @@ class TestSlackMrkdwnLinks:
     def test_multiple_slack_links_on_same_line(self):
         html = render_simple_html(
             "Test",
-            "🔴 PR <https://bitbucket.org/repo/pull/47076|#47076> "
-            "(<https://jira.com/browse/PROJ-44643|PROJ-44643>, Alice) — 35 days open",
+            "🔴 PR <https://bitbucket.org/repo/pull/1076|#1076> "
+            "(<https://jira.com/browse/PROJ-643|PROJ-643>, Alice) — 35 days open",
         )
-        assert '<a href="https://bitbucket.org/repo/pull/47076">#47076</a>' in html
-        assert '<a href="https://jira.com/browse/PROJ-44643">PROJ-44643</a>' in html
+        assert '<a href="https://bitbucket.org/repo/pull/1076">#1076</a>' in html
+        assert '<a href="https://jira.com/browse/PROJ-643">PROJ-643</a>' in html
         assert "&lt;https://" not in html
 
     def test_slack_link_in_list_item(self):
         html = render_simple_html(
             "Test",
-            "- 🔴 <https://jira.com/browse/PROJ-456|PROJ-456> blocked on Maersk",
+            "- 🔴 <https://jira.com/browse/PROJ-456|PROJ-456> blocked on a customer",
         )
         assert '<a href="https://jira.com/browse/PROJ-456">PROJ-456</a>' in html
         assert "&lt;https://" not in html
@@ -235,24 +235,24 @@ class TestStandupBriefRoundTrip:
 
     BRIEF = """\
 ## 📣 Call to Action
-All 4 open PRs have zero reviewers. PR <https://bitbucket.org/org/repo/pull-requests/47076|#47076>, \
-<https://bitbucket.org/org/repo/pull-requests/48284|#48284>, and \
-<https://bitbucket.org/org/repo/pull-requests/48239|#48239> each need a reviewer today.
+All 4 open PRs have zero reviewers. PR <https://bitbucket.org/org/repo/pull-requests/1076|#1076>, \
+<https://bitbucket.org/org/repo/pull-requests/1284|#1284>, and \
+<https://bitbucket.org/org/repo/pull-requests/1239|#1239> each need a reviewer today.
 
 ## 👤 Per-Person Status
 *Alice*: Working on <https://jira.com/browse/PROJ-100|PROJ-100> (Highest) and blocked on testing.
 
 *Bob*: <https://jira.com/browse/PROJ-200|PROJ-200> In Review. PR \
-<https://bitbucket.org/org/repo/pull-requests/49184|#49184> open 7 days, 0 reviewers.
+<https://bitbucket.org/org/repo/pull-requests/1184|#1184> open 7 days, 0 reviewers.
 
 ## ⚠️ Risks
-🔴 PR <https://bitbucket.org/org/repo/pull-requests/47076|#47076> \
+🔴 PR <https://bitbucket.org/org/repo/pull-requests/1076|#1076> \
 (<https://jira.com/browse/PROJ-999|PROJ-999>, Alice) — 35 days open, 0 reviewers
 
-🟡 <https://jira.com/browse/PROJ-493|PROJ-493> (Bob) — Blocked on Maersk testing
+🟡 <https://jira.com/browse/PROJ-93|PROJ-93> (Bob) — Blocked on customer testing
 
 ## 💬 Discussion Questions
-PRs <https://bitbucket.org/org/repo/pull-requests/47076|#47076> (35d) have 0 reviewers — assign or close?
+PRs <https://bitbucket.org/org/repo/pull-requests/1076|#1076> (35d) have 0 reviewers — assign or close?
 """
 
     def test_no_raw_slack_links_in_output(self):
@@ -268,13 +268,13 @@ PRs <https://bitbucket.org/org/repo/pull-requests/47076|#47076> (35d) have 0 rev
 
     def test_bitbucket_pr_links_clickable(self):
         html = render_simple_html("Standup Brief", self.BRIEF)
-        assert '<a href="https://bitbucket.org/org/repo/pull-requests/47076">#47076</a>' in html
-        assert '<a href="https://bitbucket.org/org/repo/pull-requests/48284">#48284</a>' in html
+        assert '<a href="https://bitbucket.org/org/repo/pull-requests/1076">#1076</a>' in html
+        assert '<a href="https://bitbucket.org/org/repo/pull-requests/1284">#1284</a>' in html
 
     def test_jira_issue_links_clickable(self):
         html = render_simple_html("Standup Brief", self.BRIEF)
         assert '<a href="https://jira.com/browse/PROJ-100">PROJ-100</a>' in html
-        assert '<a href="https://jira.com/browse/PROJ-493">PROJ-493</a>' in html
+        assert '<a href="https://jira.com/browse/PROJ-93">PROJ-93</a>' in html
 
     def test_section_headings_render(self):
         html = render_simple_html("Standup Brief", self.BRIEF)
@@ -295,7 +295,7 @@ PRs <https://bitbucket.org/org/repo/pull-requests/47076|#47076> (35d) have 0 rev
         """Verify common mrkdwn artifacts don't appear as literal text."""
         html = render_simple_html("Standup Brief", self.BRIEF)
         # Slack links should not appear as raw syntax
-        assert "|#47076>" not in html
+        assert "|#1076>" not in html
         assert "|PROJ-100>" not in html
 
 
@@ -303,3 +303,25 @@ def test_long_unbreakable_table_cells_wrap_instead_of_widening_the_table():
     html = render_simple_html("t", "| a | b |\n| --- | --- |\n| " + "x" * 400 + " | y |\n")
     assert "overflow-wrap: anywhere" in html
     assert "<link" not in html and "<script src" not in html  # self-contained: no CDN
+
+
+class TestLinkTooltips:
+    def test_a_markdown_link_title_becomes_a_hover_tooltip(self):
+        html = render_simple_html("T", '| PR |\n|---|\n| [#7](https://x/pull/7 "Fix **the** login <b>") |\n')
+        assert '<a href="https://x/pull/7" title="Fix **the** login &lt;b&gt;">#7</a>' in html
+
+    def test_a_link_without_a_title_is_unchanged_and_a_pipe_in_a_title_stays_in_the_cell(self):
+        html = render_simple_html("T", '| PR | B |\n|---|---|\n| [#7](https://x/pull/7) | [#8](https://x/pull/8 "a \\| b") |\n')
+        assert '<a href="https://x/pull/7">#7</a>' in html and 'title="a | b"' in html
+
+    def test_an_unsafe_url_is_still_dropped_with_a_title(self):
+        assert "javascript" not in render_simple_html("T", '[x](javascript:alert(1) "t")')
+
+
+class TestLinkTitleEdgeCases:
+    def test_stray_control_characters_in_the_input_cannot_break_the_render(self):
+        assert "<a href=" in render_simple_html("T", "[a](http://x\x010\x01) and \x00junk")
+
+    def test_a_parked_title_never_leaks_its_marker(self):
+        html = render_simple_html("T", 'use `[a](u "t")` syntax and [b](http://x "y")')
+        assert "\x01" not in html and 'title="y"' in html

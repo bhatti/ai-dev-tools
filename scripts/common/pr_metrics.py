@@ -15,6 +15,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable
 
+from scripts.common import defect_origin
 from scripts.common.pr_metadata import compute_pr_age, format_pr_status
 from scripts.common.pr_signals import collect_signals, pr_number
 
@@ -87,16 +88,29 @@ def _c_status(pr, ctx):
     return status.split(" ", 1)[1] if " " in status else status
 
 
+TOOLTIP_MAX = 300
+
+
+def tooltip(text: str) -> str:
+    """Text for a markdown link title (``[x](url "title")``): one line, no quotes, bounded. The HTML renderer shows it as a hover tooltip."""
+    flat = " ".join((text or "").replace('"', "'").split())
+    flat = flat[:TOOLTIP_MAX - 1] + "…" if len(flat) > TOOLTIP_MAX else flat
+    return flat.rstrip("\\").replace("|", "\\|")  # a pipe ends the table cell; a trailing backslash would escape the closing quote
+
+
+def link_with_tip(label: str, url: str, tip: str) -> str:
+    """A markdown link whose hover text is ``tip``; a bare label when there is no URL."""
+    if not url:
+        return label
+    tip = tooltip(tip)
+    return f'[{label}]({url} "{tip}")' if tip else f"[{label}]({url})"
+
+
 def _c_pr(pr, ctx):
     url = pr.get("url", "")
     tail = url.rstrip("/").split("/")[-1] if url else ""
     num = pr.get("pr_number") or pr.get("number") or (tail if tail.isdigit() else None) or pr.get("id", "?")
-    return f"[#{num}]({url})" if url else f"#{num}"
-
-
-def _c_title(pr, ctx):
-    title = _esc(pr.get("title") or "")
-    return title[:77] + "..." if len(title) > 80 else title
+    return link_with_tip(f"#{num}", url, pr.get("title") or "")
 
 
 def _c_category(pr, ctx):
@@ -111,6 +125,10 @@ def _c_type(pr, ctx):
     pt = pr.get("pr_type", "unknown")
     flag = "🚧" if pr.get("is_wip_pr") else ("📝" if pr.get("is_docs_pr") else "")
     return f"{PR_TYPE_EMOJI.get(pt, '❓')}{flag} {pt}"
+
+
+def _c_origin(pr, ctx):
+    return defect_origin.cell(pr)
 
 
 def _c_blast(pr, ctx):
@@ -211,7 +229,7 @@ def _c_author(pr, ctx):
 
 def _c_jira(pr, ctx):
     key, url = pr.get("jira_key", ""), pr.get("jira_url", "")
-    return f"[{key}]({url})" if key and url else (key or "—")
+    return link_with_tip(key, url, pr.get("jira_summary") or pr.get("title") or "") if key and url else (key or "—")
 
 
 def _c_priority(pr, ctx):
@@ -286,6 +304,14 @@ def _r_sensitive(pr):
     return (", ".join(f"`{p}`" for p in paths[:5]), "none ideal", WARN, "Files matching auth/security/billing/infra patterns") if paths else None
 
 
+def _r_origin(pr):
+    origin = defect_origin.classify(pr)
+    if origin is None:
+        return None   # not a defect fix: no row
+    signal = {"escaped": BAD if origin.confidence == "high" else WARN, "pre_release": GOOD}[origin.kind]
+    return (defect_origin.cell(pr), "caught before release", signal, defect_origin.explain(pr))
+
+
 def _r_age(pr):
     if not (pr.get("created_at") or pr.get("age_hours") or pr.get("age_days")):
         return None
@@ -331,6 +357,31 @@ def _r_major(pr):
     return (_major_text(sources), "0", GOOD if total == 0 else BAD, "CRITICAL/HIGH issues from AI review and from human/bot comments")
 
 
+NOT_ASSESSED = "Not assessed in this run: no value was reported"
+
+
+def _sloppiness(pr: dict, key: str):
+    """A value the review assessed for the change (``sloppiness`` in findings.json), or None: unassessed is not zero."""
+    s = pr.get("sloppiness")
+    value = s.get(key) if isinstance(s, dict) else None
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _r_verbosity(pr):
+    pct = _sloppiness(pr, "verbosity_pct")
+    if pct is None:
+        return ("—", "<20% healthy", NONE, NOT_ASSESSED)
+    return (f"{pct:g}%", "<20% healthy", GOOD if pct < 20 else (WARN if pct <= 30 else BAD),
+            "Added lines that are trivial delegators, wrapper-of-wrappers, duplicated guards, redundant casts or dead code (shared/sloppiness-metrics.md)")
+
+
+def _r_high_cc(pr):
+    n = _sloppiness(pr, "high_cc_functions")
+    if n is None:
+        return ("—", "0 ideal", NONE, NOT_ASSESSED)
+    return (str(int(n)), "0 ideal", GOOD if n == 0 else (WARN if n <= 3 else BAD), "Added or changed functions with cyclomatic complexity above 10")
+
+
 @dataclass(frozen=True)
 class Metric:
     id: str
@@ -344,10 +395,10 @@ class Metric:
 REGISTRY: dict[str, Metric] = {m.id: m for m in (
     Metric("status", "Status", _c_status),
     Metric("pr", "PR", _c_pr),
-    Metric("title", "Title", _c_title),
     Metric("category", "Category", _c_category, "File Categories", _r_categories),
     Metric("type", "Type", _c_type),
     Metric("scope", "Scope", lambda pr, ctx: pr.get("scope", "—"), "Scope", _r_scope),
+    Metric("origin", "Defect origin", _c_origin, "Defect Origin", _r_origin),
     Metric("blast", "Blast", _c_blast, "Blast Radius", _r_blast),
     Metric("risk", "Risk", _c_risk, "Risk Score", _r_risk),
     Metric("loc", "LOC", _c_loc, "LOC Changed", _r_loc),
@@ -368,26 +419,29 @@ REGISTRY: dict[str, Metric] = {m.id: m for m in (
     Metric("jira", "Jira", _c_jira),
     Metric("priority", "Priority", _c_priority),
     Metric("reviewer_names", "Reviewers", _c_reviewer_names, needs="reviewers"),
+    Metric("verbosity", "Verbosity", lambda pr, ctx: _r_verbosity(pr)[0], "Verbosity (added lines)", _r_verbosity),
+    Metric("high_cc", "High-CC", lambda pr, ctx: _r_high_cc(pr)[0], "High-CC functions (CC>10)", _r_high_cc),
 )}
 
-#: Columns of the per-PR table shown by every multi-PR report.
-TABLE_COLUMNS = ("status", "pr", "title", "category", "type", "blast", "risk", "loc", "files", "ci", "age",
+#: Columns of the per-PR table shown by every multi-PR report. There is no title column: the title is the hover text of the PR link
+#: (and the Jira summary that of the Jira link), so rows stay short.
+TABLE_COLUMNS = ("status", "pr", "category", "type", "origin", "blast", "risk", "loc", "files", "ci", "age",
                  "reviewers", "comments", "tasks", "major", "commits", "issues")
 #: Stacked PRs (target a feature branch) show where they point and their complexity, and drop files.
-STACKED_COLUMNS = ("pr", "title", "target", "category", "type", "blast", "risk", "loc", "complexity", "ci", "age",
+STACKED_COLUMNS = ("pr", "target", "category", "type", "origin", "blast", "risk", "loc", "complexity", "ci", "age",
                    "reviewers", "comments", "tasks", "major", "commits", "issues")
 #: The sprint PR queue (`prs`): who/what/when plus the same metrics, grouped by status by the caller.
-QUEUE_COLUMNS = ("ci", "pr", "jira", "author", "age", "priority", "title", "category", "type", "blast", "risk", "loc", "files",
+QUEUE_COLUMNS = ("ci", "pr", "jira", "author", "age", "priority", "category", "type", "origin", "blast", "risk", "loc", "files",
                  "complexity", "reviewer_names", "comments", "tasks", "major", "commits")
 #: Rows of the one single-PR metrics table, in display order.
-SINGLE_ROWS = ("scope", "blast", "loc", "files", "risk", "category", "owners", "sensitive", "age", "commits", "reviewers",
-               "comments", "tasks", "major")
+SINGLE_ROWS = ("scope", "blast", "loc", "files", "risk", "category", "owners", "sensitive", "age", "origin", "commits", "reviewers",
+               "comments", "tasks", "major", "verbosity", "high_cc")
 
 
 #: Standup PR lines mention reviewers, comments, open tasks and major issues; the model writes the prose.
 STANDUP_COLUMNS = ("reviewers", "comments", "tasks", "major")
 #: Rows of the PR review report: it knows the findings and the review activity, not the scope files.
-REVIEW_ROWS = ("commits", "reviewers", "comments", "tasks", "major")
+REVIEW_ROWS = ("commits", "reviewers", "comments", "tasks", "major", "verbosity", "high_cc")
 
 
 def needs_for(metric_ids: tuple[str, ...] | list[str]) -> set[str]:

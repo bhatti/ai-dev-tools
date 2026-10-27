@@ -28,7 +28,7 @@ from scripts.common.claude_runner import run_claude, SYSTEM_PROMPTS, ensure_ygs_
 from scripts.common.atlassian_cli import write_cli_configs
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
 from scripts.common.models import ModelError, resolve_run_model
-from scripts.common.pr_classify import build_category_breakdown, build_work_type_distribution
+from scripts.common.pr_classify import build_category_breakdown, build_metrics_dashboard, build_stale_pr_table, build_work_type_distribution
 from scripts.common.pr_metrics import QUEUE_COLUMNS, build_pr_table
 from scripts.common.report_utils import write_report
 from scripts.standup.slack_client import (
@@ -209,9 +209,12 @@ def _pr_queue_to_markdown(pr_data: dict, title: str) -> str:
             continue
         badge = PR_GROUP_BADGE.get(group_name, "")
         lines += [f"## {badge} {group_name} ({len(group_prs)})", ""]
-        shown = [{**pr, "title": pr.get("jira_summary") or pr.get("title") or "(no title)"} for pr in group_prs]
-        lines += build_pr_table(shown, QUEUE_COLUMNS)
+        lines += build_pr_table(group_prs, QUEUE_COLUMNS)
         lines.append("")
+
+    # The same stale table and the one Metrics Dashboard as every other multi-PR report (open-prs, mq, pr-audit)
+    lines += build_stale_pr_table(prs, threshold_days=7)
+    lines.append(build_metrics_dashboard(prs))
 
     return "\n".join(lines)
 

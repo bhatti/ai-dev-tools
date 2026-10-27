@@ -26,6 +26,15 @@ Adding a metric is one `Metric` entry in `pr_metrics.REGISTRY` (cell, row, signa
 
 ## One table per report
 
+Per-PR tables have no title/description column: the PR title is the hover text of the PR link and the Jira summary that of the
+Jira link (`[#12](url "title")`; `report_renderer` emits a `title` attribute; Slack text shows the clipped title next to the label). Every multi-PR report ends with
+the same dashboard rows (`pr_classify.build_metrics_dashboard`): defect rate and feature:bug come from `pr_type` for any batch;
+the four DORA rows are always present, `n/a` with the reason when the report has fewer than 3 merged PRs. A model-assessed value
+that is `null` (verbosity, complexity creep, design metrics) renders as `—` / "not assessed", never 0, never omitted. Single-PR
+reports add Verbosity (added lines) and High-CC functions from `findings.json` `sloppiness` (`pr_metrics`).
+
+`scripts/common/defect_origin.py` classifies every bug, security and revert PR as post-release (escaped) or pre-release with a confidence and the evidence, assuming post-release when nothing says otherwise. The dashboard shows Escaped Defects (post-release) and Pre-release Fixes with confidence counts; Change Failure Rate counts escaped merged defects only (`x% (n/merged; k with evidence, m assumed)`); per-PR tables have a Defect origin column; the single-PR table a Defect Origin row with the evidence. See `you-got-skills/skills/shared/merge-queue-metrics.md` for the signals and weights.
+
 Single-PR reports (`pr-risk`, review) show one `PR Metrics` table (`Metric | Value | Benchmark | Signal | Description`).
 Multi-PR reports show one per-PR table plus the one aggregate `Metrics Dashboard`. `—` means not collected, `n/a` means the
 fetch failed (never zero), a trailing `+` means the fetch cap was hit.

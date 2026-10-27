@@ -428,6 +428,8 @@ Previous bug: with empty `STANDUP_TEAM_MEMBERS`, all 250+ org PRs were included.
 
 **Issue tagging:** each normalised issue carries `board_id` so synthesize can group by board.
 
+**Story points and lanes:** each normalised issue also carries `lane` (pending / in_progress / review / done), `story_points`, `points_known` and `is_subtask` (`scripts/standup/points.py`, lane model in `scripts/common/sprint_load.py`, overrides `SPRINT_LANES`). `signals.json` adds `points_known` (and `done_issues` for GitHub). Sub-tasks are not counted, unpointed issues are named, and points the tracker could not return are unknown, never 0. GitHub: closed is done, review / in-progress labels split the rest, and with `GH_MILESTONE` the closed milestone issues are counted for the done lane.
+
 ### synthesize (scripts/standup/synthesize.py)
 
 Reads `signals.json` and calls Claude directly (not via `run_skill.py`):
@@ -435,6 +437,7 @@ Reads `signals.json` and calls Claude directly (not via `run_skill.py`):
 - Builds prompt from `_SYNTHESIZE_PROMPT` with:
   - `TEAM ROSTER: <json list>` — strict filter: Claude must only report team members
   - `BOARDS: <json map>` — board_id → {board_name, sprint_name, end_date}
+  - `STORY POINTS:` computed totals per lane for the sprint and for each person (the model quotes them, never adds points); `post.py` / `render_html.py` show the same numbers as a per-lane board table and a points-by-person table
   - Full signals JSON (comments trimmed to last 3, bodies truncated at 300 chars)
   - `current_user` popped before sending — Claude must not see it
 

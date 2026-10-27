@@ -78,7 +78,7 @@ def _parse_slack_flags(message: str) -> dict:
 
     # Bare PR numbers — #N form (any size) or plain 5-6 digit numbers (>= 10000).
     # Small plain numbers are rejected (e.g. "@bot resync-prs fix 100 tests" must NOT
-    # match 100), but large numbers like "48239 48240" are unambiguously PR refs.
+    # match 100), but large numbers like "12345 12346" are unambiguously PR refs.
     cleaned = pr_url_re.sub("", message)
     seen_numbers: set[int] = set()
     for m in re.finditer(r"#(\d+)\b", cleaned):
@@ -508,7 +508,7 @@ def main() -> None:
             "[resync] ERROR: no PR targets specified.\n"
             "  Provide one of:\n"
             "    • PR URL(s): @bot resync-prs https://github.com/org/repo/pull/42\n"
-            "    • PR number(s): @bot resync-prs #42 #101  or  @bot resync-prs 48239 48240\n"
+            "    • PR number(s): @bot resync-prs #42 #101  or  @bot resync-prs 12345 12346\n"
             "    • All your open PRs: @bot resync-prs --me [--dry-run]\n"
         )
         print(msg, file=sys.stderr, flush=True)
@@ -520,7 +520,7 @@ def main() -> None:
             "**Examples:**\n"
             "- `@bot resync-prs https://github.com/org/repo/pull/42`\n"
             "- `@bot resync-prs #42 #101 --dry-run`\n"
-            "- `@bot resync-prs 48239 48240 --dry-run`\n"
+            "- `@bot resync-prs 12345 12346 --dry-run`\n"
             "- `@bot resync-prs --me --dry-run`\n"
         )
         (reports_dir / "resync_prs_report.md").write_text(error_md, encoding="utf-8")

@@ -537,3 +537,21 @@ def add_comment_markdown(config: dict, issue_key: str, markdown: str) -> None:
     """Post a comment whose formatting survives (headings, lists, marks); retried like every call here, errors redacted."""
     body = {"type": "doc", "version": 1, "content": adf.from_markdown(markdown)}
     _call(config, "POST", f"/rest/api/3/issue/{issue_key}/comment", only_when_rejected=True, json={"body": body})
+
+
+def whoami(config: dict) -> str:
+    """Display name of the authenticated user (a cheap credential check); raises :class:`JiraError`."""
+    return _json(_call(config, "GET", "/rest/api/3/myself"), "/myself").get("displayName", "")
+
+
+def list_board_sprints(config: dict, board_id: int, state: str) -> list[dict]:
+    """Sprints of a board in ``state`` (active / future / closed), via the agile API; raises :class:`JiraError`."""
+    sprints: list[dict] = []
+    start = 0
+    while True:
+        data = _json(_call(config, "GET", f"/rest/agile/1.0/board/{board_id}/sprint", params={"state": state, "startAt": start, "maxResults": 50}), f"/board/{board_id}/sprint")
+        page = data.get("values", [])
+        sprints += page
+        start += len(page)
+        if not page or data.get("isLast", True):
+            return sprints

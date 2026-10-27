@@ -105,3 +105,24 @@ class TestStripSectionHeading:
 
     def test_empty_string(self):
         assert strip_section_heading("") == ""
+
+
+def test_a_link_title_stays_visible_in_slack():
+    assert "<https://x/pull/7|#7 Fix the login>" in format_for_slack('[#7](https://x/pull/7 "Fix the login")')
+
+
+def test_a_titled_link_keeps_the_title_visible_in_slack_and_a_pipe_in_it_keeps_the_table_row_intact():
+    md = ('| Status | PR | Type |\n|---|---|---|\n'
+          '| PENDING | [#12](https://x/pull/12 "feat: a \\| b") | bug |\n')
+    out = format_for_slack(md)
+    assert "*PR:* <https://x/pull/12|#12 feat: a | b>" in out and "*Type:* bug" in out
+
+
+def test_a_long_title_is_clipped_in_slack():
+    out = format_for_slack('[#1](https://x/1 "' + "w" * 100 + '")')
+    assert out.startswith("<https://x/1|#1 ") and out.endswith("…>") and len(out) < 100
+
+
+def test_slack_control_characters_in_a_title_cannot_end_the_link():
+    out = format_for_slack('[#1](https://x/1 "a->b & <c>")')
+    assert out == "<https://x/1|#1 a-&gt;b &amp; &lt;c&gt;>"

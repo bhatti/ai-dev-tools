@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
+from scripts.common.sprint_load import LANES, overrides_from_env
+
 DEFAULT_PATH = Path(".ygs/readiness.yml")
 DEFAULT_SCALE = (1, 2, 3, 5, 8, 13)
 DEFAULT_NO_ENRICH = ("In Review", "Done")
+DEFAULT_CARRY_OVER_SHARE = 0.3  # a heuristic: more carried-over work than this and the sprint is mostly last sprint's leftovers
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,8 @@ class ReadinessConfig:
     points_scale: tuple[float, ...] = DEFAULT_SCALE
     variants: tuple[dict, ...] = ()
     no_enrich_statuses: tuple[str, ...] = DEFAULT_NO_ENRICH
+    lanes: dict = field(default_factory=dict)  # {lane: [status names]} for workflows whose names the default lane rules do not know
+    carry_over_share: float = DEFAULT_CARRY_OVER_SHARE
 
 
 def default_path() -> Path:
@@ -35,7 +40,7 @@ def load_config(path: str | Path | None = None) -> ReadinessConfig:
     if not p.exists():
         if path:
             raise ValueError(f"readiness config {p} does not exist")
-        return ReadinessConfig()
+        return ReadinessConfig(lanes=overrides_from_env())
     try:
         raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as e:
@@ -49,7 +54,13 @@ def load_config(path: str | Path | None = None) -> ReadinessConfig:
         raise ValueError("variants must be a list of {name, description}")
     if not (isinstance(skip, (list, tuple)) and all(isinstance(x, str) for x in skip)):
         raise ValueError("no_enrich_statuses must be a list of status names")
-    return ReadinessConfig(tuple(float(x) for x in scale), tuple(variants), tuple(skip))
+    lanes = raw.get("lanes", {})
+    if not (isinstance(lanes, dict) and all(k in LANES and isinstance(v, list) and all(isinstance(n, str) for n in v) for k, v in lanes.items())):
+        raise ValueError(f"lanes must map lanes ({', '.join(LANES)}) to lists of status names")
+    share = raw.get("carry_over_share", DEFAULT_CARRY_OVER_SHARE)
+    if not (isinstance(share, (int, float)) and not isinstance(share, bool) and 0 < share <= 1):
+        raise ValueError("carry_over_share must be a number above 0 and at most 1")
+    return ReadinessConfig(tuple(float(x) for x in scale), tuple(variants), tuple(skip), {**overrides_from_env(), **lanes}, float(share))
 
 
 def no_enrich_reason(ticket: dict, cfg: ReadinessConfig) -> str:

@@ -40,6 +40,15 @@ def is_full_report(config: dict) -> bool:
     return bool(re.search(r"--full\b", config.get("SLACK_MESSAGE", ""), re.IGNORECASE))
 
 
+def _slack_link(m: re.Match) -> str:
+    """``[label](url "title")`` as ``<url|label title>``: Slack has no hover text, and a bare ``#12`` would not identify the PR."""
+    label, url, title = m.group(1), m.group(2), (m.group(3) or "").strip()
+    if title:
+        label = f"{label} {title[:57] + '…' if len(title) > 60 else title}"
+    label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")   # Slack control characters, so "a->b" cannot end the link
+    return f"<{url}|{label}>"
+
+
 def format_for_slack(text: str) -> str:
     """Convert markdown to Slack mrkdwn format."""
     # Fenced code blocks → Slack ```code``` blocks (preserve, just strip lang tag)
@@ -53,7 +62,7 @@ def format_for_slack(text: str) -> str:
             # Skip separator rows (|---|---|)
             if re.match(r'^\|[\s\-\|:]+\|?\s*$', row):
                 continue
-            cells = [c.strip() for c in row.strip('|').split('|') if c.strip()]
+            cells = [c.replace('\\|', '|').strip() for c in re.split(r'(?<!\\)\|', row.strip('|')) if c.strip()]
             if not cells:
                 continue
             if not header_cells:
@@ -84,7 +93,7 @@ def format_for_slack(text: str) -> str:
     # __bold__ → *bold*
     text = re.sub(r'__(.+?)__', r'*\1*', text)
     # [text](url) → <url|text>
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+    text = re.sub(r'\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)', _slack_link, text)
     # Horizontal rules → visual divider
     text = re.sub(r'^[-*_]{3,}\s*$', '─────────────────────', text, flags=re.MULTILINE)
     # Bullet lists

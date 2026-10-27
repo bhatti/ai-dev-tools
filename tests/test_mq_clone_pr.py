@@ -75,7 +75,7 @@ class TestClonePr:
         }
         mock_ws.return_value = tmp_path
         mock_sub.run.return_value = MagicMock(returncode=0)
-        result = CliRunner().invoke(main, ["--pr-number", "PROJ-40913"])
+        result = CliRunner().invoke(main, ["--pr-number", "PROJ-913"])
         assert result.exit_code == 0
         mock_resolve.assert_called_once()
         calls = mock_sub.run.call_args_list
