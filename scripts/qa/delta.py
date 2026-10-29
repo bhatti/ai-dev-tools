@@ -5,6 +5,7 @@ Per-case delta (matched by case id):
     fail/fail -> PRE_EXISTING     only candidate -> NEW        only baseline -> REMOVED
     blocked or infra on either side -> INFRA (never a regression)
     not-run / inconclusive on either side -> INCONCLUSIVE
+    baseline fail whose message is a timeout / connection / 502-504 error -> INCONCLUSIVE (not FIXED)
 
 Run status precedence: BLOCKED (a side executed nothing) > REGRESSION > NEW_FAILURES (a case only the candidate
 has, failing) > INCOMPLETE (infra, blocked, inconclusive or removed cases) > PRE_EXISTING (fails on both sides)
@@ -34,6 +35,11 @@ _ERROR_LEVELS = {"error", "err", "fatal", "critical", "crit", "panic", "severe",
 _INCREASE_FACTOR, _INCREASE_MIN = 3, 5
 
 
+# A baseline failure whose message names a connectivity or gateway problem says nothing about the product: do not
+# let it turn a candidate pass into FIXED. (The candidate side keeps such failures: a timeout there is a regression.)
+_TRANSIENT = re.compile(r"timed? ?out|timeout|ECONNREFUSED|ECONNRESET|connection (?:refused|reset)|\b50[234]\b|bad gateway|service unavailable", re.I)
+
+
 def classify_case(base: dict | None, cand: dict | None) -> str:
     if base is None and cand is None:
         raise ValueError("both sides missing")
@@ -45,6 +51,8 @@ def classify_case(base: dict | None, cand: dict | None) -> str:
     if "blocked" in (b, c) or base.get("infra") or cand.get("infra"):
         return "INFRA"
     if b in ("not-run", "inconclusive") or c in ("not-run", "inconclusive"):
+        return "INCONCLUSIVE"
+    if b == "fail" and any(_TRANSIENT.search(m) for m in base.get("messages", [])):
         return "INCONCLUSIVE"
     if b == "pass" and c == "pass":
         return "BOTH_PASS"

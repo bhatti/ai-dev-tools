@@ -2,8 +2,14 @@
 
 plan.json (written by the agent from the PR + acceptance criteria):
     {"criteria": [{"id": "AC1", "text": "...", "source": "issue:ABC-1|pr_description|inferred"}],
+     "summary": {"problem": "what is wrong today", "solution": "what the change does"},          (optional)
      "cases": [{"id": "C1", "ac": ["AC1"], "type": "API|UI|CLI|UNIT|MANUAL", "title": "...",
-                "steps": "...", "expected": "...", "mutating": false}]}
+                "steps": "...", "expected": "...", "mutating": false,
+                "look_for": "what a human should see in the screenshot (UI cases)",
+                "required": false}]}                 required: the PR/issue spells this scenario out; it must execute
+
+``required`` marks a scenario the PR or issue describes step by step. It is the contract: if it cannot be run (pass or
+fail) the report is Blocked rather than quietly verifying a similar, easier scenario.
 
 results (JSON Lines, one record per check, appended by helpers.sh / ui_runner.py):
     {"case": "C1", "outcome": "pass|fail|blocked|not-run|inconclusive", "message": "...",
@@ -59,6 +65,32 @@ def change_coverage(plan: dict, changed_files: list[str]) -> tuple[list[str], li
     if changes["backend"] and not types & {"API", "CLI", "UNIT"}:
         gaps.append(f"the change touches backend code ({len(changes['backend'])} file(s), e.g. {changes['backend'][0]}) but the plan has no API, CLI or UNIT case")
     return blockers, gaps
+
+
+_INCLUDE = re.compile(r"""^\s*(?:source|\.)\s+["']?([^\s"';&|$`()]+)["']?""", re.M)
+
+
+def read_test_sources(paths: list[str]) -> dict[str, str]:
+    """Text of each test file plus the shell scripts it ``source``s (``. file`` too), so a case id defined in a helper is
+    traced. Includes resolve relative to the including file, must stay inside the directory of the file named on the
+    command line, and are read once (cycles end). Dynamic paths (``$VAR``) are skipped."""
+    sources: dict[str, str] = {}
+    for top in paths:
+        root = Path(top).resolve().parent
+        stack = [Path(top)]
+        while stack:
+            f = stack.pop()
+            key = str(f)
+            if key in sources:
+                continue
+            sources[key] = f.read_text(encoding="utf-8")
+            if f.suffix != ".sh":
+                continue
+            for rel in _INCLUDE.findall(sources[key]):
+                inc = (f.parent / rel).resolve()
+                if inc.is_file() and root in inc.parents:
+                    stack.append(inc)
+    return sources
 
 
 def untraced_cases(plan: dict, test_sources: dict[str, str]) -> list[str]:
@@ -147,6 +179,8 @@ def validate_plan(plan: dict) -> list[str]:
                 problems.append(f"case {cid} references unknown criterion {ac}")
         if not c.get("expected"):
             problems.append(f"case {cid} has no expected result")
+        if "required" in c and not isinstance(c["required"], bool):
+            problems.append(f"case {cid}: required must be true or false")
     return problems
 
 
@@ -179,6 +213,9 @@ def fitness(plan: dict, env: dict | None = None) -> dict:
     needs_env = [c for c in automatable if c.get("type") in ("API", "UI")]
     if needs_env and not (env or {}).get("url"):
         blockers.append("API/UI cases exist but no target URL is configured")
+    no_look = [c["id"] for c in cases if c.get("type") == "UI" and c.get("id") and not c.get("look_for")]
+    if no_look:
+        gaps.append(f"UI case(s) without look_for (what a reviewer should see in the screenshot): {', '.join(no_look)}")
     if sum(1 for c in cases if c.get("mutating")) and not (env or {}).get("allow_mutations"):
         gaps.append("mutating cases will be blocked without --allow-mutations")
     change_blockers, change_gaps = change_coverage(plan, (env or {}).get("changed_files") or [])
@@ -245,8 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.pr_context:
             env["changed_files"] = json.loads(Path(a.pr_context).read_text(encoding="utf-8")).get("changed_files") or []
         if a.tests:
-            env["test_sources"] = {t: Path(t).read_text(encoding="utf-8") for t in a.tests}
-    except (OSError, json.JSONDecodeError) as e:
+            env["test_sources"] = read_test_sources(a.tests)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         print(json.dumps({"error": f"cannot read input: {e}"}))
         return 2
     result = fitness(plan, env)

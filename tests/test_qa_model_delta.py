@@ -48,7 +48,7 @@ class TestLoadAndCollapse:
 
 PLAN = {"criteria": [{"id": "AC1", "text": "limit 10", "source": "issue:X-1"}, {"id": "AC2", "text": "error msg", "source": "pr_description"}],
         "cases": [{"id": "C1", "ac": ["AC1"], "type": "API", "expected": "409"},
-                  {"id": "C2", "ac": ["AC1", "AC2"], "type": "UI", "expected": "banner"}]}
+                  {"id": "C2", "ac": ["AC1", "AC2"], "type": "UI", "expected": "banner", "look_for": "banner"}]}
 
 
 class TestPlan:
@@ -287,7 +287,7 @@ class TestPlanAgainstTheChange:
         assert r["verdict"] == "NO-GO" and any("UI" in b for b in r["blockers"])
 
     def test_ui_change_with_a_ui_case_is_fine(self):
-        plan = {**self.UI_PLAN, "cases": [*self.UI_PLAN["cases"], {"id": "C2", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e"}]}
+        plan = {**self.UI_PLAN, "cases": [*self.UI_PLAN["cases"], {"id": "C2", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e", "look_for": "x"}]}
         assert md.fitness(plan, {"url": "http://x", "changed_files": ["web/src/Button.tsx"]})["verdict"] == "GO"
 
     def test_a_manual_ui_case_does_not_satisfy_the_ui_requirement(self):
@@ -299,7 +299,7 @@ class TestPlanAgainstTheChange:
         assert md.fitness(self.UI_PLAN, {"url": "http://x", "changed_files": files})["verdict"] == "GO"
 
     def test_backend_change_with_only_ui_cases_is_a_gap(self):
-        plan = {**self.UI_PLAN, "cases": [{"id": "C1", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e"}]}
+        plan = {**self.UI_PLAN, "cases": [{"id": "C1", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e", "look_for": "x"}]}
         r = md.fitness(plan, {"url": "http://x", "changed_files": ["service/handler.go"]})
         assert r["verdict"] == "CAUTION" and any("backend" in g for g in r["gaps"])
 
@@ -334,3 +334,63 @@ class TestPlanAgainstTheChange:
         assert md.main([str(plan), "--url", "http://x", "--pr-context", str(ctx), "--tests", str(sh)]) == 2
         out = json.loads(capsys.readouterr().out.split("::add-task-context")[0])
         assert any("UI" in b for b in out["blockers"]) and any("syntax" in b for b in out["blockers"])
+
+
+class TestSourcedHelpers:
+    def test_ids_defined_in_a_sourced_helper_are_traced(self, tmp_path):
+        (tmp_path / "lib.sh").write_text('qa_case C2\n')
+        main = tmp_path / "api-tests.sh"
+        main.write_text('source ./lib.sh\nqa_case C1\n')
+        sources = md.read_test_sources([str(main)])
+        assert md.untraced_cases({"cases": [{"id": "C1", "type": "API"}, {"id": "C2", "type": "API"}]}, sources) == []
+
+    def test_dot_include_and_quoted_paths(self, tmp_path):
+        (tmp_path / "lib.sh").write_text('qa_case C2\n')
+        main = tmp_path / "t.sh"
+        main.write_text('. "$(dirname "$0")/x" 2>/dev/null\n. "./lib.sh"\nqa_case C1\n')
+        assert "qa_case C2" in "".join(md.read_test_sources([str(main)]).values())
+
+    def test_includes_outside_the_tests_directory_are_ignored(self, tmp_path):
+        outside = tmp_path / "secret.sh"
+        outside.write_text("qa_case C9\n")
+        d = tmp_path / "t"
+        d.mkdir()
+        main = d / "t.sh"
+        main.write_text(f"source ../secret.sh\nsource {outside}\n")
+        assert "C9" not in "".join(md.read_test_sources([str(main)]).values())
+
+    def test_cyclic_includes_terminate(self, tmp_path):
+        a, b = tmp_path / "a.sh", tmp_path / "b.sh"
+        a.write_text("source ./b.sh\nqa_case A\n")
+        b.write_text("source ./a.sh\nqa_case B\n")
+        assert set(md.read_test_sources([str(a)])) >= {str(a), str(b)}
+
+
+class TestPlanFields:
+    def test_ui_case_without_look_for_is_a_gap(self):
+        plan = {"criteria": [{"id": "AC1", "text": "t", "source": "issue:X-1"}],
+                "cases": [{"id": "C1", "ac": ["AC1"], "type": "UI", "title": "t", "expected": "e"}]}
+        r = md.fitness(plan, {"url": "http://x"})
+        assert r["verdict"] == "CAUTION" and any("look_for" in g for g in r["gaps"])
+        plan["cases"][0]["look_for"] = "banner"
+        assert md.fitness(plan, {"url": "http://x"})["verdict"] == "GO"
+
+    def test_required_must_be_boolean(self):
+        plan = {"criteria": [{"id": "AC1", "text": "t", "source": "issue:X-1"}],
+                "cases": [{"id": "C1", "ac": ["AC1"], "type": "API", "title": "t", "expected": "e", "required": "yes"}]}
+        assert any("required" in p for p in md.validate_plan(plan))
+
+
+class TestTransientBaselineFailure:
+    @pytest.mark.parametrize("msg", ["request timed out after 30s", "connect ECONNREFUSED 127.0.0.1:9000", "HTTP 503 from gateway", "HTTP 502"])
+    def test_a_baseline_failure_that_looks_transient_is_inconclusive(self, msg):
+        base = {"outcome": "fail", "infra": False, "messages": [msg]}
+        assert dl.classify_case(base, {"outcome": "pass", "infra": False, "messages": []}) == "INCONCLUSIVE"
+
+    def test_a_real_baseline_failure_is_still_fixed(self):
+        base = {"outcome": "fail", "infra": False, "messages": ["expected 409 got 200"]}
+        assert dl.classify_case(base, {"outcome": "pass", "infra": False, "messages": []}) == "FIXED"
+
+    def test_a_candidate_timeout_is_still_a_regression(self):
+        cand = {"outcome": "fail", "infra": False, "messages": ["request timed out after 30s"]}
+        assert dl.classify_case({"outcome": "pass", "infra": False, "messages": []}, cand) == "REGRESSION"

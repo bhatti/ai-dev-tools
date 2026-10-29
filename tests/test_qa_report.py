@@ -115,7 +115,7 @@ class TestMarkdown:
         assert "abcdefghijklmnop123" not in md and "supersecretvalue99" not in md
 
     def test_cases_without_results_show_not_run(self):
-        assert "| C2 login | " not in self.md([rec("C1", "pass")]) and "C2 limit banner | UI | AC2 | not-run" in self.md([rec("C1", "pass")])
+        assert "| C2 login | " not in self.md([rec("C1", "pass")]) and "C2 limit banner | UI | AC2 | banner | n/a | not-run" in self.md([rec("C1", "pass")])
 
 
 class TestOutputs:
@@ -274,9 +274,23 @@ class TestNothingSilentlyMissing:
         a = assess([rec("C1", "pass")])  # C2 (UI) never reported anything
         assert a["readiness"] == "Not ready" and any("C2" in p and "no result" in p for p in a["problems"])
 
-    def test_an_explicit_skip_is_a_concern_not_a_pass(self):
+    def test_an_explicit_skip_of_an_automated_case_is_a_problem_never_a_pass(self):
         a = assess([rec("C1", "pass"), rec("C2", "not-run", "skipped on purpose")])
-        assert a["readiness"] == "Ready with concerns" and a["ac_status"]["AC2"] == "unverifiable"
+        assert a["readiness"] == "Not ready" and a["ac_status"]["AC2"] == "unverifiable"
+        assert any("C2" in p and "skipped" in p for p in a["problems"])
+
+    def test_an_inconclusive_automated_case_is_a_problem(self):
+        a = assess([rec("C1", "pass"), rec("C2", "inconclusive", "page never settled")])
+        assert a["readiness"] == "Not ready" and any("C2" in p for p in a["problems"])
+
+    def test_a_blocked_case_stays_a_concern(self):
+        a = assess([rec("C1", "pass"), rec("C2", "blocked", "no browser")])
+        assert a["readiness"] == "Ready with concerns"
+
+    def test_a_skipped_manual_case_is_not_a_problem(self):
+        plan = {**PLAN, "cases": [*PLAN["cases"], {"id": "C3", "title": "eyeball", "type": "MANUAL", "ac": ["AC1"], "expected": "ok"}]}
+        a = assess([rec("C1", "pass"), rec("C2", "pass"), rec("C3", "not-run")], plan=plan)
+        assert a["readiness"] == "Ready with concerns"
 
     def test_manual_cases_without_results_are_not_problems(self):
         plan = {**PLAN, "cases": [*PLAN["cases"], {"id": "C3", "title": "eyeball", "type": "MANUAL", "ac": ["AC1"], "expected": "looks right"}]}
@@ -292,3 +306,58 @@ class TestNothingSilentlyMissing:
         a = assess([rec("C1", "pass"), rec("C2", "fail", "\x1b[31mexpected visible\x1b[39m")])
         md = rp.render_markdown(PLAN, a, {"mode": "verify"}, None, {})
         assert "\x1b" not in md and "expected visible" in md
+
+
+class TestRequiredCases:
+    PLAN_REQ = {**PLAN, "cases": [{**PLAN["cases"][0], "required": True}, PLAN["cases"][1]]}
+
+    def test_a_required_case_that_did_not_execute_blocks(self):
+        a = assess([rec("C1", "blocked", "topology missing"), rec("C2", "pass")], plan=self.PLAN_REQ)
+        assert a["readiness"] == "Blocked" and any("C1" in b and "required" in b for b in a["blockers"])
+
+    def test_a_required_case_that_ran_does_not_block(self):
+        assert assess([rec("C1", "pass"), rec("C2", "pass")], plan=self.PLAN_REQ)["readiness"] == "Ready"
+        assert assess([rec("C1", "fail"), rec("C2", "pass")], plan=self.PLAN_REQ)["readiness"] == "Not ready"
+
+    def test_a_required_case_with_no_record_blocks(self):
+        a = assess([rec("C2", "pass")], plan=self.PLAN_REQ)
+        assert a["readiness"] == "Blocked"
+
+
+class TestEnvironmentGuards:
+    def test_baseline_equal_to_candidate_blocks(self):
+        a = rp.assess(PLAN, [rec("C1", "pass"), rec("C2", "pass")], None, [], {}, target_url="http://x:9000/", baseline_url="http://x:9000")
+        assert a["readiness"] == "Blocked" and any("baseline" in b and "candidate" in b for b in a["blockers"])
+
+    def test_distinct_baseline_is_fine(self):
+        a = rp.assess(PLAN, [rec("C1", "pass"), rec("C2", "pass")], None, [], {}, target_url="http://x:9000", baseline_url="http://x:9001")
+        assert a["readiness"] == "Ready"
+
+
+class TestPlanNarrativeInReport:
+    PLAN_NARR = {**PLAN, "summary": {"problem": "Carts accept unlimited items", "solution": "Reject the 11th item with 409"},
+                 "cases": [{**PLAN["cases"][0], "steps": "add 11 items"}, {**PLAN["cases"][1], "look_for": "red banner under the cart"}]}
+
+    def md(self, plan=None, links=None):
+        plan = plan or self.PLAN_NARR
+        a = assess([rec("C1", "pass"), rec("C2", "pass")], plan=plan)
+        return rp.render_markdown(plan, a, {"mode": "verify"}, None, {}, links)
+
+    def test_problem_solution_and_per_case_expectations_are_shown(self):
+        md = self.md()
+        assert "## Problem and solution" in md and "Carts accept unlimited items" in md and "Reject the 11th item with 409" in md
+        assert "| Expected | Look for |" in md and "red banner under the cart" in md and "409" in md
+
+    def test_narrative_text_is_escaped(self):
+        plan = {**self.PLAN_NARR, "summary": {"problem": "<img src=x onerror=1>", "solution": "a|b"}}
+        md = self.md(plan)
+        assert "<img" not in md.replace("\\<", "")
+
+    def test_no_summary_means_no_section(self):
+        assert "## Problem and solution" not in self.md(PLAN)
+
+    def test_screenshots_are_embedded_with_the_look_for_caption(self):
+        links = {"shot.png": "evidence/shot.png"}
+        a = assess([rec("C1", "pass"), rec("C2", "pass", screenshot="shot.png")], plan=self.PLAN_NARR)
+        md = rp.render_markdown(self.PLAN_NARR, a, {"mode": "verify"}, None, {}, links)
+        assert "![C2: red banner under the cart](evidence/shot.png)" in md

@@ -21,7 +21,7 @@ from scripts.common.skills import inline_shared_refs
 
 ROOT = Path(os.environ.get("YGS_SKILLS_DIR") or Path(__file__).resolve().parents[2] / "you-got-skills")
 SKILLS = ["ygs-flaky-test", "ygs-qa", "ygs-pr-risk", "ygs-sprint-ready", "ygs-enrich-ticket"]
-SHARED = ["pr-context.md", "evidence-rules.md", "pr-metrics.md", "ticket-readiness.md"]
+SHARED = ["pr-context.md", "evidence-rules.md", "pr-metrics.md", "ticket-readiness.md", "gate-integrity.md"]
 MAX_SKILL_LINES = 260
 
 pytestmark = pytest.mark.skipif(not (ROOT / "skills").is_dir(), reason="you-got-skills checkout not found")
@@ -162,3 +162,10 @@ class TestDry:
                         helps[module] = subprocess.run([sys.executable, "-m", module, "--help"], cwd=repo, capture_output=True, text=True, timeout=60).stdout
                     for flag in set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", rest.split(" -- ")[0].split(" #")[0])):
                         assert re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", helps[module]), f"{path.name}: `{module} {flag}` is documented but --help of the tool does not list {flag}"
+
+
+@pytest.mark.parametrize("name", ["ygs-code-review", "ygs-review-pr", "ygs-review-deep", "ygs-review-ready", "ygs-ship"])
+def test_review_and_ship_skills_apply_the_gate_integrity_scan(name):
+    """The scan lives once in shared/gate-integrity.md; each gate that judges a diff points at it (directly or through hygiene-checks)."""
+    text = (_skill_dir(name) / "SKILL.md").read_text(encoding="utf-8")
+    assert "gate-integrity" in text, f"{name} does not apply shared/gate-integrity.md"

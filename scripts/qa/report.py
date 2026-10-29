@@ -7,7 +7,10 @@ Rules enforced here rather than left to the model:
   * each acceptance criterion is shown verbatim with the cases that cover it and a status:
     met / partial / not met / unverifiable
   * spec compliance, scope creep and quality are separate axes (one never masks another)
-  * blocked and not-run cases are listed, never counted as passed; all untrusted text is escaped and redacted
+  * a skipped or inconclusive automated case is a problem (Not ready), never a pass; a ``required`` case (a scenario the
+    PR or issue spells out) that did not execute blocks instead of being replaced by an easier one
+  * the baseline must differ from the candidate (comparing a build with itself proves nothing)
+  * blocked cases are listed, never counted as passed; all untrusted text is escaped and redacted
 
 Usage:
     python3 -m scripts.qa.report --plan plan.json --candidate qa-out/candidate/results.jsonl \
@@ -27,11 +30,16 @@ from pathlib import Path
 from scripts.common.report_bundle import collect_evidence, md_cell as _cell, write_bundle
 from scripts.qa import model
 
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 _READINESS_SIGNAL = {"Ready": "DONE", "Ready with concerns": "DONE_WITH_CONCERNS", "Not ready": "DONE_WITH_CONCERNS", "Blocked": "BLOCKED"}
 
 
+def _same_url(a: str, b: str) -> bool:
+    return bool(a and b) and a.strip().rstrip("/").lower() == b.strip().rstrip("/").lower()
+
+
 def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failures: list[dict], findings: dict, mode: str = "verify",
-           changed_files: list[str] | None = None) -> dict:
+           changed_files: list[str] | None = None, target_url: str = "", baseline_url: str = "") -> dict:
     """Compute readiness and the reasons behind it."""
     all_outcomes = model.case_outcomes(cand_records)
     outcomes, extra = model.split_by_plan(plan, all_outcomes)
@@ -44,6 +52,8 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     blockers += [f"{e.get('side', '?')} environment failed to start: {e.get('error', '')}" for e in env_failures]
     change_blockers, change_gaps = model.change_coverage(plan, changed_files or [])
     blockers += change_blockers
+    if _same_url(target_url, baseline_url):
+        blockers.append(f"the baseline and the candidate are the same environment ({baseline_url}): the comparison proves nothing")
     if mode == "regression" and delta is None:
         blockers.append("regression mode needs a delta (baseline vs candidate comparison) but none was provided")
     if summ["executed"] == 0:
@@ -54,6 +64,11 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     silent = [cid for cid in automated if cid not in all_outcomes]
     if silent:
         problems.append(f"no result was recorded for case(s) {', '.join(silent)}: their test never ran or never reported")
+    skipped = [cid for cid in automated if cid in all_outcomes and all_outcomes[cid]["outcome"] in ("not-run", "inconclusive")]
+    if skipped:
+        problems.append(f"case(s) {', '.join(skipped)} skipped or inconclusive: a skipped case is not verified")
+    required = [c["id"] for c in plan.get("cases", []) if c.get("id") and c.get("required") is True and outcomes[c["id"]]["outcome"] not in ("pass", "fail")]
+    blockers += [f"required case {cid} did not execute ({outcomes[cid]['outcome']}): the PR/issue describes this scenario, a similar one cannot stand in" for cid in required]
     if summ["counts"]["fail"]:
         problems.append(f"{summ['counts']['fail']} case(s) failed")
     not_met = [a for a, s in statuses.items() if s == "not met"]
@@ -74,8 +89,9 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     if cov["uncovered"]:
         concerns.append(f"criteria without a test case: {', '.join(cov['uncovered'])}")
     c = summ["counts"]
-    if c["blocked"] or c["not-run"] or c["inconclusive"]:
-        concerns.append(f"{c['blocked']} blocked, {c['not-run']} not run, {c['inconclusive']} inconclusive case(s)")
+    open_manual = {k: sum(1 for cid, o in outcomes.items() if o["outcome"] == k and cid not in automated) for k in ("not-run", "inconclusive")}
+    if c["blocked"] or any(open_manual.values()):  # skipped automated cases are problems above
+        concerns.append(f"{c['blocked']} blocked, {open_manual['not-run']} not run, {open_manual['inconclusive']} inconclusive case(s)")
     if plan.get("criteria") and all(cr.get("source") == "inferred" for cr in plan["criteria"]):
         concerns.append("all criteria are inferred (the PR and linked issues had none)")
     if findings.get("scope_creep"):
@@ -112,13 +128,19 @@ def render_markdown(plan: dict, assessment: dict, meta: dict, delta: dict | None
              ("Pass rate (executed only)", "n/a" if s["pass_rate"] is None else f"{s['pass_rate']:.0%}")]
     lines += ["| Field | Value |", "| --- | --- |"] + [f"| {_cell(k)} | {_cell(v)} |" for k, v in rows]
 
+    summary = plan.get("summary") or {}
+    if summary.get("problem") or summary.get("solution"):
+        lines += ["", "## Problem and solution", ""]
+        lines += [f"- **Problem:** {_cell(summary['problem'])}"] if summary.get("problem") else []
+        lines += [f"- **Solution:** {_cell(summary['solution'])}"] if summary.get("solution") else []
+
     lines += ["", "## Acceptance criteria traceability", "", "| AC | Criterion (verbatim) | Source | Cases | Status |", "| --- | --- | --- | --- | --- |"]
     for c in plan.get("criteria", []):
         cases = ", ".join(a["coverage"]["by_criterion"].get(c.get("id"), [])) or "none"
         lines.append(f"| {_cell(c.get('id', ''))} | {_cell(c.get('text', ''))} | {_cell(c.get('source', ''))} | {_cell(cases)} | "
                      f"{_cell(a['ac_status'].get(c.get('id'), 'unverifiable'))} |")
 
-    lines += ["", "## Test cases", "", "| Case | Type | AC | Outcome | Evidence |", "| --- | --- | --- | --- | --- |"]
+    lines += ["", "## Test cases", "", "| Case | Type | AC | Expected | Look for | Outcome | Evidence |", "| --- | --- | --- | --- | --- | --- | --- |"]
     for case in plan.get("cases", []):
         o = a["outcomes"].get(case.get("id"))
         outcome = o["outcome"] if o else "not-run"
@@ -130,7 +152,18 @@ def render_markdown(plan: dict, assessment: dict, meta: dict, delta: dict | None
             ev = f"{'; '.join(o['messages'][:2])} ({ev})"
         ev_links = _evidence_links(o.get("evidence") if o else None, links)
         lines.append(f"| {_cell(str(case.get('id', '')) + ' ' + str(case.get('title', '')))} | {_cell(case.get('type', ''))} | "
-                     f"{_cell(', '.join(case.get('ac', [])))} | {outcome}{' (infra)' if o and o['infra'] else ''} | {_cell(ev)[:300]} {ev_links} |")
+                     f"{_cell(', '.join(case.get('ac', [])))} | {_cell(case.get('expected', ''))} | {_cell(case.get('look_for', '')) or 'n/a'} | "
+                     f"{outcome}{' (infra)' if o and o['infra'] else ''}{' (required)' if case.get('required') is True else ''} | {_cell(ev)[:300]} {ev_links} |")
+
+    shots = []
+    for case in plan.get("cases", []):
+        o = a["outcomes"].get(case.get("id"))
+        shot = ((o or {}).get("evidence") or {}).get("screenshot", "")
+        link = links.get(shot)
+        if link and shot.lower().endswith(_IMAGE_SUFFIXES):
+            shots.append(f"![{_cell(case['id'])}: {_cell(case.get('look_for') or case.get('title', ''))}]({link})")
+    if shots:
+        lines += ["", "### Screenshots", ""] + [f"{sh}\n" for sh in shots]
 
     if a["extra"]:
         lines += ["", "## Additional checks (not part of the plan; they do not count toward verification)", "",
@@ -143,6 +176,14 @@ def render_markdown(plan: dict, assessment: dict, meta: dict, delta: dict | None
         lines += [f"| {_cell(r['case'])} | {_cell(r['baseline'] or 'n/a')} | {_cell(r['candidate'] or 'n/a')} | {_cell(r['delta'])} | "
                   f"{_evidence_links(r.get('baseline_evidence'), links) or 'n/a'} / {_evidence_links(r.get('candidate_evidence'), links) or 'n/a'} |"
                   for r in delta["cases"]]
+        pairs = []
+        for r in delta["cases"]:
+            for side, key in (("baseline", "baseline_evidence"), ("candidate", "candidate_evidence")):
+                shot = (r.get(key) or {}).get("screenshot", "")
+                if links.get(shot) and shot.lower().endswith(_IMAGE_SUFFIXES):
+                    pairs.append(f"![{_cell(r['case'])} {side}]({links[shot]})")
+        if pairs:
+            lines += ["", "### Screenshots (baseline vs candidate)", ""] + [f"{p}\n" for p in pairs]
         if delta.get("new_log_errors"):
             lines += ["", "### New or increased error patterns in candidate logs", "", "| Kind | Count (baseline) | Sample |", "| --- | --- | --- |"]
             lines += [f"| {_cell(e.get('kind', 'new'))} | {e['count']} ({e.get('baseline_count', 0)}) | {_cell(e['sample'])} |" for e in delta["new_log_errors"][:20]]
@@ -187,7 +228,8 @@ def _evidence_paths(outcomes: dict[str, dict], delta: dict | None) -> list[str]:
 
 def write_outputs(plan: dict, cand_records: list[dict], delta: dict | None, env_failures: list[dict], findings: dict, meta: dict,
                   out_dir: Path, evidence_roots: list[Path] | None = None) -> dict:
-    a = assess(plan, cand_records, delta, env_failures, findings, meta.get("mode", "verify"), meta.get("changed_files"))
+    a = assess(plan, cand_records, delta, env_failures, findings, meta.get("mode", "verify"), meta.get("changed_files"),
+               meta.get("target_url", ""), meta.get("baseline_url", ""))
     links = collect_evidence(out_dir, _evidence_paths({**a["outcomes"], **a["extra"]}, delta), evidence_roots or [])
     line = status_line(a, delta)
     result = {**line, "ac_status": a["ac_status"], "summary_stats": a["summary"], "delta": delta, "meta": meta, "evidence_files": sorted(links.values())}

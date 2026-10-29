@@ -74,7 +74,7 @@ PLAN = {
     "cases": [
         {"id": "C1", "ac": ["AC1"], "type": "API", "title": "list items", "expected": "200"},
         {"id": "C2", "ac": ["AC2"], "type": "API", "title": "limit check", "expected": "409"},
-        {"id": "C3", "ac": ["AC3"], "type": "UI", "title": "limit banner", "expected": "banner visible"},
+        {"id": "C3", "ac": ["AC3"], "type": "UI", "title": "limit banner", "expected": "banner visible", "look_for": "banner under the cart"},
         {"id": "C4", "ac": ["AC1"], "type": "API", "title": "health", "expected": "200"},
         {"id": "C5", "ac": ["AC2"], "type": "API", "title": "create item", "expected": "201", "mutating": True},
     ],
