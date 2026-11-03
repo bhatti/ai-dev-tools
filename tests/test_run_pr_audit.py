@@ -808,7 +808,7 @@ class TestLearningsPrompt:
     def test_reviewer_block_names_reviewers_and_dry_run_is_not_mentioned_to_model(self):
         from scripts.analyze.audit_options import AuditOptions
         from scripts.analyze.run_pr_audit import _learnings_instructions
-        block = _learnings_instructions(AuditOptions(dry_run=True, reviewers=("alice", "bob")), unmatched=["bob"])
+        block = _learnings_instructions(AuditOptions(dry_run=True, reviewers=("alice", "bob")), ["bob"], {"alice": ["Alice A", "alice"]})
         assert "alice" in block and "bob" in block and "review-learnings" in block
         assert "dry" not in block.lower()
         assert "no PR activity" in block  # unmatched warning
@@ -816,7 +816,7 @@ class TestLearningsPrompt:
     def test_no_reviewers_still_asks_for_category_learnings(self):
         from scripts.analyze.audit_options import AuditOptions
         from scripts.analyze.run_pr_audit import _learnings_instructions
-        block = _learnings_instructions(AuditOptions(), unmatched=[])
+        block = _learnings_instructions(AuditOptions(), [], {})
         assert "review-learnings" in block and "Reviewer focus" not in block
 
 
@@ -879,3 +879,65 @@ class TestReviewersEdgeCases:
     def test_smart_quotes_from_slack(self):
         r = _parse_slack_flags({"SLACK_MESSAGE": "--reviewers “Alice Smith,Bob”"})
         assert r["reviewers"] == "Alice Smith,Bob"
+
+
+class TestReviewerScope:
+    def _pr(self):
+        return {"number": 1, "author": "dev", "human_comments": [{"author": "Chris Jones", "author_alias": "cjones", "body": "x" * 40}],
+                "participant_groups": [["Chris Jones", "cjones", "{u-1}"]]}
+
+    def test_matches_are_recorded_for_later_tasks_and_unmatched_reported(self, tmp_path, capsys):
+        from scripts.analyze.audit_options import AuditOptions, load_aliases, load_unmatched
+        from scripts.analyze.run_pr_audit import _apply_reviewer_scope
+        opts = AuditOptions(reviewers=("cjones", "nobody"))
+        unmatched, aliases = _apply_reviewer_scope([self._pr()], opts, tmp_path)
+        assert unmatched == ["nobody"] and set(aliases["cjones"]) == {"Chris Jones", "cjones", "{u-1}"}
+        assert load_unmatched(tmp_path) == ["nobody"] and "cjones" in load_aliases(tmp_path)
+        out = capsys.readouterr().out
+        assert "PR_AUDIT_REVIEWERS_MATCHED::cjones" in out and "PR_AUDIT_REVIEWERS_UNMATCHED::nobody" in out
+        assert "PR_AUDIT_REVIEWER_PRS::1" in out
+
+    def test_without_reviewers_nothing_is_scoped(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _apply_reviewer_scope
+        assert _apply_reviewer_scope([self._pr()], AuditOptions(), tmp_path) == ([], {})
+
+
+class TestNoReviewerMatch:
+    def test_fails_loudly_with_candidates_and_tells_slack(self, tmp_path, capsys):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _exit_no_reviewer_match
+        config = {"SLACK_THREAD_TS": "1.2", "_reviewer_candidates": ["Chris Jones (cjones)", "Bob Lee (blee)"]}
+        with patch("scripts.analyze.run_pr_audit.post_message") as post, pytest.raises(SystemExit) as exc:
+            _exit_no_reviewer_match(AuditOptions(reviewers=("CJ", "paul")), config, tmp_path.parent, "org/repo", "dev")
+        assert exc.value.code == 1
+        text = post.call_args[0][1]
+        assert "CJ, paul" in text and "Chris Jones (cjones)" in text and "nickname" in text
+        assert "Chris Jones (cjones)" in capsys.readouterr().out
+        assert (tmp_path.parent / "reports" / "pr_audit_report.md").exists()  # artifacts exist for debugging
+
+    def test_mentions_the_jira_scope_when_one_is_active(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _exit_no_reviewer_match
+        with patch("scripts.analyze.run_pr_audit.post_message") as post, pytest.raises(SystemExit):
+            _exit_no_reviewer_match(AuditOptions(reviewers=("x",)), {"JIRA_SPACE": "TeamA"}, tmp_path, "o/r", "main")
+        assert "Jira scope" in post.call_args[0][1]
+        with patch("scripts.analyze.run_pr_audit.post_message") as post, pytest.raises(SystemExit):
+            _exit_no_reviewer_match(AuditOptions(reviewers=("x",)), {}, tmp_path, "o/r", "main")
+        assert "Jira scope" not in post.call_args[0][1]
+
+    def test_slack_failure_does_not_mask_the_exit(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _exit_no_reviewer_match
+        with patch("scripts.analyze.run_pr_audit.post_message", side_effect=RuntimeError("down")), pytest.raises(SystemExit) as exc:
+            _exit_no_reviewer_match(AuditOptions(reviewers=("x",)), {}, tmp_path, "o/r", "main")
+        assert exc.value.code == 1
+
+
+class TestLearningsPromptRestriction:
+    def test_names_identities_and_forbids_other_reviewers(self):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _learnings_instructions
+        block = _learnings_instructions(AuditOptions(reviewers=("cjones",)), [], {"cjones": ["Chris Jones", "cjones"]})
+        assert "cjones = Chris Jones" in block
+        assert "ONLY" in block and "other people" in block.lower()

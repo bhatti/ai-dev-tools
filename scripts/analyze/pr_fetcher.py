@@ -363,7 +363,6 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
 
     # Post-filter by team members if configured
     prs = _filter_by_team(prs, config.get("PR_AUDIT_TEAM_MEMBERS", ""), tracker="github")
-    prs = _filter_by_reviewers(prs, reviewers_str)
 
     # Jira-issue-first filter (hybrid GH+Jira setups: --board / --team <name>)
     resolved = _resolve_jira_issue_keys(config)
@@ -380,7 +379,10 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         elif config.get("JIRA_SPACE", "").strip() and config.get("DEFAULT_TRACKER", "").lower() == "github":
             prs = _filter_by_label(prs, config["JIRA_SPACE"].strip())
 
-    prs = prs[:n_prs]
+    # Last on purpose: the Jira dev-status supplement above adds PRs fetched without any reviewer filter.
+    if reviewers_str and has_jira_filter:
+        print("[pr-fetch] reviewers filter is applied on top of the Jira scope (JIRA_BOARDS / JIRA_SPACE / --filter)", flush=True)
+    prs = _filter_by_reviewers(prs, reviewers_str)[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from GitHub ({org}/{repo})", flush=True)
     return prs
 
@@ -586,10 +588,14 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
         # Server-side BBQL on assigned reviewers first; commenters who were never assigned cannot be filtered
         # server-side, so only if that is not enough scan PRs that have comments and match on participants.
         raw_prs = _bb_list_prs(f"{url}&q={quote(_bb_reviewer_query(reviewers_str), safe='')}", auth, fetch_cap)
+        print(f"[pr-fetch] reviewers: assigned-reviewer query matched {len(raw_prs)} PRs", flush=True)
         if len(raw_prs) < n_prs:
             seen = {rp.get("id") for rp in raw_prs}
-            scan = _bb_list_prs(f"{url}&q={quote('comment_count>0', safe='')}", auth, n_prs * _REVIEWER_OVERSCAN)
-            raw_prs += [rp for rp in _prefilter_bb_raw(scan, reviewers_str) if rp.get("id") not in seen]
+            scan = _bb_list_prs(f"{url}&q={quote('comment_count>0', safe='')}", auth, min(n_prs * _REVIEWER_OVERSCAN, _REVIEWER_SCAN_CAP))
+            found = [rp for rp in _prefilter_bb_raw(scan, reviewers_str) if rp.get("id") not in seen]
+            raw_prs += found
+            config["_reviewer_candidates"] = _reviewer_candidates(scan)  # for the "no match" message
+            print(f"[pr-fetch] reviewers: scanned {len(scan)} commented PRs, {len(found)} involve them", flush=True)
         if not has_filter:
             raw_prs = raw_prs[:n_prs]
     else:
@@ -685,7 +691,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
             "human_comments": classified["human_comments"],
             "approvers": approvers,
             "reviewers": assigned_reviewers,
-            "participant_aliases": [i for p in participants if p.get("role") != "AUTHOR" for i in _bb_user_ids(p.get("user") or {})],
+            "participant_groups": [_bb_user_ids(p.get("user") or {}) for p in participants if p.get("role") != "AUTHOR"],
             "linked_issue": None,
             "review_decision": review_decision,
             "is_bot_authored": is_ai_authored(author),
@@ -706,7 +712,6 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
     team_str = config.get("PR_AUDIT_TEAM_MEMBERS", "").strip()
     if team_str:
         prs = _filter_by_team(prs, team_str, tracker="bitbucket")
-    prs = _filter_by_reviewers(prs, reviewers_str)
 
     # Jira-issue-first filter: --board / --team <name> / --filter field=value
     resolved = _resolve_jira_issue_keys(config)
@@ -716,7 +721,10 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
         prs = _filter_prs_by_issue_keys(prs, issue_keys)
         prs = _supplement_from_dev_status(config, jira_issues, prs)
 
-    prs = prs[:n_prs]
+    # Last on purpose: the Jira dev-status supplement above adds PRs fetched without any reviewer filter.
+    if reviewers_str and has_filter:
+        print("[pr-fetch] reviewers filter is applied on top of the Jira scope (JIRA_BOARDS / JIRA_SPACE / --filter)", flush=True)
+    prs = _filter_by_reviewers(prs, reviewers_str)[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
     return prs
 
@@ -940,6 +948,7 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
 # --reviewers narrows PRs on the server where the tracker can (GitHub search qualifiers, Bitbucket BBQL on
 # assigned reviewers). Bitbucket cannot filter by commenter, so that part scans at most this many times n_prs rows.
 _REVIEWER_OVERSCAN = 10
+_REVIEWER_SCAN_CAP = 2000  # commented PRs examined for non-assigned commenters, whatever --n-prs is
 
 _GH_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _BB_UUID = re.compile(r"^\{[0-9a-fA-F-]{36}\}$")
@@ -1025,7 +1034,7 @@ def _filter_by_reviewers(prs: list[dict], reviewers_str: str) -> list[dict]:
                 involved |= who
         involved |= {a.lower() for a in pr.get("approvers", []) if a}
         involved |= {r.lower() for r in pr.get("reviewers", []) if r}
-        involved |= {x.lower() for x in pr.get("participant_aliases", []) if x}
+        involved |= {x.lower() for g in pr.get("participant_groups", []) for x in g if x}
         hit = sorted(involved & names)
         if hit:
             pr["matched_reviewers"] = hit
@@ -1034,10 +1043,41 @@ def _filter_by_reviewers(prs: list[dict], reviewers_str: str) -> list[dict]:
     return kept
 
 
-def unmatched_reviewers(prs: list[dict], reviewers_str: str) -> list[str]:
-    """Requested reviewer names (original spelling) that matched no PR — typo detection for the report."""
-    matched = {m for pr in prs for m in pr.get("matched_reviewers", [])}
-    return [r.strip() for r in (reviewers_str or "").split(",") if r.strip() and r.strip().lower() not in matched]
+def _identity_groups(pr: dict) -> list[list[str]]:
+    """Every identity set (display name, nickname, ids) the PR data shows for one person."""
+    groups = [list(g) for g in pr.get("participant_groups", [])]
+    for c in pr.get("human_comments", []):
+        groups.append([v for v in (c.get("author"), c.get("author_alias"), c.get("author_id")) if v])
+    return groups
+
+
+def reviewer_identities(prs: list[dict], reviewers_str: str) -> dict[str, list[str]]:
+    """Requested name -> all identities of the person it matched (e.g. nickname -> display name), for the names
+    that matched. The model sees display names in the PR data, so this is how its output is tied back to a request."""
+    out: dict[str, list[str]] = {}
+    for name in _reviewer_list(reviewers_str):
+        ids: dict[str, str] = {}
+        for pr in prs:
+            for group in _identity_groups(pr):
+                if name.lower() in {x.lower() for x in group}:
+                    for x in group:
+                        ids.setdefault(x.lower(), x)
+        if ids:
+            out[name] = list(ids.values())
+    return out
+
+
+def _reviewer_candidates(rows: list[dict], limit: int = 15) -> list[str]:
+    """Most active non-author participants of Bitbucket PR rows as "Display Name (nickname)" — what a user can pass."""
+    counts: dict[str, list] = {}
+    for rp in rows:
+        for p in rp.get("participants") or []:
+            u = p.get("user") or {}
+            if p.get("role") == "AUTHOR" or not u.get("display_name"):
+                continue
+            label = f"{u['display_name']} ({u['nickname']})" if u.get("nickname") and u["nickname"] != u["display_name"] else u["display_name"]
+            counts.setdefault(label, [0])[0] += 1
+    return [k for k, _ in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[0]))[:limit]]
 
 
 def _resolve_jira_issue_keys(config: dict) -> tuple[set[str], list[dict]] | None:

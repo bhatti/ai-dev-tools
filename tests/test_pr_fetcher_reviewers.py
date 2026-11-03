@@ -10,11 +10,12 @@ from scripts.analyze.pr_fetcher import (
     _bb_reviewer_query,
     _filter_by_reviewers,
     _gh_reviewer_searches,
+    _reviewer_candidates,
+    reviewer_identities,
     _prefilter_bb_raw,
     build_pr_context,
     fetch_bitbucket_prs,
     fetch_github_prs,
-    unmatched_reviewers,
 )
 
 
@@ -44,9 +45,6 @@ class TestFilterByReviewers:
         assert out[0]["matched_reviewers"] == ["alice"]
         assert _filter_by_reviewers(prs, "") == prs
 
-    def test_unmatched_names_reported(self):
-        kept = _filter_by_reviewers([_pr(1, commenters=["alice"])], "alice,Typo")
-        assert unmatched_reviewers(kept, "alice,Typo") == ["Typo"]
 
 
 class TestPrefilterBbRaw:
@@ -298,3 +296,74 @@ class TestBuildContextCommentDepth:
         pr = _pr(1, comments=[{"author": f"u{i}", "body": f"comment-number-{i} " + "z" * 100, "type": "comment"} for i in range(9)])
         text = build_pr_context([pr], max_chars=100_000)
         assert all(f"comment-number-{i}" in text for i in range(9))
+
+
+# -- the Jira dev-status supplement must not re-add PRs the reviewers filter removed ----------
+
+class TestReviewerFilterIsFinal:
+    def test_dev_status_supplement_cannot_bypass_the_reviewers_filter(self, bb_config):
+        """Regression: with a Jira filter active, `_supplement_from_dev_status` appends PRs found through Jira links,
+        fetched without any reviewer filter. The reviewers filter must run after it."""
+        stranger = _pr(99, author="dev", commenters=["someone-else"])
+        stranger["linked_issue"] = None
+        fake = FakeBb({})  # server-side query and scan find nothing
+        cfg = {**bb_config, "PR_AUDIT_REVIEWERS": "asmith", "JIRA_BOARDS": "1"}
+        with patch("requests.get", side_effect=fake), \
+             patch("scripts.analyze.pr_fetcher._resolve_jira_issue_keys", return_value=({"K-1"}, [{"key": "K-1", "id": "1"}])), \
+             patch("scripts.analyze.pr_fetcher._supplement_from_dev_status", side_effect=lambda c, issues, prs: prs + [stranger]):
+            prs = fetch_bitbucket_prs(cfg, n_prs=5)
+        assert prs == []
+
+    def test_supplemented_pr_that_does_match_is_kept(self, bb_config):
+        match = _pr(98, author="dev", commenters=["asmith"])
+        fake = FakeBb({})
+        cfg = {**bb_config, "PR_AUDIT_REVIEWERS": "asmith", "JIRA_BOARDS": "1"}
+        with patch("requests.get", side_effect=fake), \
+             patch("scripts.analyze.pr_fetcher._resolve_jira_issue_keys", return_value=({"K-1"}, [{"key": "K-1", "id": "1"}])), \
+             patch("scripts.analyze.pr_fetcher._supplement_from_dev_status", side_effect=lambda c, issues, prs: prs + [match]):
+            prs = fetch_bitbucket_prs(cfg, n_prs=5)
+        assert [p["number"] for p in prs] == [98]
+
+    def test_github_dev_status_supplement_is_also_filtered(self, gh_env):
+        stranger = _pr(77, author="dev", commenters=["someone-else"])
+        fake = FakeGh({})
+        cfg = {**gh_env, "PR_AUDIT_REVIEWERS": "alice", "JIRA_BOARDS": "1", "JIRA_BASE_URL": "x"}
+        with patch("scripts.analyze.pr_fetcher.subprocess.run", side_effect=fake), \
+             patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[]), \
+             patch("scripts.analyze.pr_fetcher._resolve_jira_issue_keys", return_value=({"K-1"}, [{"key": "K-1", "id": "1"}])), \
+             patch("scripts.analyze.pr_fetcher._supplement_from_dev_status", side_effect=lambda c, issues, prs: prs + [stranger]):
+            assert fetch_github_prs(cfg, n_prs=5) == []
+
+
+class TestReviewerIdentities:
+    def test_maps_requested_name_to_every_identity_of_that_person(self):
+        pr = _pr(1, comments=[{"author": "Alice Smith", "author_alias": "asmith", "author_id": "acc-1", "body": "x" * 40}])
+        pr["participant_groups"] = [["Zed", "zed", "u-9"], ["Alice Smith", "asmith", "{u-1}", "acc-1"]]
+        found = reviewer_identities([pr], "ASMITH,nobody")
+        assert set(found["ASMITH"]) == {"Alice Smith", "asmith", "acc-1", "{u-1}"}
+        assert "nobody" not in found
+
+    def test_filter_matches_through_participant_groups_and_comment_ids(self):
+        pr = _pr(1, commenters=[])
+        pr["participant_groups"] = [["Alice Smith", "asmith", "{u-1}", "acc-1"]]
+        assert len(_filter_by_reviewers([pr], "acc-1")) == 1
+
+
+class TestReviewerCandidates:
+    def test_top_people_by_participation_excluding_authors(self):
+        rows = [
+            {"participants": [{"user": {"display_name": "Alice Smith", "nickname": "asmith"}, "role": "REVIEWER"},
+                              {"user": {"display_name": "Dev", "nickname": "dev"}, "role": "AUTHOR"}]},
+            {"participants": [{"user": {"display_name": "Alice Smith", "nickname": "asmith"}, "role": "PARTICIPANT"},
+                              {"user": {"display_name": "Bob Jones", "nickname": "bjones"}, "role": "PARTICIPANT"}]},
+            {"participants": [{"user": {}, "role": "PARTICIPANT"}]},
+        ]
+        assert _reviewer_candidates(rows) == ["Alice Smith (asmith)", "Bob Jones (bjones)"]
+
+    def test_bitbucket_scan_exposes_candidates_when_nothing_matches(self, bb_config):
+        other = ("Bob Jones", "bjones", "{u-2}", "acc-2", "PARTICIPANT", False)
+        fake = FakeBb({"comment_count>0": [_bb_row(5, participants=[other])]})
+        cfg = {**bb_config, "PR_AUDIT_REVIEWERS": "CJ"}
+        with patch("requests.get", side_effect=fake):
+            assert fetch_bitbucket_prs(cfg, n_prs=5) == []
+        assert cfg["_reviewer_candidates"] == ["Bob Jones (bjones)"]

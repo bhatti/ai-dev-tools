@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from scripts.analyze import audit_options
 from scripts.analyze.kb_writer import CATEGORIES, normalize_category
 
 def _int(v: object) -> int:
@@ -46,7 +47,8 @@ def load_learnings(reports_dir: Path) -> dict:
     """Refined file if it has an ``entries`` list, else the raw one, else empty.
 
     The files are written by a model, so every field is coerced to its expected type and malformed items are
-    dropped: later steps (KB files, reports) can rely on the shape.
+    dropped: later steps (KB files, reports) can rely on the shape. When the run asked for specific reviewers
+    (``run_options.json``), only what those people said is returned.
     """
     for name in ("review_learnings_refined.json", "review_learnings.json"):
         try:
@@ -54,9 +56,26 @@ def load_learnings(reports_dir: Path) -> dict:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, dict) and isinstance(data.get("entries"), list):
-            return {"entries": [_entry(e) for e in _dicts(data["entries"])],
-                    "reviewer_profiles": [_profile(p) for p in _dicts(data.get("reviewer_profiles"))]}
+            loaded = {"entries": [_entry(e) for e in _dicts(data["entries"])],
+                      "reviewer_profiles": [_profile(p) for p in _dicts(data.get("reviewer_profiles"))]}
+            return _restrict(loaded, reports_dir)
     return {"entries": [], "reviewer_profiles": []}
+
+
+def _restrict(data: dict, reports_dir: Path) -> dict:
+    """Without a request: all entries, no profiles. With one: keep only entries/profiles attributed to the requested reviewers (by any identity the PR data showed for them).
+    Requested but never matched means nothing is kept: silently widening to everyone is what this guards against."""
+    if not audit_options.has_options(reports_dir):
+        return data
+    if not audit_options.load(reports_dir, {}).reviewers:
+        return {"entries": data["entries"], "reviewer_profiles": []}  # profiles exist only for requested reviewers
+    allowed = {i.lower() for name, ids in audit_options.load_aliases(reports_dir).items() for i in (name, *ids)}
+    entries = []
+    for e in data["entries"]:
+        who = [r for r in e["reviewers"] if r.lower() in allowed]
+        if who:
+            entries.append({**e, "reviewers": who})
+    return {"entries": entries, "reviewer_profiles": [p for p in data["reviewer_profiles"] if p["reviewer"].lower() in allowed]}
 
 
 def _line(text: object) -> str:

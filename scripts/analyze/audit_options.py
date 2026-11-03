@@ -48,20 +48,37 @@ def resolve(config: dict, slack_flags: dict) -> AuditOptions:
     return AuditOptions(dry_run=dry_run, reviewers=reviewers)
 
 
-def write(reports_dir: Path, opts: AuditOptions, unmatched: list[str] | tuple[str, ...] = ()) -> Path:
-    """Persist options for downstream tasks; ``unmatched`` = requested reviewers with no PR activity."""
+def write(reports_dir: Path, opts: AuditOptions, unmatched: list[str] | tuple[str, ...] = (),
+          aliases: dict[str, list[str]] | None = None) -> Path:
+    """Persist options for downstream tasks. ``unmatched``: requested reviewers with no PR activity; ``aliases``:
+    requested name -> every identity (display name, nickname, ids) it matched, to tie model output back to a request."""
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / _FILENAME
-    path.write_text(json.dumps({**asdict(opts), "reviewers": list(opts.reviewers), "unmatched_reviewers": list(unmatched)}, indent=2),
-                    encoding="utf-8")
+    path.write_text(json.dumps({**asdict(opts), "reviewers": list(opts.reviewers), "unmatched_reviewers": list(unmatched),
+                                "reviewer_aliases": aliases or {}}, indent=2), encoding="utf-8")
     return path
 
 
-def load_unmatched(reports_dir: Path) -> list[str]:
+def _read(reports_dir: Path) -> dict:
     try:
-        return list(json.loads((reports_dir / _FILENAME).read_text(encoding="utf-8")).get("unmatched_reviewers") or [])
+        data = json.loads((reports_dir / _FILENAME).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def has_options(reports_dir: Path) -> bool:
+    """True when ``audit-prs`` recorded this run's options (always, in the pipeline)."""
+    return bool(_read(reports_dir))
+
+
+def load_unmatched(reports_dir: Path) -> list[str]:
+    return list(_read(reports_dir).get("unmatched_reviewers") or [])
+
+
+def load_aliases(reports_dir: Path) -> dict[str, list[str]]:
+    raw = _read(reports_dir).get("reviewer_aliases")
+    return {str(k): [str(i) for i in v] for k, v in raw.items() if isinstance(v, list)} if isinstance(raw, dict) else {}
 
 
 def load(reports_dir: Path, config: dict) -> AuditOptions:

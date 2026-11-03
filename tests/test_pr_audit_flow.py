@@ -1,0 +1,325 @@
+"""End-to-end flow of the PR audit pipeline, with and without --reviewers: audit-prs -> create-skill-pr.
+
+Real code from the PR fetch (GitHub, via a fake `gh`) through reports, learnings restriction and the knowledge-base
+files; only the network/LLM edges are faked (`gh`, the model, git push, Slack).
+"""
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from scripts.analyze import create_skill_pr, run_pr_audit
+
+LEARNINGS = {
+    "entries": [
+        {"category": "security", "rule": "Check tenant on every query", "why": "cross-tenant leak", "look_for": "queries without tenant",
+         "pr_count": 2, "prs": ["#1", "#2"], "reviewers": ["alice"]},
+        {"category": "testing", "rule": "No sleeps in tests", "why": "flaky", "look_for": "time.sleep in tests",
+         "pr_count": 2, "prs": ["#1", "#2"], "reviewers": ["bob"]},
+    ],
+    "reviewer_profiles": [
+        {"reviewer": "alice", "focus_areas": [{"category": "security", "count": 3}], "signature_concerns": ["tenant isolation"], "quotes": []},
+        {"reviewer": "bob", "focus_areas": [{"category": "testing", "count": 3}], "signature_concerns": ["flaky tests"], "quotes": []},
+    ],
+}
+
+
+def _row(num, reviewer, author="dev"):
+    return {"number": num, "title": f"t{num}", "state": "MERGED", "body": "", "author": {"login": author},
+            "createdAt": "2026-01-01T00:00:00Z", "mergedAt": "2026-01-02T00:00:00Z", "url": f"https://github.com/o/r/pull/{num}",
+            "headRefName": "b", "baseRefName": "main", "labels": [], "files": [{"path": "a.py", "additions": 3, "deletions": 1}],
+            "comments": [], "reviewDecision": "",
+            "reviews": [{"author": {"login": reviewer}, "state": "COMMENTED", "body": f"please change {num}: it breaks the lock ordering"}]}
+
+
+class FakeGh:
+    """`gh pr list` answers: a search for a login returns that login's PRs; without a search, every PR."""
+
+    def __init__(self):
+        self.all = [_row(1, "alice"), _row(2, "bob"), _row(3, "alice")]
+        self.cmds = []
+
+    def __call__(self, cmd, **kw):
+        if cmd[0] != "gh":  # e.g. `git remote get-url` run by the audit
+            return MagicMock(returncode=1, stdout="", stderr="")
+        self.cmds.append(cmd)
+        if cmd[cmd.index("--state") + 1] != "merged":
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        if "--search" in cmd:
+            who = cmd[cmd.index("--search") + 1].split(":")[1].split(" ")[0]
+            rows = [r for r in self.all if any(rv["author"]["login"] == who for rv in r["reviews"])]
+        else:
+            rows = self.all
+        return MagicMock(returncode=0, stdout=json.dumps(rows), stderr="")
+
+
+def _fake_claude(reports_dir: Path, prompts: list, learnings: dict):
+    def run(prompt, **kw):
+        prompts.append(prompt)
+        (reports_dir / "pr_audit_report.md").write_text("# PR Audit -- o/r\n\n### Executive Summary\n\n" + "Review depth is shallow. " * 20)
+        (reports_dir / "pr_audit_findings.json").write_text(json.dumps({"findings": [], "metrics": {}}))
+        (reports_dir / "skill_improvements.json").write_text(json.dumps({
+            "repo_skill_changes": [{"action": "create", "file_path": ".claude/skills/x/SKILL.md", "description": "d", "full_content": "body"}],
+            "new_docs": [], "ygs_recommendations": []}))
+        (reports_dir / "review_learnings.json").write_text(json.dumps(learnings))
+        return SimpleNamespace(status="DONE", output="", status_json={"status": "DONE", "spec_gap_count": 0, "design_gap_count": 0,
+                                                                         "skill_gap_count": 0, "practice_gap_count": 0})
+    return run
+
+
+@pytest.fixture
+def workspace(tmp_path, monkeypatch):
+    for k in ("PR_AUDIT_REVIEWERS", "PR_AUDIT_DRY_RUN", "PR_URLS", "JIRA_BOARDS", "JIRA_SPACE", "PR_AUDIT_FILTER", "FORMICARY_PUBLIC_URL", "JOB_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("DEFAULT_TRACKER", "github")
+    monkeypatch.setenv("GH_ORG", "o")
+    monkeypatch.setenv("GH_REPO", "r")
+    monkeypatch.setenv("PR_SIGNALS", "off")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("ANTHROPIC_BEDROCK_BASE_URL", "http://x")
+    return tmp_path
+
+
+def run_audit(workspace, monkeypatch, message, gh=None, learnings=None, bb=None):
+    """Run audit-prs the way the pod does: the Slack text arrives in SLACK_MESSAGE."""
+    monkeypatch.setenv("SLACK_MESSAGE", message)
+    gh = gh or FakeGh()
+    learnings = learnings or LEARNINGS
+    prompts: list = []
+    reports = workspace / "reports"
+
+    def clone(url, branch, dest, depth):
+        (dest / ".git").mkdir(parents=True, exist_ok=True)
+        return True, "main"
+
+    with patch("scripts.analyze.pr_fetcher.subprocess.run", side_effect=gh), \
+         patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[]), \
+         patch("scripts.analyze.run_pr_audit.subprocess.run", side_effect=gh), \
+         patch("scripts.analyze.run_pr_audit.clone_for_audit", side_effect=clone), \
+         patch("scripts.analyze.run_pr_audit.ensure_ygs_skills"), \
+         patch("scripts.analyze.run_pr_audit.validate_claude_config"), \
+         patch("scripts.analyze.run_pr_audit.apply_project_skills", return_value=0), \
+         patch("scripts.analyze.run_pr_audit._attach_review_signals"), \
+         patch("scripts.analyze.run_pr_audit._load_skill_md", return_value="SKILL"), \
+         patch("scripts.analyze.run_pr_audit.link_pr_to_issue", return_value=None), \
+         patch("scripts.analyze.run_pr_audit.run_claude", side_effect=_fake_claude(reports, prompts, learnings)), \
+         patch("requests.get", side_effect=bb or (lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected HTTP call")))), \
+         patch("scripts.analyze.run_pr_audit.post_message") as slack:
+        try:
+            run_pr_audit.main.main(args=[], standalone_mode=False)
+            code = 0
+        except SystemExit as e:
+            code = e.code or 0
+    return SimpleNamespace(code=code, gh=gh, prompts=prompts, slack=slack, reports=reports)
+
+
+def run_create(workspace, monkeypatch, push=False):
+    repo = workspace / "repo"
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEBASE_DIR", str(repo))
+    with patch.object(create_skill_pr, "_run_git", return_value=MagicMock(returncode=0, stdout="")), \
+         patch.object(create_skill_pr, "configure_git"), \
+         patch.object(create_skill_pr, "post_message"), \
+         patch.object(create_skill_pr, "push_branch") as pushed, \
+         patch.object(create_skill_pr, "_create_pr", return_value={"url": "https://x/pull/1", "number": 1}) as created:
+        create_skill_pr.main()
+    return SimpleNamespace(pushed=pushed, created=created, repo=repo)
+
+
+def kb_files(workspace):
+    return sorted(str(p.relative_to(workspace / "reports/dry_run/files")) for p in (workspace / "reports/dry_run/files").rglob("*.md")) \
+        if (workspace / "reports/dry_run/files").exists() else []
+
+
+class TestWithoutReviewers:
+    def test_audit_then_pr_includes_everyones_learnings(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --n-prs 10")
+        assert audit.code == 0
+        assert all("--search" not in c for c in audit.gh.cmds)  # the plain listing, as before this feature
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "Check tenant on every query" in md and "No sleeps in tests" in md
+        assert "Reviewer focus" not in audit.prompts[0]
+        assert (audit.reports / "review_learnings.html").exists() and (audit.reports / "pr_audit_report.html").exists()
+
+        pr = run_create(workspace, monkeypatch)
+        pr.pushed.assert_called_once()
+        pr.created.assert_called_once()
+        written = {p.relative_to(pr.repo).as_posix() for p in pr.repo.rglob("*.md") if ".claude" in p.parts}
+        assert ".claude/skills/review-knowledge/checklists/security.md" in written
+        assert ".claude/skills/review-knowledge/checklists/testing.md" in written
+        assert not any("/reviewers/" in w for w in written)  # profiles only exist for requested reviewers
+        report = (audit.reports / "skill_updates_report.md").read_text()
+        assert "https://x/pull/1" in report and "review-knowledge" in report
+        assert (audit.reports / "skill_updates_report.html").exists()
+
+
+class TestWithReviewers:
+    def test_dry_run_only_requested_reviewers_end_to_end(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --n-prs 10 --reviewers alice --dry-run")
+        assert audit.code == 0
+        searches = [c[c.index("--search") + 1] for c in audit.gh.cmds if "--search" in c]
+        assert "reviewed-by:alice -author:alice" in searches and not any("bob" in s for s in searches)
+        assert "Reviewer focus" in audit.prompts[0] and "ONLY" in audit.prompts[0]
+        ctx = json.loads((audit.reports / "run_options.json").read_text())
+        assert ctx["dry_run"] is True and ctx["reviewers"] == ["alice"] and ctx["reviewer_aliases"]["alice"] == ["alice"]
+
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "Check tenant on every query" in md and "No sleeps in tests" not in md  # bob's rule is dropped
+        assert "What alice looks for" in md and "What bob looks for" not in md
+
+        pr = run_create(workspace, monkeypatch)
+        pr.pushed.assert_not_called()
+        pr.created.assert_not_called()
+        files = kb_files(workspace)
+        assert ".claude/skills/review-knowledge/checklists/security.md" in files
+        assert ".claude/skills/review-knowledge/checklists/testing.md" not in files
+        assert ".claude/skills/review-knowledge/reviewers/alice.md" in files
+        assert not any("bob" in f for f in files)
+        assert "Dry run" in (audit.reports / "skill_updates_report.md").read_text()
+        assert json.loads((workspace / "pr.json").read_text())["number"] == 0
+
+    def test_reviewers_without_dry_run_creates_the_pr(self, workspace, monkeypatch):
+        run_audit(workspace, monkeypatch, "https://github.com/o/r --reviewers alice")
+        pr = run_create(workspace, monkeypatch)
+        pr.pushed.assert_called_once()
+        pr.created.assert_called_once()
+        assert (pr.repo / ".claude/skills/review-knowledge/reviewers/alice.md").exists()
+        assert not (pr.repo / ".claude/skills/review-knowledge/checklists/testing.md").exists()
+
+    def test_no_match_stops_before_the_model_and_tells_slack(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --reviewers nobody --dry-run")
+        assert audit.code == 1
+        assert audit.prompts == []  # the model is never asked to audit unrelated PRs
+        assert "nobody" in audit.slack.call_args[0][1]
+        assert (audit.reports / "pr_audit_report.md").exists()
+
+    def test_partial_match_runs_and_reports_the_missing_name(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --reviewers alice,typo")
+        assert audit.code == 0
+        assert "typo" in (audit.reports / "review_learnings.md").read_text()
+        assert json.loads((audit.reports / "run_options.json").read_text())["unmatched_reviewers"] == ["typo"]
+
+
+# -- Bitbucket (the Jira/BB workflow): same pipeline, different fetch --------------------------------------
+
+BB_LEARNINGS = {
+    "entries": [
+        {"category": "security", "rule": "Check tenant on every query", "why": "leak", "look_for": "queries", "pr_count": 2,
+         "prs": ["#1"], "reviewers": ["Alice Smith"]},
+        {"category": "testing", "rule": "No sleeps in tests", "why": "flaky", "look_for": "sleep", "pr_count": 2,
+         "prs": ["#2"], "reviewers": ["Bob Lee"]},
+    ],
+    "reviewer_profiles": [
+        {"reviewer": "Alice Smith", "focus_areas": [{"category": "security", "count": 3}], "signature_concerns": ["tenant isolation"], "quotes": []},
+        {"reviewer": "Bob Lee", "focus_areas": [{"category": "testing", "count": 3}], "signature_concerns": ["flaky tests"], "quotes": []},
+    ],
+}
+PEOPLE = {"asmith": ("Alice Smith", "asmith", "{u-a}", "acc-a"), "blee": ("Bob Lee", "blee", "{u-b}", "acc-b")}
+
+
+def _bb_user(key):
+    d, n, u, a = PEOPLE[key]
+    return {"display_name": d, "nickname": n, "uuid": u, "account_id": a}
+
+
+def _bb_pr(pid, reviewer_key):
+    return {"id": pid, "title": f"t{pid}", "state": "MERGED", "updated_on": "2026-01-02T00:00:00Z", "created_on": "2026-01-01T00:00:00Z",
+            "author": {"display_name": "Dev", "nickname": "dev"}, "description": "", "source": {"branch": {"name": "b"}},
+            "destination": {"branch": {"name": "main"}}, "links": {"html": {"href": f"https://bb/pr/{pid}"}},
+            "reviewers": [_bb_user(reviewer_key)],
+            "participants": [{"user": _bb_user(reviewer_key), "role": "REVIEWER", "approved": False},
+                             {"user": {"display_name": "Dev", "nickname": "dev"}, "role": "AUTHOR"}]}
+
+
+class FakeBitbucket:
+    PRS = {1: _bb_pr(1, "asmith"), 2: _bb_pr(2, "blee"), 3: _bb_pr(3, "asmith")}
+    OWNER = {1: "asmith", 2: "blee", 3: "asmith"}
+
+    def __init__(self):
+        self.list_queries, self.detail_ids = [], set()
+
+    def __call__(self, url, auth=None, timeout=None):
+        from urllib.parse import parse_qs, urlparse
+        parsed = urlparse(url)
+        resp = MagicMock(status_code=200)
+        if parsed.path.endswith("/pullrequests"):
+            q = parse_qs(parsed.query).get("q", [""])[0]
+            self.list_queries.append(q)
+            rows = list(self.PRS.values())
+            for key, (_, nick, _, _) in PEOPLE.items():
+                if q == f'reviewers.nickname="{nick}"':
+                    rows = [r for r in rows if self.OWNER[r["id"]] == key]
+                    break
+            else:
+                if q and q != "comment_count>0":
+                    rows = []
+            resp.json.return_value = {"values": rows, "next": ""}
+        else:
+            pid = int(parsed.path.split("/pullrequests/")[1].split("/")[0])
+            self.detail_ids.add(pid)
+            if parsed.path.endswith("/comments"):
+                resp.json.return_value = {"values": [{"user": _bb_user(self.OWNER[pid]), "content": {"raw": f"PR {pid}: hold the lock in order"}}], "next": ""}
+            else:
+                resp.json.return_value = {"values": [{"new": {"path": "a.py"}, "lines_added": 3, "lines_removed": 1}], "next": ""}
+        return resp
+
+
+@pytest.fixture
+def bb_workspace(workspace, monkeypatch):
+    monkeypatch.setenv("DEFAULT_TRACKER", "jira")
+    monkeypatch.delenv("GH_ORG", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    monkeypatch.setenv("BITBUCKET_WORKSPACE", "ws")
+    monkeypatch.setenv("BITBUCKET_REPO", "repo")
+    monkeypatch.setenv("BITBUCKET_API_BASE", "https://api.bitbucket.org/2.0")
+    return workspace
+
+
+def run_bb_audit(workspace, monkeypatch, message, bb):
+    return run_audit(workspace, monkeypatch, message, learnings=BB_LEARNINGS, bb=bb)
+
+
+class TestBitbucketWithoutReviewers:
+    def test_all_prs_and_everyones_learnings(self, bb_workspace, monkeypatch):
+        bb = FakeBitbucket()
+        audit = run_bb_audit(bb_workspace, monkeypatch, "--n-prs 10", bb)
+        assert audit.code == 0
+        assert bb.list_queries == [""] and bb.detail_ids == {1, 2, 3}
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "Check tenant on every query" in md and "No sleeps in tests" in md
+        pr = run_create(bb_workspace, monkeypatch)
+        pr.created.assert_called_once()
+        assert not any("/reviewers/" in str(p) for p in pr.repo.rglob("*.md"))
+
+
+class TestBitbucketWithReviewers:
+    def test_nickname_filters_server_side_and_report_has_only_that_person(self, bb_workspace, monkeypatch):
+        bb = FakeBitbucket()
+        audit = run_bb_audit(bb_workspace, monkeypatch, "--n-prs 2 --reviewers asmith --dry-run", bb)
+        assert audit.code == 0
+        assert bb.list_queries == ['reviewers.nickname="asmith"']  # --n-prs 2 is satisfied server-side: no scan
+        assert 2 not in bb.detail_ids  # Bob's PR is never enriched
+        assert "asmith = " in audit.prompts[0] and "Alice Smith" in audit.prompts[0]
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "Check tenant on every query" in md and "No sleeps in tests" not in md and "Bob Lee" not in md
+        run_create(bb_workspace, monkeypatch)
+        files = kb_files(bb_workspace)
+        assert ".claude/skills/review-knowledge/reviewers/alice-smith.md" in files
+        assert ".claude/skills/review-knowledge/checklists/testing.md" not in files
+        assert not any("bob" in f for f in files)
+
+    def test_display_name_works_through_the_commented_pr_scan(self, bb_workspace, monkeypatch):
+        bb = FakeBitbucket()
+        audit = run_bb_audit(bb_workspace, monkeypatch, '--reviewers "Bob Lee" --dry-run', bb)
+        assert audit.code == 0 and 1 not in bb.detail_ids and 2 in bb.detail_ids
+        assert "No sleeps in tests" in (audit.reports / "review_learnings.md").read_text()
+
+    def test_unknown_name_stops_and_suggests_real_ones(self, bb_workspace, monkeypatch):
+        audit = run_bb_audit(bb_workspace, monkeypatch, "--reviewers CJ --dry-run", FakeBitbucket())
+        assert audit.code == 1 and audit.prompts == []
+        text = audit.slack.call_args[0][1]
+        assert "CJ" in text and "Alice Smith (asmith)" in text and "Bob Lee (blee)" in text

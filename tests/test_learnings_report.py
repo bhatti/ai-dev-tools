@@ -82,3 +82,35 @@ class TestLoadSanitizesModelOutput:
 
     def test_top_level_not_a_dict(self, tmp_path):
         assert self._load(tmp_path, ["x"]) == {"entries": [], "reviewer_profiles": []}
+
+
+class TestRestrictToRequestedReviewers:
+    """With --reviewers, only what the requested people said may reach the report and the knowledge base."""
+
+    ENTRIES = {"entries": [
+        {"rule": "mine", "why": "w", "reviewers": ["Chris Jones"]},
+        {"rule": "shared", "why": "w", "reviewers": ["Chris Jones", "Someone Else"]},
+        {"rule": "theirs", "why": "w", "reviewers": ["Someone Else"]},
+        {"rule": "nobody", "why": "w", "reviewers": []},
+    ], "reviewer_profiles": [{"reviewer": "Chris Jones"}, {"reviewer": "Someone Else"}]}
+
+    def _setup(self, tmp_path, reviewers, aliases):
+        from scripts.analyze.audit_options import AuditOptions, write
+        (tmp_path / "review_learnings.json").write_text(json.dumps(self.ENTRIES))
+        write(tmp_path, AuditOptions(reviewers=reviewers), aliases=aliases)
+
+    def test_keeps_only_requested_people_through_their_display_names(self, tmp_path):
+        self._setup(tmp_path, ("cj",), {"cj": ["Chris Jones", "cj"]})
+        d = load_learnings(tmp_path)
+        assert [e["rule"] for e in d["entries"]] == ["mine", "shared"]
+        assert d["entries"][1]["reviewers"] == ["Chris Jones"]  # others are trimmed from a shared entry
+        assert [p["reviewer"] for p in d["reviewer_profiles"]] == ["Chris Jones"]
+
+    def test_requested_but_never_matched_means_nothing_not_everything(self, tmp_path):
+        self._setup(tmp_path, ("cj",), {})
+        assert load_learnings(tmp_path) == {"entries": [], "reviewer_profiles": []}
+
+    def test_no_reviewers_requested_keeps_every_entry_but_no_profiles(self, tmp_path):
+        self._setup(tmp_path, (), {})
+        d = load_learnings(tmp_path)
+        assert len(d["entries"]) == 4 and d["reviewer_profiles"] == []

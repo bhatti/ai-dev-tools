@@ -339,8 +339,8 @@ class TestRunSummaryLine:
         from scripts.analyze.audit_options import AuditOptions, write
         from scripts.analyze.post_pr_audit import _run_summary_line
         (tmp_path / "review_learnings.json").write_text(json.dumps({"entries": [
-            {"rule": "a", "why": "b", "tribal": True}, {"rule": "c", "why": "d"}]}))
-        write(tmp_path, AuditOptions(dry_run=True, reviewers=("alice", "bob")), unmatched=["bob"])
+            {"rule": "a", "why": "b", "tribal": True, "reviewers": ["Alice A"]}, {"rule": "c", "why": "d", "reviewers": ["alice"]}]}))
+        write(tmp_path, AuditOptions(dry_run=True, reviewers=("alice", "bob")), unmatched=["bob"], aliases={"alice": ["Alice A", "alice"]})
         line = _run_summary_line(tmp_path)
         assert "no PR activity found for: bob" in line
         assert "2 review learnings" in line and "1 tribal" in line

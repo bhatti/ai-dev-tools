@@ -50,10 +50,11 @@ from scripts.common.pr_classify import extract_and_strip_metrics_tables, build_c
 from scripts.common.report_renderer import render_simple_html, write_markdown_report
 from scripts.common.report_utils import write_report
 from scripts.common.skills import apply_project_skills, inline_shared_refs
+from scripts.standup.slack_client import post_message
 from scripts.analyze import audit_options
 from scripts.analyze.learnings_report import load_learnings, render_learnings_md
 from scripts.analyze.pr_fetcher import (
-    unmatched_reviewers,
+    reviewer_identities,
     fetch_prs, fetch_prs_by_numbers, parse_pr_url,
     classify_comments, link_pr_to_issue,
     fetch_issue_details, build_pr_context, write_issues_raw,
@@ -829,8 +830,8 @@ Or on failure:
 """
 
 
-def _learnings_instructions(opts: "audit_options.AuditOptions", unmatched: list[str]) -> str:
-    """Prompt block that makes the review-learnings pass explicit (and reviewer-focused when requested).
+def _learnings_instructions(opts: "audit_options.AuditOptions", unmatched: list[str], aliases: dict[str, list[str]]) -> str:
+    """Prompt block that makes the review-learnings pass explicit (and reviewer-only when requested).
 
     The dry-run flag is deliberately not mentioned: it changes what the pipeline does with the reports,
     not how the audit is performed.
@@ -841,16 +842,56 @@ def _learnings_instructions(opts: "audit_options.AuditOptions", unmatched: list[
         "human review comments in the PR data. Write `reports/review_learnings.json` (schema under REQUIRED OUTPUTS).",
     ]
     if opts.reviewers:
+        who = "; ".join(f"{name} = {', '.join(ids)}" for name, ids in aliases.items()) or ", ".join(opts.reviewers)
         lines += [
             "", "### Reviewer focus", "",
-            f"Requested reviewers: {', '.join(opts.reviewers)}. Their comments are included in full. Consider every "
-            "substantive comment they wrote, extract the rule, the reasoning and the trigger, and write one "
+            f"Requested reviewers (name = how they appear in the PR data): {who}.",
+            "Extract learnings ONLY from comments written by these people. Comments by other people are context for "
+            "understanding the thread; they must not produce entries, and must not appear in `reviewers` or `reviewer_profiles`. "
+            "In `reviewers` use the names exactly as they appear in the PR data. Their comments are included in full: "
+            "consider every substantive one, extract the rule, the reasoning and the trigger, and write one "
             "`reviewer_profiles` entry per requested reviewer. Goal: junior engineers learn what these senior "
             "engineers check, so prefer their recurring and tribal-knowledge feedback over one-off remarks.",
         ]
         if unmatched:
             lines.append(f"Note: no PR activity was found for: {', '.join(unmatched)}. Do not invent profiles for them.")
     return "\n".join(lines) + "\n"
+
+
+def _apply_reviewer_scope(prs: list[dict], opts: "audit_options.AuditOptions", reports_dir: Path) -> tuple[list[str], dict[str, list[str]]]:
+    """Which requested reviewers the fetched PRs show (and under which names); persisted for the later tasks and
+    emitted as task context so a run can be debugged from the job page."""
+    aliases = reviewer_identities(prs, ",".join(opts.reviewers)) if opts.reviewers else {}
+    unmatched = [r for r in opts.reviewers if r not in aliases]
+    audit_options.write(reports_dir, opts, unmatched, aliases)
+    if opts.reviewers:
+        print(f"::add-task-context PR_AUDIT_REVIEWERS_MATCHED::{','.join(aliases)}", flush=True)
+        print(f"::add-task-context PR_AUDIT_REVIEWERS_UNMATCHED::{','.join(unmatched)}", flush=True)
+        print(f"::add-task-context PR_AUDIT_REVIEWER_PRS::{len(prs)}", flush=True)
+        if unmatched:
+            print(f"[pr-audit] WARNING: no PR activity found for reviewers: {', '.join(unmatched)}", flush=True)
+    return unmatched, aliases
+
+
+def _exit_no_reviewer_match(opts: "audit_options.AuditOptions", config: dict, workspace: Path, label: str, branch: str) -> None:
+    """--reviewers matched no PR: stop instead of auditing unrelated PRs, and say which names would have worked."""
+    candidates = config.get("_reviewer_candidates") or []
+    text = (f"No PRs found where {', '.join(opts.reviewers)} reviewed or commented in {label}. "
+            "Use a GitHub login, or on Bitbucket a nickname, account id or exact display name."
+            + (f" People active in recent commented PRs: {'; '.join(candidates)}." if candidates else "")
+            + (" The audit is also limited to the configured Jira scope (JIRA_BOARDS / JIRA_SPACE / --filter): only PRs linked to those issues count."
+               if any(config.get(k) for k in ("JIRA_BOARDS", "JIRA_SPACE", "PR_AUDIT_FILTER")) else ""))
+    print(f"[pr-audit] ERROR: {text}", file=sys.stderr, flush=True)
+    print(f"::add-task-context PR_AUDIT_REVIEWER_CANDIDATES::{'; '.join(candidates)}", flush=True)
+    try:
+        post_message(config, f":warning: *PR Audit* -- {text}", thread_ts=config.get("SLACK_THREAD_TS", ""))
+    except Exception as e:
+        print(f"[pr-audit] Slack post failed: {e}", flush=True)
+    _write_pr_audit_reports(workspace, {
+        "repo": label, "branch": branch, "prs_analyzed": 0, "focus": "", "spec_gap_count": 0, "design_gap_count": 0,
+        "skill_gap_count": 0, "practice_gap_count": 0, "findings": [],
+    })
+    sys.exit(1)
 
 
 # -- Main entry ----------------------------------------------------------------
@@ -1098,12 +1139,10 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
 
         # Larger default than before: truncated comments were the main cause of shallow skills.
         ctx_chars = int(config.get("PR_AUDIT_CONTEXT_CHARS") or os.environ.get("PR_AUDIT_CONTEXT_CHARS") or (400_000 if options.reviewers else 250_000))
+        if options.reviewers and not prs:
+            _exit_no_reviewer_match(options, config, workspace, label, branch)
         pr_context = build_pr_context(prs, max_chars=ctx_chars, priority_authors=options.reviewers)
-        # Explicit PR URLs bypass the reviewer filter, so there is nothing to report as unmatched.
-        unmatched = unmatched_reviewers(prs, ",".join(options.reviewers)) if options.reviewers and not all_pr_urls else []
-        audit_options.write(reports_dir, options, unmatched)
-        if unmatched:
-            print(f"[pr-audit] WARNING: no PR activity found for reviewers: {', '.join(unmatched)}", flush=True)
+        unmatched, aliases = _apply_reviewer_scope(prs, options, reports_dir)
         pr_ids_str = ",".join(str(pr.get("number", "")) for pr in prs if pr.get("number"))
         print(f"[pr-audit] PR context: {len(pr_context)} chars from {len(prs)} PRs", flush=True)
         print(f"::add-task-context PR_AUDIT_PR_IDS::{pr_ids_str}", flush=True)
@@ -1162,7 +1201,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
                 jiras_reviewed=jiras_reviewed,
                 focus=focus,
                 pr_context=pr_context,
-                skill_instructions=skill_md + _learnings_instructions(options, unmatched),
+                skill_instructions=skill_md + _learnings_instructions(options, unmatched, aliases),
                 pr_ids=pr_ids_str,
                 pr_state_summary=state_summary_text,
                 metrics_summary=_metrics_summary,

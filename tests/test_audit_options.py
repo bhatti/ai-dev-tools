@@ -58,3 +58,10 @@ def test_load_unmatched_missing_or_corrupt(tmp_path):
     assert load_unmatched(tmp_path) == []
     (tmp_path / "run_options.json").write_text("{bad")
     assert load_unmatched(tmp_path) == []
+
+
+def test_aliases_round_trip(tmp_path):
+    from scripts.analyze.audit_options import load_aliases
+    write(tmp_path, AuditOptions(reviewers=("cj",)), aliases={"cj": ["Chris Jones", "cj"]})
+    assert load_aliases(tmp_path) == {"cj": ["Chris Jones", "cj"]}
+    assert load_aliases(tmp_path / "missing") == {}
