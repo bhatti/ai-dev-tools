@@ -345,3 +345,135 @@ class TestReadTextSafe:
         p = tmp_path / "file.md"
         p.write_text("hello", encoding="utf-8")
         assert _read_text_safe(p) == "hello"
+
+
+class TestKbDocs:
+    def _learnings(self):
+        return {
+            "entries": [
+                {"category": "security", "rule": "Check tenant on every query", "why": "leak", "look_for": "no tenant_id",
+                 "pr_count": 3, "reviewers": ["Alice"], "tribal": False},
+                {"category": "style", "rule": "one-off nit", "why": "taste", "look_for": "", "pr_count": 1, "reviewers": [], "tribal": False},
+            ],
+            "reviewer_profiles": [{"reviewer": "Alice", "focus_areas": [{"category": "security", "count": 3}],
+                                   "signature_concerns": ["Tenant isolation"], "quotes": []}],
+        }
+
+    def test_builds_docs_for_selected_entries_only(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.create_skill_pr import _kb_docs
+        docs = _kb_docs(self._learnings(), AuditOptions(reviewers=("Alice",)), tmp_path)
+        paths = {d["path"] for d in docs}
+        assert ".claude/skills/review-knowledge/checklists/security.md" in paths
+        assert ".claude/skills/review-knowledge/checklists/style.md" not in paths  # 1 PR, not a requested reviewer
+        assert ".claude/skills/review-knowledge/reviewers/alice.md" in paths
+        assert all(d["content"] and d["description"] for d in docs)
+
+    def test_merges_with_existing_kb_in_clone(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.create_skill_pr import _kb_docs
+        sec = tmp_path / ".claude/skills/review-knowledge/checklists/security.md"
+        sec.parent.mkdir(parents=True)
+        sec.write_text("# Security review checklist\n\n- [ ] Existing rule — Why: x\n")
+        docs = _kb_docs(self._learnings(), AuditOptions(), tmp_path)
+        content = next(d["content"] for d in docs if d["path"].endswith("checklists/security.md"))
+        assert "Existing rule" in content and "Check tenant on every query" in content
+
+    def test_nothing_when_no_entries(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.create_skill_pr import _kb_docs
+        assert _kb_docs({"entries": [], "reviewer_profiles": []}, AuditOptions(), tmp_path) == []
+
+
+class TestApplyActions:
+    def test_existing_file_is_reported_as_update(self, tmp_path, monkeypatch):
+        import json as _json
+        from scripts.analyze import create_skill_pr as m
+        from scripts.analyze.audit_options import AuditOptions, write
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        (reports / "skill_improvements.json").write_text(_json.dumps({"repo_skill_changes": [
+            {"action": "create", "file_path": ".claude/skills/old/SKILL.md", "description": "d", "full_content": "new"}]}))
+        write(reports, AuditOptions(dry_run=True))
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".claude/skills/old").mkdir(parents=True)
+        (repo / ".claude/skills/old/SKILL.md").write_text("old")
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("CODEBASE_DIR", str(repo))
+        monkeypatch.setenv("DEFAULT_TRACKER", "github")
+        with patch.object(m, "_run_git", return_value=MagicMock(returncode=0, stdout="")), \
+             patch.object(m, "post_message"), patch.object(m, "configure_git"):
+            m.main()
+        assert "| update |" in (reports / "skill_updates_report.md").read_text()
+
+
+class TestWriteDryRun:
+    def test_copies_changed_files_and_body_and_diff(self, tmp_path):
+        from scripts.analyze.create_skill_pr import _write_dry_run
+        repo, reports = tmp_path / "repo", tmp_path / "reports"
+        (repo / ".claude/skills/x").mkdir(parents=True)
+        (repo / ".claude/skills/x/SKILL.md").write_text("hello")
+        out = _write_dry_run(repo, reports, [".claude/skills/x/SKILL.md"], "PR BODY", diff_text="DIFF")
+        assert (out / "files/.claude/skills/x/SKILL.md").read_text() == "hello"
+        assert (out / "pr_body.md").read_text() == "PR BODY"
+        assert (out / "diff.patch").read_text() == "DIFF"
+        assert (out / "files.txt").read_text().strip() == ".claude/skills/x/SKILL.md"
+
+    def test_missing_source_file_is_skipped_not_fatal(self, tmp_path):
+        from scripts.analyze.create_skill_pr import _write_dry_run
+        out = _write_dry_run(tmp_path / "repo", tmp_path / "reports", ["gone.md"], "b", diff_text="")
+        assert not (out / "files/gone.md").exists()
+
+
+class TestMainDryRun:
+    def _setup(self, tmp_path, monkeypatch, dry):
+        import json as _json
+        from scripts.analyze.audit_options import AuditOptions, write
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        (reports / "skill_improvements.json").write_text(_json.dumps({
+            "repo_skill_changes": [{"action": "create", "file_path": ".claude/skills/a/SKILL.md", "description": "d", "full_content": "body"}],
+            "new_docs": [], "ygs_recommendations": []}))
+        (reports / "pr_audit_report.md").write_text("# report\nsummary line\n")
+        write(reports, AuditOptions(dry_run=dry))
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("CODEBASE_DIR", str(repo))
+        monkeypatch.setenv("DEFAULT_TRACKER", "github")
+        return repo, reports
+
+    def test_dry_run_creates_no_branch_push_or_pr_and_writes_artifacts(self, tmp_path, monkeypatch):
+        repo, reports = self._setup(tmp_path, monkeypatch, dry=True)
+        from scripts.analyze import create_skill_pr as m
+        with patch.object(m, "_run_git", return_value=MagicMock(returncode=0, stdout="PATCH")) as git, \
+             patch.object(m, "push_branch") as push, \
+             patch.object(m, "_create_pr") as create, \
+             patch.object(m, "post_message"), \
+             patch.object(m, "configure_git"):
+            m.main()
+        push.assert_not_called()
+        create.assert_not_called()
+        assert not any(c.args[1][0] == "commit" for c in git.call_args_list)
+        assert (reports / "dry_run/files/.claude/skills/a/SKILL.md").read_text() == "body"
+        assert (reports / "dry_run/pr_body.md").exists()
+        assert json.loads((tmp_path / "pr.json").read_text())["number"] == 0
+        md = (reports / "skill_updates_report.md").read_text()
+        assert "Dry run" in md and ".claude/skills/a/SKILL.md" in md and "body" in md
+        assert "<h1>" in (reports / "skill_updates_report.html").read_text()
+
+    def test_non_dry_run_still_pushes_and_creates_pr(self, tmp_path, monkeypatch):
+        repo, reports = self._setup(tmp_path, monkeypatch, dry=False)
+        from scripts.analyze import create_skill_pr as m
+        with patch.object(m, "_run_git", return_value=MagicMock(returncode=0, stdout="")), \
+             patch.object(m, "push_branch") as push, \
+             patch.object(m, "_create_pr", return_value={"url": "https://x/pull/1", "number": 1}) as create, \
+             patch.object(m, "post_message"), \
+             patch.object(m, "configure_git"):
+            m.main()
+        push.assert_called_once()
+        create.assert_called_once()
+        md = (reports / "skill_updates_report.md").read_text()
+        assert "https://x/pull/1" in md and "| create |" in md
+        assert (reports / "skill_updates_report.html").exists()

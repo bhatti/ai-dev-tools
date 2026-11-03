@@ -123,6 +123,7 @@ class TestPlanSkillUpdatesSuccess:
         main()
 
         assert (reports / "skill_update_plan.md").exists()
+        assert "update ygs-review.md" in (reports / "skill_update_plan.html").read_text()
         result = json.loads((reports / "skill_update_plan_result.json").read_text())
         assert result["status"] == "DONE"
         assert result["skill_updates"] == 2

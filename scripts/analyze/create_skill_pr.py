@@ -25,13 +25,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.analyze import audit_options
+from scripts.analyze.kb_writer import KB_ROOT, build_kb_files, select_entries
+from scripts.analyze.learnings_report import load_learnings, render_learnings_md
+from scripts.analyze.skills_report import render_skills_report_md
 from scripts.common import bitbucket_api
 from scripts.common.artifacts import read_json as artifacts_read_json
 from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
+from scripts.common.report_renderer import write_markdown_report
 from scripts.common.report_utils import write_report
 from scripts.common.git_utils import clone_by_tracker, configure_git, detect_bitbucket_url, get_bitbucket_git_username, push_branch
 from scripts.common.shell import run_cmd
+from scripts.common.slack_format import build_artifact_links
 from scripts.standup.slack_client import post_message
 
 _ISSUE_ID = "pr-audit"
@@ -67,14 +73,18 @@ def main() -> None:
         return
 
     repo_changes = improvements.get("repo_skill_changes", [])
-    new_docs = improvements.get("new_docs", [])
+    new_docs = list(improvements.get("new_docs", []))
     ygs_recs = improvements.get("ygs_recommendations", [])
+
+    options = audit_options.load(reports_dir, config)
+    learnings = load_learnings(reports_dir)
+    kb_entries = select_entries(learnings["entries"], options.reviewers)
 
     # Read optional plan and findings for enriched PR body
     audit_report = _read_text_safe(reports_dir / "pr_audit_report.md")
     skill_update_plan = _read_text_safe(reports_dir / "skill_update_plan.md")
 
-    if not repo_changes and not new_docs:
+    if not repo_changes and not new_docs and not kb_entries:
         print("[create-skill-pr] No repo changes to propose", flush=True)
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
@@ -119,6 +129,9 @@ def main() -> None:
     git_email = config.get("GIT_USER_EMAIL", "ai-agent@noreply.local")
     configure_git(codebase_dir, git_name, git_email)
 
+    # Review-knowledge checklists/profiles: merged with what the repo already has (merge-only).
+    new_docs += _kb_docs(learnings, options, codebase_dir)
+
     # Create branch
     branch_suffix = secrets.token_hex(4)
     pr_branch = f"ai/pr-audit-improvements-{branch_suffix}"
@@ -128,6 +141,7 @@ def main() -> None:
     # Field priority: final_content (refined JSON) > full_content (raw JSON create) > changes (legacy).
     # For raw JSON updates (action=update, content_to_add set), append to existing file if present.
     changes_made: list[str] = []
+    applied: dict[str, tuple[str, str]] = {}  # path -> (create|update, description), for the report
     for change in repo_changes:
         file_path = change.get("file_path", "")
         if not file_path:
@@ -151,6 +165,7 @@ def main() -> None:
             print(f"[create-skill-pr] skipping {file_path}: no content in any field", flush=True)
             continue
         try:
+            applied[file_path] = ("update" if target.exists() else "create", change.get("description", ""))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(final_content, encoding="utf-8")
             changes_made.append(file_path)
@@ -164,6 +179,7 @@ def main() -> None:
             continue
         target = codebase_dir / doc_path
         try:
+            applied[doc_path] = ("update" if target.exists() else "create", doc.get("description", ""))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(doc_content, encoding="utf-8")
             changes_made.append(doc_path)
@@ -175,6 +191,34 @@ def main() -> None:
         _run_git(codebase_dir, ["checkout", base_branch])
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
+        if ygs_recs:
+            _write_ygs_recommendations(reports_dir, ygs_recs)
+        return
+
+    repo_label = _repo_label(config, tracker)
+    _write_skills_report(reports_dir, codebase_dir, changes_made, applied, options.dry_run, "", repo_label)
+
+    if options.dry_run:
+        _run_git(codebase_dir, ["add", "-A"])  # local index only: lets `git diff --cached` include new files
+        diff = _run_git(codebase_dir, ["diff", "--cached"])
+        body = _build_pr_body(repo_changes, new_docs, audit_report, skill_update_plan,
+                              learnings_md=render_learnings_md(learnings, options.reviewers, []))
+        out_dir = _write_dry_run(codebase_dir, reports_dir, changes_made, body, diff_text=diff.stdout or "")
+        _write_empty_pr_json(config)
+        print("::add-task-context SKILL_PR_CREATED::dry-run", flush=True)
+        print(f"::add-task-context DRY_RUN_FILES::{len(changes_made)}", flush=True)
+        print(f"[create-skill-pr] DRY RUN: {len(changes_made)} files would change; nothing pushed. See {out_dir}", flush=True)
+        _, job_url = build_artifact_links(config)
+        try:
+            post_message(
+                config,
+                f":test_tube: *PR Audit dry run* -- {len(changes_made)} files would change "
+                f"({len(repo_changes)} skill updates, {len(new_docs)} docs incl. review-knowledge); no PR created."
+                + (f" <{job_url}#reports|Artifacts>" if job_url else ""),
+                thread_ts=config.get("SLACK_THREAD_TS", ""),
+            )
+        except Exception as e:
+            print(f"[create-skill-pr] Slack post failed: {e}", flush=True)
         if ygs_recs:
             _write_ygs_recommendations(reports_dir, ygs_recs)
         return
@@ -219,7 +263,8 @@ def main() -> None:
 
     # Create PR — tracker-specific: GH uses gh CLI, BB uses bitbucket_api
     pr_info = _create_pr(config, pr_branch, base_branch, repo_changes, new_docs, tracker,
-                         audit_report=audit_report, skill_update_plan=skill_update_plan)
+                         audit_report=audit_report, skill_update_plan=skill_update_plan,
+                         learnings_md=render_learnings_md(learnings, options.reviewers, []) if learnings["entries"] else "")
 
     # Determine org/repo for pr.json metadata — tracker-specific, no cross-fallback
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
@@ -231,6 +276,7 @@ def main() -> None:
 
     pr_url = pr_info.get("url", "")
     pr_num = pr_info.get("number", 0)
+    _write_skills_report(reports_dir, codebase_dir, changes_made, applied, False, pr_url, repo_label)
     is_bb = tracker in ("jira", "bitbucket", "jira/bitbucket")
     pr_json = {
         "url": pr_url,
@@ -309,6 +355,7 @@ def _create_pr(
     tracker: str,
     audit_report: str = "",
     skill_update_plan: str = "",
+    learnings_md: str = "",
 ) -> dict:
     """Create a PR on GitHub or Bitbucket.
 
@@ -317,7 +364,7 @@ def _create_pr(
     PR body includes audit findings summary and skill update plan for reviewer context.
     """
     title = f"[AI] PR audit: skill & doc improvements ({len(repo_changes) + len(new_docs)} changes)"
-    body = _build_pr_body(repo_changes, new_docs, audit_report, skill_update_plan)
+    body = _build_pr_body(repo_changes, new_docs, audit_report, skill_update_plan, learnings_md)
 
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
         return _create_bitbucket_pr(config, title, body, head_branch, base_branch)
@@ -329,6 +376,7 @@ def _build_pr_body(
     new_docs: list[dict],
     audit_report: str = "",
     skill_update_plan: str = "",
+    learnings_md: str = "",
 ) -> str:
     """Build enriched PR body with findings summary, change list, and full audit report.
 
@@ -362,6 +410,14 @@ def _build_pr_body(
         if len(new_docs) > 15:
             body_lines.append(f"- ...and {len(new_docs) - 15} more")
         body_lines.append("")
+
+    if learnings_md:
+        body_lines.append("<details><summary>Review learnings (what reviewers look for)</summary>")
+        body_lines.append("")
+        body_lines.append(learnings_md[:6000])
+        if len(learnings_md) > 6000:
+            body_lines.append("\n_... (truncated — see reports/review_learnings.md)_")
+        body_lines += ["", "</details>", ""]
 
     if skill_update_plan:
         body_lines.append("## Skill Update Plan")
@@ -415,6 +471,65 @@ def _create_bitbucket_pr(config: dict, title: str, body: str, head_branch: str, 
         "url": pr_data.get("links", {}).get("html", {}).get("href", ""),
         "number": pr_data.get("id", 0),
     }
+
+
+def _read_kb_files(codebase_dir: Path) -> dict[str, str]:
+    """Existing review-knowledge files in the clone, keyed by repo-relative path."""
+    root = codebase_dir / KB_ROOT
+    if not root.is_dir():
+        return {}
+    return {
+        str(p.relative_to(codebase_dir)): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*.md"))
+    }
+
+
+def _kb_docs(learnings: dict, options: "audit_options.AuditOptions", codebase_dir: Path) -> list[dict]:
+    """``new_docs`` entries for the review-knowledge skill (already merged with the repo's existing files)."""
+    entries = select_entries(learnings["entries"], options.reviewers)
+    if not entries:
+        return []
+    files = build_kb_files(entries, learnings["reviewer_profiles"], _read_kb_files(codebase_dir))
+    return [
+        {"path": path, "content": content, "description": f"review-knowledge: {path.removeprefix(KB_ROOT + '/')}",
+         "reason": "rules and reasoning learned from reviewers' PR feedback"}
+        for path, content in sorted(files.items())
+    ]
+
+
+def _repo_label(config: dict, tracker: str) -> str:
+    if tracker in ("jira", "bitbucket", "jira/bitbucket"):
+        return f"{config.get('BITBUCKET_WORKSPACE', '')}/{config.get('BITBUCKET_REPO', '')}"
+    return f"{config.get('GH_ORG', '')}/{config.get('GH_REPO', '')}"
+
+
+def _write_skills_report(reports_dir: Path, codebase_dir: Path, changed: list[str],
+                         applied: dict[str, tuple[str, str]], dry_run: bool, pr_url: str, repo: str) -> None:
+    """reports/skill_updates_report.{md,html}: every file this run created or updated, with its content."""
+    files = []
+    for rel in changed:
+        action, description = applied.get(rel, ("create", ""))
+        files.append({"path": rel, "action": action, "description": description,
+                      "content": (codebase_dir / rel).read_text(encoding="utf-8")})
+    write_markdown_report(reports_dir, "skill_updates_report", f"Skill & knowledge updates -- {repo}",
+                          render_skills_report_md(files, dry_run, pr_url, repo))
+
+
+def _write_dry_run(codebase_dir: Path, reports_dir: Path, changed: list[str], pr_body: str, diff_text: str) -> Path:
+    """Write what a real run would put in the PR under ``reports/dry_run/`` (files tree, body, patch, file list)."""
+    out = reports_dir / "dry_run"
+    for rel in changed:
+        src = codebase_dir / rel
+        if not src.is_file():
+            continue
+        dst = out / "files" / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pr_body.md").write_text(pr_body, encoding="utf-8")
+    (out / "diff.patch").write_text(diff_text, encoding="utf-8")
+    (out / "files.txt").write_text("\n".join(changed) + "\n", encoding="utf-8")
+    return out
 
 
 def _write_empty_pr_json(config: dict) -> None:

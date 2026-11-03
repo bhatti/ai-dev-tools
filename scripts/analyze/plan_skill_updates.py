@@ -10,11 +10,13 @@ Usage:
 Reads:
     /workspace/reports/pr_audit_report.md     (required)
     /workspace/reports/skill_improvements.json (optional)
+    /workspace/reports/review_learnings.json   (optional)
 
 Writes:
     /workspace/reports/skill_update_plan.md
     /workspace/reports/skill_update_plan_result.json
     /workspace/reports/skill_improvements_refined.json  (machine-readable output for create_skill_pr)
+    /workspace/reports/review_learnings_refined.json    (deduplicated learnings; create_skill_pr builds the review-knowledge files from it)
 
 Exit codes: 0=done, 1=error
 """
@@ -29,9 +31,11 @@ from scripts.common.artifacts import write_json
 from scripts.common.claude_runner import SYSTEM_PROMPTS, run_claude
 from scripts.common.config import get_workspace_dir, load_config, validate_claude_config
 from scripts.common.idempotency import check_done
+from scripts.common.report_renderer import write_markdown_report
 
-_MAX_FINDINGS_CHARS = 3000
-_MAX_IMPROVEMENTS_CHARS = 2000
+# Excerpts only: Claude reads the full files itself. Too-small excerpts used to starve the plan of context.
+_MAX_FINDINGS_CHARS = 12000
+_MAX_IMPROVEMENTS_CHARS = 8000
 
 _PLAN_PROMPT_TEMPLATE = """\
 You are a skill-improvement planner for the {org}/{repo} codebase.
@@ -110,7 +114,15 @@ Your job is to review the findings and create a detailed, actionable skill updat
    - Rules must be GENERALIZABLE — write instructions that apply to all future PRs, not just
      the ones that motivated the change. PR citations belong in the audit report and plan only.
    - Pass through `ygs_recommendations` from the original `skill_improvements.json` unchanged.
-9. Output ONLY this JSON on the last line (no text after it):
+9. Review learnings: if `reports/review_learnings.json` exists, read it, and read any existing
+   `repo/.claude/skills/review-knowledge/**` files. Write `reports/review_learnings_refined.json` with the
+   SAME schema (`entries`, `reviewer_profiles`):
+   - drop entries whose rule is already present in the existing review-knowledge checklists
+   - merge near-duplicates (union `reviewers` and `prs`, sum `pr_count`)
+   - tighten wording but KEEP `why` and `look_for`; never invent reasoning that is not in the input
+   - keep `tribal` entries and entries from requested reviewers even with a single PR
+   Skip this step if `reports/review_learnings.json` does not exist.
+10. Output ONLY this JSON on the last line (no text after it):
    {{"status":"DONE","skill_updates":<N>,"new_skills":<M>,"refined_json":true,"summary":"<one sentence>"}}
    Or if blocked:
    {{"status":"BLOCKED","reason":"<explanation>"}}
@@ -190,6 +202,8 @@ def main() -> None:
 
     plan_path = reports_dir / "skill_update_plan.md"
     if plan_path.exists():
+        write_markdown_report(reports_dir, "skill_update_plan", f"Skill update plan -- {org}/{repo}",
+                              plan_path.read_text(encoding="utf-8"))
         print(f"[plan-skill-updates] skill_update_plan.md written ({plan_path.stat().st_size} bytes)",
               flush=True)
         print(f"::add-task-context SKILL_UPDATE_PLAN::yes", flush=True)
@@ -206,6 +220,9 @@ def main() -> None:
         print("[plan-skill-updates] WARNING: skill_improvements_refined.json was not written — "
               "create_skill_pr will fall back to raw skill_improvements.json", flush=True)
         print(f"::add-task-context REFINED_JSON::no", flush=True)
+
+    if (reports_dir / "review_learnings_refined.json").exists():
+        print("::add-task-context REFINED_LEARNINGS::yes", flush=True)
 
     status = status_data.get("status", "UNKNOWN")
     print(f"[plan-skill-updates] status={status} result={json.dumps(status_data)}", flush=True)

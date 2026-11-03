@@ -326,3 +326,34 @@ class TestEdgeCases:
                 import scripts.analyze.post_pr_audit as m
                 m.main()
             assert exc.value.code == 1
+
+
+# -- Tests: learnings + dry-run lines ------------------------------------------
+
+class TestRunSummaryLine:
+    def test_empty_when_nothing_to_report(self, tmp_path):
+        from scripts.analyze.post_pr_audit import _run_summary_line
+        assert _run_summary_line(tmp_path) == ""
+
+    def test_learnings_counts_and_dry_run_banner(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions, write
+        from scripts.analyze.post_pr_audit import _run_summary_line
+        (tmp_path / "review_learnings.json").write_text(json.dumps({"entries": [
+            {"rule": "a", "why": "b", "tribal": True}, {"rule": "c", "why": "d"}]}))
+        write(tmp_path, AuditOptions(dry_run=True, reviewers=("alice", "bob")), unmatched=["bob"])
+        line = _run_summary_line(tmp_path)
+        assert "no PR activity found for: bob" in line
+        assert "2 review learnings" in line and "1 tribal" in line
+        assert "alice, bob" in line and "dry run" in line.lower()
+
+    def test_main_posts_the_line(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions, write
+        config = _setup_workspace(tmp_path, _SAMPLE_FINDINGS)
+        reports = Path(config["WORKSPACE_DIR"]) / "reports"
+        write(reports, AuditOptions(dry_run=True))
+        posted: list[str] = []
+        with patch("scripts.analyze.post_pr_audit.load_config", return_value=config), \
+             patch("scripts.analyze.post_pr_audit.post_report", side_effect=lambda cfg, s, *a, **k: posted.append(s) or True):
+            import scripts.analyze.post_pr_audit as m
+            m.main()
+        assert "dry run" in posted[0].lower()

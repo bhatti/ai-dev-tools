@@ -251,6 +251,25 @@ def _strip_verbose_sections(text: str) -> str:
     return text
 
 
+def _run_summary_line(reports_dir) -> str:
+    """One Slack line: review-learnings counts, requested reviewers, dry-run banner ("" when none apply)."""
+    from scripts.analyze import audit_options
+    from scripts.analyze.learnings_report import load_learnings
+
+    opts = audit_options.load(reports_dir, {})
+    entries = load_learnings(reports_dir)["entries"]
+    parts = []
+    if entries:
+        tribal = sum(1 for e in entries if e.get("tribal"))
+        parts.append(f"{len(entries)} review learnings" + (f" ({tribal} tribal)" if tribal else ""))
+    if opts.reviewers:
+        unmatched = audit_options.load_unmatched(reports_dir)
+        parts.append(f"reviewers: {', '.join(opts.reviewers)}" + (f" (no PR activity found for: {', '.join(unmatched)})" if unmatched else ""))
+    if opts.dry_run:
+        parts.append(":test_tube: dry run, no PR will be created")
+    return " · ".join(parts)
+
+
 def main() -> None:
     config = load_config(required=[])
     workspace_dir = get_workspace_dir(config)
@@ -298,6 +317,7 @@ def main() -> None:
         print("[post-pr-audit] pr_audit_findings.json not found -- counts will be 0", flush=True)
 
     # --- Build header ---
+    run_summary = _run_summary_line(reports_dir)
     reports_url, _ = build_artifact_links(config)
     artifact_link = f"\n:paperclip: <{reports_url}|View reports>" if reports_url else ""
 
@@ -317,6 +337,7 @@ def main() -> None:
         + f" ({prs_analyzed} PRs{jira_info})"
         + date_range
         + f"\n*{spec_gaps} spec | {design_gaps} design | {skill_gaps} skill | {practice_gaps} practice gaps*"
+        + (f"\n{run_summary}" if run_summary else "")
         + artifact_link
         + "\n\n"
     )

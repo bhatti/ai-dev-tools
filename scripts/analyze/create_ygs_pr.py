@@ -26,6 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.analyze import audit_options
 from scripts.common.artifacts import write_json as artifacts_write_json
 from scripts.common.config import get_workspace_dir, load_config
 from scripts.common.git_utils import configure_git, push_branch
@@ -43,6 +44,12 @@ def main() -> None:
     workspace_dir = get_workspace_dir(config)
     reports_dir = workspace_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
+
+    if audit_options.load(reports_dir, config).dry_run:
+        print("[create-ygs-pr] dry run: no PR created", flush=True)
+        _write_skipped_json(config, "dry run")
+        print("::add-task-context YGS_PR_CREATED::dry-run", flush=True)
+        return
 
     # Read skill_improvements.json
     improvements_path = reports_dir / "skill_improvements.json"

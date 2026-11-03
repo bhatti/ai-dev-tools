@@ -403,3 +403,10 @@ def build_implement_slack_text(issue_id: str, result: dict) -> str:
         lines += ["", " | ".join(meta)]
 
     return "\n".join(lines)
+
+
+def write_markdown_report(reports_dir, name: str, title: str, md_text: str) -> None:
+    """Write ``<name>.md`` and the rendered ``<name>.html`` into ``reports_dir`` (overwrites: a report is regenerated, not merged)."""
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (reports_dir / f"{name}.md").write_text(md_text, encoding="utf-8")
+    (reports_dir / f"{name}.html").write_text(render_simple_html(title, md_text), encoding="utf-8")

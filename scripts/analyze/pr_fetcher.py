@@ -12,8 +12,11 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
+from scripts.common.comment_select import select_comments
 from scripts.common.config import worker_count
+from scripts.common.http_retry import Retryable, call_with_retry
 from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
 from scripts.common.issue_fetcher import get_jira_linked_prs
 from scripts.common.pr_classify import enrich_pr_with_metrics as _enrich_pr_with_metrics
@@ -32,6 +35,10 @@ _RUBBER_STAMP_RE = re.compile(
     r'(?:\s*[!.]*)?$',
     re.IGNORECASE,
 )
+
+# build_pr_context: chars of PR metadata reserved per PR before comments get the rest of its budget.
+_PR_HEADER_RESERVE = 1200
+_MIN_COMMENT_BUDGET = 600
 
 # Cache for raw issue API responses (populated by fetch_issue_details)
 _issue_raw_cache: dict[str, dict] = {}
@@ -168,10 +175,11 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         config.get("JIRA_SPACE", ""),
         config.get("PR_AUDIT_FILTER", ""),
     ])
-    fetch_limit = n_prs * 10 if has_jira_filter else n_prs
+    reviewers_str = ",".join(_reviewer_list(config.get("PR_AUDIT_REVIEWERS", "")))
+    fetch_limit = n_prs * (10 if has_jira_filter else 1)
     milestone = config.get("PR_AUDIT_GH_MILESTONE", "").strip()
 
-    def _gh_list(gh_state: str) -> list[dict]:
+    def _gh_list(gh_state: str, search: str = "") -> list[dict]:
         cmd = [
             "gh", "pr", "list",
             "-R", f"{org}/{repo}",
@@ -181,6 +189,8 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         ]
         if milestone:
             cmd += ["--milestone", milestone]
+        if search:
+            cmd += ["--search", search]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -199,26 +209,33 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         print(f"[pr-fetch] filtering by milestone: {milestone}", flush=True)
     print(f"[pr-fetch] fetching GH PRs states={states}", flush=True)
 
-    # Fetch merged PRs when "merged" or "declined" in states
+    # With --reviewers the tracker narrows the list (search qualifiers), so only matching PRs are enriched.
+    searches = [""]
+    if reviewers_str:
+        searches, skipped = _gh_reviewer_searches(reviewers_str)
+        if skipped:
+            print(f"[pr-fetch] GitHub reviewers must be logins; skipped: {', '.join(skipped)}", file=sys.stderr, flush=True)
+
     raw_by_num: dict[int, dict] = {}
+
+    def _collect(gh_state: str, keep=lambda rp: True) -> None:
+        for search in searches:
+            for rp in _gh_list(gh_state, search):
+                num = rp.get("number") or 0
+                if num and num not in raw_by_num and keep(rp):
+                    raw_by_num[num] = rp
+
     if states_set & {"merged", "declined"}:
-        for rp in _gh_list("merged"):
-            num = rp.get("number") or 0
-            if num:
-                raw_by_num[num] = rp
+        _collect("merged")
         # gh --state closed gives CLOSED PRs; declined = closed without mergedAt
         if "declined" in states_set:
-            for rp in _gh_list("closed"):
-                num = rp.get("number") or 0
-                if num and not rp.get("mergedAt") and num not in raw_by_num:
-                    raw_by_num[num] = rp
+            _collect("closed", keep=lambda rp: not rp.get("mergedAt"))
     if "open" in states_set:
-        for rp in _gh_list("open"):
-            num = rp.get("number") or 0
-            if num:
-                raw_by_num[num] = rp
+        _collect("open")
 
     raw_prs = list(raw_by_num.values())
+    if reviewers_str and not has_jira_filter:
+        raw_prs = sorted(raw_prs, key=lambda rp: -rp["number"])[:n_prs]
 
     # A.1: save raw PR list to artifact
     _write_raw("pr_data_raw.json", raw_prs)
@@ -346,6 +363,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
 
     # Post-filter by team members if configured
     prs = _filter_by_team(prs, config.get("PR_AUDIT_TEAM_MEMBERS", ""), tracker="github")
+    prs = _filter_by_reviewers(prs, reviewers_str)
 
     # Jira-issue-first filter (hybrid GH+Jira setups: --board / --team <name>)
     resolved = _resolve_jira_issue_keys(config)
@@ -532,8 +550,6 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
       PR_AUDIT_FILTER — filter by field=value (Jira JQL) or label=X (GitHub-native)
       PR_AUDIT_TEAM_MEMBERS — post-filter to PRs authored/reviewed by comma-sep display names
     """
-    import requests as _requests
-
     if states is None:
         states = ["merged", "declined"]
     _bb_state_map = {"merged": "MERGED", "open": "OPEN", "declined": "DECLINED"}
@@ -563,19 +579,21 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
         config.get("JIRA_SPACE", ""),
         config.get("PR_AUDIT_FILTER", ""),
     ])
-    fetch_cap = n_prs * 10 if has_filter else n_prs
+    reviewers_str = ",".join(_reviewer_list(config.get("PR_AUDIT_REVIEWERS", "")))
+    fetch_cap = n_prs * (10 if has_filter else 1)
 
-    raw_prs: list[dict] = []
-    while url and len(raw_prs) < fetch_cap:
-        try:
-            resp = _requests.get(url, auth=auth, timeout=30)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"[pr-fetch] Bitbucket API error: {e}", file=sys.stderr, flush=True)
-            break
-        data = resp.json()
-        raw_prs.extend(data.get("values", []))
-        url = data.get("next", "")
+    if reviewers_str:
+        # Server-side BBQL on assigned reviewers first; commenters who were never assigned cannot be filtered
+        # server-side, so only if that is not enough scan PRs that have comments and match on participants.
+        raw_prs = _bb_list_prs(f"{url}&q={quote(_bb_reviewer_query(reviewers_str), safe='')}", auth, fetch_cap)
+        if len(raw_prs) < n_prs:
+            seen = {rp.get("id") for rp in raw_prs}
+            scan = _bb_list_prs(f"{url}&q={quote('comment_count>0', safe='')}", auth, n_prs * _REVIEWER_OVERSCAN)
+            raw_prs += [rp for rp in _prefilter_bb_raw(scan, reviewers_str) if rp.get("id") not in seen]
+        if not has_filter:
+            raw_prs = raw_prs[:n_prs]
+    else:
+        raw_prs = _bb_list_prs(url, auth, fetch_cap)
 
     # A.1: save raw PR list to artifact
     _write_raw("pr_data_raw.json", raw_prs[:fetch_cap])
@@ -667,6 +685,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
             "human_comments": classified["human_comments"],
             "approvers": approvers,
             "reviewers": assigned_reviewers,
+            "participant_aliases": [i for p in participants if p.get("role") != "AUTHOR" for i in _bb_user_ids(p.get("user") or {})],
             "linked_issue": None,
             "review_decision": review_decision,
             "is_bot_authored": is_ai_authored(author),
@@ -687,6 +706,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
     team_str = config.get("PR_AUDIT_TEAM_MEMBERS", "").strip()
     if team_str:
         prs = _filter_by_team(prs, team_str, tracker="bitbucket")
+    prs = _filter_by_reviewers(prs, reviewers_str)
 
     # Jira-issue-first filter: --board / --team <name> / --filter field=value
     resolved = _resolve_jira_issue_keys(config)
@@ -699,6 +719,44 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
     prs = prs[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
     return prs
+
+
+def _bb_get_page(url: str, auth: tuple | None) -> dict:
+    """One Bitbucket list page; 429 and 5xx are retried with backoff (Retry-After honored)."""
+    import requests as _requests
+
+    def attempt() -> dict:
+        try:
+            resp = _requests.get(url, auth=auth, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except _requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 429 or status >= 500:
+                try:
+                    delay = float(e.response.headers.get("Retry-After", ""))
+                except (TypeError, ValueError):
+                    delay = None
+                raise Retryable(f"Bitbucket HTTP {status}", delay) from e
+            raise
+        except (_requests.ConnectionError, _requests.Timeout) as e:
+            raise Retryable(f"Bitbucket request failed: {type(e).__name__}") from e
+
+    return call_with_retry(attempt)
+
+
+def _bb_list_prs(url: str, auth: tuple | None, cap: int) -> list[dict]:
+    """Pages of a Bitbucket pull-request list until ``cap`` rows; an API error ends the list with what was read."""
+    rows: list[dict] = []
+    while url and len(rows) < cap:
+        try:
+            data = _bb_get_page(url, auth)
+        except Exception as e:
+            print(f"[pr-fetch] Bitbucket API error: {e}", file=sys.stderr, flush=True)
+            break
+        rows.extend(data.get("values", []))
+        url = data.get("next", "")
+    return rows
 
 
 def _fetch_bb_comments(base_url: str, pr_id: int, auth: tuple | None) -> list[dict]:
@@ -723,6 +781,8 @@ def _fetch_bb_comments(base_url: str, pr_id: int, auth: tuple | None) -> list[di
             user = c.get("user", {})
             comments.append({
                 "author": user.get("display_name", user.get("nickname", "")),
+                "author_alias": user.get("nickname", ""),
+                "author_id": user.get("account_id") or user.get("uuid", ""),
                 "author_kind": user.get("account_type", ""),
                 "body": c.get("content", {}).get("raw", ""),
                 "type": "comment",
@@ -747,8 +807,8 @@ def _fetch_bb_diffstat(base_url: str, pr_id: int, auth: tuple | None) -> list[di
             path = new_file.get("path", "") or old_file.get("path", "")
             files.append({
                 "path": path,
-                "lines_added": entry.get("lines_added", 0),
-                "lines_removed": entry.get("lines_removed", 0),
+                "lines_added": entry.get("lines_added") or 0,  # null for binary files
+                "lines_removed": entry.get("lines_removed") or 0,
             })
     except Exception:
         pass
@@ -875,6 +935,109 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
             flush=True,
         )
     return filtered
+
+
+# --reviewers narrows PRs on the server where the tracker can (GitHub search qualifiers, Bitbucket BBQL on
+# assigned reviewers). Bitbucket cannot filter by commenter, so that part scans at most this many times n_prs rows.
+_REVIEWER_OVERSCAN = 10
+
+_GH_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_BB_UUID = re.compile(r"^\{[0-9a-fA-F-]{36}\}$")
+_BB_ACCOUNT_ID = re.compile(r"^(?:[0-9a-f]{24}|\d+:[0-9a-fA-F-]{36})$")
+
+
+def _reviewer_list(reviewers_str: str) -> list[str]:
+    """Requested names in their original spelling, trimmed, unique case-insensitively."""
+    seen: dict[str, str] = {}
+    for r in (reviewers_str or "").split(","):
+        name = r.strip()
+        if name and name != "<no value>":
+            seen.setdefault(name.lower(), name)
+    return list(seen.values())
+
+
+def _reviewer_names(reviewers_str: str) -> set[str]:
+    return {r.lower() for r in _reviewer_list(reviewers_str)}
+
+
+def _gh_reviewer_searches(reviewers_str: str) -> tuple[list[str], list[str]]:
+    """GitHub search strings (reviewed-by / commenter, author excluded) per login; names that are not valid
+    logins are returned separately instead of being interpolated into a search query."""
+    searches, skipped = [], []
+    for name in _reviewer_list(reviewers_str):
+        if not _GH_LOGIN.match(name):
+            skipped.append(name)
+            continue
+        searches += [f"reviewed-by:{name} -author:{name}", f"commenter:{name} -author:{name}"]
+    return searches, skipped
+
+
+def _bbql_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _bb_reviewer_query(reviewers_str: str) -> str:
+    """BBQL matching PRs where any named person is an assigned reviewer (uuid, account id or nickname;
+    nickname matching is case-insensitive on the server; display names are not filterable)."""
+    clauses = []
+    for name in _reviewer_list(reviewers_str):
+        field = "uuid" if _BB_UUID.match(name) else "account_id" if _BB_ACCOUNT_ID.match(name) else "nickname"
+        clauses.append(f"reviewers.{field}={_bbql_quote(name)}")
+    return " OR ".join(clauses)
+
+
+def _bb_user_ids(user: dict) -> list[str]:
+    return [v for v in (user.get("display_name"), user.get("nickname"), user.get("uuid"), user.get("account_id")) if v]
+
+
+def _prefilter_bb_raw(raw_prs: list[dict], reviewers_str: str) -> list[dict]:
+    """Cheap client-side pre-filter of Bitbucket rows by ``participants`` (any non-author participant: assigned
+    reviewers and people who commented or approved). Rows without participant data are kept: they cannot be
+    proven irrelevant and the exact post-filter decides."""
+    names = _reviewer_names(reviewers_str)
+    if not names:
+        return raw_prs
+    kept = []
+    for rp in raw_prs:
+        parts = rp.get("participants")
+        if not parts:
+            kept.append(rp)
+            continue
+        involved = {i.lower() for p in parts if p.get("role") != "AUTHOR" for i in _bb_user_ids(p.get("user") or {})}
+        if involved & names:
+            kept.append(rp)
+    return kept
+
+
+def _filter_by_reviewers(prs: list[dict], reviewers_str: str) -> list[dict]:
+    """Keep PRs where a named reviewer commented, approved or was assigned (login, nickname or display name,
+    case-insensitive). The PR author's own comments are ignored. Sets ``matched_reviewers`` on kept PRs."""
+    names = _reviewer_names(reviewers_str)
+    if not names:
+        return prs
+    kept = []
+    for pr in prs:
+        author = (pr.get("author") or "").lower()
+        involved: set[str] = set()
+        for c in pr.get("human_comments", []):
+            who = {(c.get(k) or "").lower() for k in ("author", "author_alias", "author_id")}
+            if author not in who:
+                involved |= who
+        involved |= {a.lower() for a in pr.get("approvers", []) if a}
+        involved |= {r.lower() for r in pr.get("reviewers", []) if r}
+        involved |= {x.lower() for x in pr.get("participant_aliases", []) if x}
+        hit = sorted(involved & names)
+        if hit:
+            pr["matched_reviewers"] = hit
+            kept.append(pr)
+    print(f"[pr-fetch] reviewers filter: {len(prs)} → {len(kept)} PRs ({', '.join(sorted(names))})", flush=True)
+    return kept
+
+
+def unmatched_reviewers(prs: list[dict], reviewers_str: str) -> list[str]:
+    """Requested reviewer names (original spelling) that matched no PR — typo detection for the report."""
+    matched = {m for pr in prs for m in pr.get("matched_reviewers", [])}
+    return [r.strip() for r in (reviewers_str or "").split(",") if r.strip() and r.strip().lower() not in matched]
 
 
 def _resolve_jira_issue_keys(config: dict) -> tuple[set[str], list[dict]] | None:
@@ -1330,12 +1493,15 @@ def _extract_links(text: str) -> list[str]:
 # Context builder
 # ---------------------------------------------------------------------------
 
-def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
+def build_pr_context(prs: list[dict], max_chars: int = 100_000, priority_authors: tuple[str, ...] = ()) -> str:
     """Serialize PR data as structured Markdown for the Claude prompt.
 
     Per PR: number, title, author, merged date, files changed count,
     linked issue summary, bot comments summary, human comments summary.
-    Truncates per-PR to stay within the total character budget.
+    Truncates per-PR to stay within the total character budget. Human review comments are chosen by
+    ``select_comments`` (substantive and inline first, one per reviewer before seconds); comments by
+    ``priority_authors`` (the ``--reviewers`` list) are always kept, up to 4000 chars each, and extend the
+    PR's budget so they are not cut by the final truncation.
     """
     if not prs:
         return "(no PRs available)"
@@ -1445,17 +1611,27 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
         elif pr.get("review_decision") == "APPROVED":
             section.append("- **Approved by**: (approval recorded, name unavailable)")
 
+        priority_extra = 0
         if human:
+            shown, omitted = select_comments(
+                human,
+                budget_chars=max(per_pr_budget - _PR_HEADER_RESERVE, _MIN_COMMENT_BUDGET),
+                priority_authors=priority_authors,
+                is_trivial=lambda b: bool(_RUBBER_STAMP_RE.match(b.strip())),
+            )
             section.append(f"- **Human comments** ({len(human)}):")
-            for c in human[:5]:
-                body = c.get("body", "")[:300]
+            prio = {p.lower() for p in priority_authors}
+            for c in shown:
                 ctype = c.get("type", "comment")
                 path = c.get("path", "")
                 prefix = f"[{ctype}]" if ctype != "comment" else ""
                 file_ref = f" on `{path}`" if path else ""
-                section.append(f"  - @{c.get('author', '?')}{file_ref} {prefix}: {body}")
-            if len(human) > 5:
-                section.append(f"  - ...and {len(human) - 5} more")
+                is_prio = bool(prio & {(c.get("author") or "").lower(), (c.get("author_alias") or "").lower()})
+                if is_prio:
+                    priority_extra += len(c.get("body", ""))
+                section.append(f"  - @{c.get('author', '?')}{file_ref} {prefix}: {c.get('body', '')}")
+            if omitted:
+                section.append(f"  - ...and {omitted} more")
 
         if review_bot:
             section.append(f"- **Code-review bot comments** ({len(review_bot)}):")
@@ -1493,8 +1669,9 @@ def build_pr_context(prs: list[dict], max_chars: int = 100_000) -> str:
             section.append(f"- **Data completeness**: missing: {', '.join(missing)}")
 
         pr_text = "\n".join(section) + "\n"
-        if len(pr_text) > per_pr_budget:
-            pr_text = pr_text[:per_pr_budget] + "\n_(truncated)_\n"
+        pr_limit = per_pr_budget + priority_extra
+        if len(pr_text) > pr_limit:
+            pr_text = pr_text[:pr_limit] + "\n_(truncated)_\n"
 
         lines.append(pr_text)
         total += len(pr_text)

@@ -767,3 +767,67 @@ def test_a_value_that_is_not_a_number_is_not_assessed_not_a_green_zero(tmp_path)
     (tmp_path / "pr_audit_findings.json").write_text(json.dumps({"metrics": {"rubber_stamp_rate": "n/a", "verbosity_accumulation_rate": ""}}))
     rows = {r[0]: r for r in _read_all_claude_metrics(tmp_path)}
     assert rows["Rubber-Stamp Rate"][1] == "—" and rows["Verbosity Rate"][1] == "—" and rows["Verbosity Rate"][3] == "—"
+
+
+class TestParseSlackFlagsDryRunReviewers:
+    def test_defaults_when_no_message(self):
+        r = _parse_slack_flags({})
+        assert r["dry_run"] is False and r["reviewers"] is None
+
+    def test_dry_run_flag_variants(self):
+        assert _parse_slack_flags({"SLACK_MESSAGE": "--dry-run"})["dry_run"] is True
+        assert _parse_slack_flags({"SLACK_MESSAGE": "pr-audit --dryrun --n-prs 5"})["dry_run"] is True
+        assert _parse_slack_flags({"SLACK_MESSAGE": "--n-prs 5"})["dry_run"] is False
+
+    def test_reviewers_comma_list(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--reviewers alice,bob.smith --n-prs 20"})
+        assert r["reviewers"] == "alice,bob.smith" and r["n_prs"] == 20
+
+    def test_reviewers_quoted_display_names_with_spaces(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": '--reviewers "Alice Smith,Bob Jones" --dry-run'})
+        assert r["reviewers"] == "Alice Smith,Bob Jones" and r["dry_run"] is True
+
+    def test_reviewers_does_not_leak_into_team_filters(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--reviewers alice,bob"})
+        assert r["team_members"] is None and r["jira_team"] is None
+
+    def test_team_and_reviewers_together(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--team x,y --reviewers alice"})
+        assert r["team_members"] == "x,y" and r["reviewers"] == "alice"
+
+    def test_focus_learnings(self):
+        assert _parse_slack_flags({"SLACK_MESSAGE": "--focus learnings"})["focus"] == "learnings"
+        assert _parse_slack_flags({"SLACK_MESSAGE": "focus learnings"})["focus"] == "learnings"
+
+
+class TestLearningsPrompt:
+    def test_template_requests_learnings_output_and_why_in_rules(self):
+        assert "review_learnings.json" in _PR_AUDIT_PROMPT_TEMPLATE
+        assert "Why:" in _PR_AUDIT_PROMPT_TEMPLATE
+
+    def test_reviewer_block_names_reviewers_and_dry_run_is_not_mentioned_to_model(self):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _learnings_instructions
+        block = _learnings_instructions(AuditOptions(dry_run=True, reviewers=("alice", "bob")), unmatched=["bob"])
+        assert "alice" in block and "bob" in block and "review-learnings" in block
+        assert "dry" not in block.lower()
+        assert "no PR activity" in block  # unmatched warning
+
+    def test_no_reviewers_still_asks_for_category_learnings(self):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _learnings_instructions
+        block = _learnings_instructions(AuditOptions(), unmatched=[])
+        assert "review-learnings" in block and "Reviewer focus" not in block
+
+
+class TestMainWritesRunOptions:
+    def test_flags_written_to_env_and_artifact(self, monkeypatch, tmp_path):
+        for k in ("PR_AUDIT_REVIEWERS", "PR_AUDIT_DRY_RUN"):
+            monkeypatch.setenv(k, "")  # registers restore/cleanup of what main() exports
+        helper = TestMainEnvWrites()
+        helper._run_main_with_message("--reviewers alice,bob --dry-run", monkeypatch, tmp_path)
+        assert os.environ.get("PR_AUDIT_REVIEWERS") == "alice,bob"
+        assert os.environ.get("PR_AUDIT_DRY_RUN") == "1"
+        import json
+        data = json.loads((tmp_path / "reports" / "run_options.json").read_text())
+        assert data["dry_run"] is True and data["reviewers"] == ["alice", "bob"]

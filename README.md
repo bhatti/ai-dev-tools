@@ -796,6 +796,12 @@ Key variables:
 | `focus skills` / `--focus design` | Set audit focus dimension |
 | `https://github.com/org/repo/pull/123` | Audit specific PR(s) instead of last N |
 | `--model opus` / `model: <alias\|id>` | Override AI model for this run (aliases from `models.json`) |
+| `--n-prs 40` / `last 40 prs` | Max PRs to analyze (default `N_PRS` = 50) |
+| `--reviewers alice,bob` | Learn what these reviewers look for: only PRs they reviewed (GitHub: logins, filtered server-side with `reviewed-by:`/`commenter:` search; Bitbucket: nickname/account id/uuid via BBQL `reviewers.*`, then a bounded scan of commented PRs for commenters and display names; case-insensitive; 429/5xx retried), their comments in full, one profile each in `review_learnings.md` and the generated `review-knowledge` skill |
+| `--dry-run` | Run everything, create no PR: `reports/dry_run/{files/,pr_body.md,diff.patch,files.txt}` plus all reports |
+| `--focus learnings` | Only the review-learnings pass |
+
+**PR audit review learnings** (`scripts/analyze/`): `audit_options.py` carries `--dry-run`/`--reviewers` to the later tasks via `reports/run_options.json` (env `PR_AUDIT_DRY_RUN`, `PR_AUDIT_REVIEWERS` are the fallback for API-submitted jobs); `pr_fetcher.py` over-scans and filters by reviewer and ranks comments with `scripts/common/comment_select.py` (priority reviewers are never truncated below 4000 chars; context budget `PR_AUDIT_CONTEXT_CHARS`, default 250000, 400000 with reviewers); `learnings_report.py` renders `review_learnings.md` from `review_learnings.json`; `skills_report.py` + `write_markdown_report` write `skill_updates_report.{md,html}` (all files created/updated with content, in both modes) and `plan_skill_updates` writes `skill_update_plan.html`; `kb_writer.py` builds the merge-only `.claude/skills/review-knowledge/` tree (`SKILL.md` index, `checklists/<category>.md`, `reviewers/<handle>.md`) that `create_skill_pr.py` adds to the PR. Skill side: `ygs-pr-audit/specialists/review-learnings.md` and `shared/review-knowledge-format.md` in [you-got-skills](https://github.com/bhatti/you-got-skills).
 
 ---
 

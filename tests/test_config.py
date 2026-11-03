@@ -283,6 +283,18 @@ def test_camelcase_pr_audit_aliases(monkeypatch):
     assert config["PR_AUDIT_GH_MILESTONE"] == "v2.5"
 
 
+def test_camelcase_pr_audit_dry_run_and_reviewers_aliases(monkeypatch):
+    for k in ("PR_AUDIT_DRY_RUN", "PR_AUDIT_REVIEWERS", "PR_AUDIT_CONTEXT_CHARS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("PrAuditDryRun", "1")
+    monkeypatch.setenv("PrAuditReviewers", "alice,bob")
+    monkeypatch.setenv("PrAuditContextChars", "300000")
+    config = load_config()
+    assert config["PR_AUDIT_DRY_RUN"] == "1"
+    assert config["PR_AUDIT_REVIEWERS"] == "alice,bob"
+    assert config["PR_AUDIT_CONTEXT_CHARS"] == "300000"
+
+
 def test_team_id_alias_maps_to_jira_space(monkeypatch):
     """TeamId org-config alias resolves to JIRA_SPACE — no separate TEAM_ID key."""
     monkeypatch.delenv("JIRA_SPACE", raising=False)

@@ -151,6 +151,22 @@ class TestMainNoImprovements:
         candidates = list(tmp_path.rglob("ygs_pr.json"))
         assert candidates
 
+    def test_dry_run_creates_no_pr_even_with_strong_evidence(self, tmp_path: Path) -> None:
+        from scripts.analyze.audit_options import AuditOptions, write
+        config = _make_config(tmp_path)
+        reports_dir = tmp_path / "reports"
+        write(reports_dir, AuditOptions(dry_run=True))
+        (reports_dir / "skill_improvements.json").write_text(json.dumps({"ygs_recommendations": [
+            {"skill_name": "ygs-review-pr", "gap": "g", "suggestion": "s", "pr_evidence_count": 9}]}), encoding="utf-8")
+        with patch("scripts.analyze.create_ygs_pr.load_config", return_value=config), \
+             patch("scripts.analyze.create_ygs_pr.push_branch") as push, \
+             patch("scripts.analyze.create_ygs_pr.run_cmd") as run:
+            from scripts.analyze.create_ygs_pr import main
+            main()
+        push.assert_not_called()
+        run.assert_not_called()
+        assert json.loads(next(tmp_path.rglob("ygs_pr.json")).read_text())["reason"] == "dry run"
+
     def test_empty_ygs_recommendations(self, tmp_path: Path) -> None:
         config = _make_config(tmp_path)
         reports_dir = tmp_path / "reports"
