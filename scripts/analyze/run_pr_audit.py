@@ -286,6 +286,9 @@ def _resolve_branch(config: dict, effective_tracker: str) -> str:
 
 # -- Slack flag parsing --------------------------------------------------------
 
+_REPO_URL_RE = re.compile(r"^https?://[^/\s]+/[^/\s]+/[^/\s]+?(?:\.git)?/?$")
+
+
 def _parse_slack_flags(config: dict) -> dict:
     """Parse inline Slack flags from SLACK_MESSAGE env var.
 
@@ -305,15 +308,17 @@ def _parse_slack_flags(config: dict) -> dict:
       --filter "Eng Scrum Team"=MyTeam  (Jira field=value filter)
 
     Returns dict with keys: n_prs, focus, pr_urls, model, team_members, jira_boards, gh_milestone,
-    tracker, full_report, jira_team, pr_filter, pr_state, dry_run, reviewers.
+    tracker, full_report, jira_team, pr_filter, pr_state, dry_run, reviewers, repo_url.
     """
     msg = config.get("SLACK_MESSAGE", os.environ.get("SLACK_MESSAGE", ""))
+    if msg.strip() == "<no value>":  # unrendered job variable
+        msg = ""
     if not msg:
         return {"n_prs": None, "focus": None, "pr_urls": [], "model": None,
                 "team_members": None, "jira_boards": None, "gh_milestone": None,
                 "tracker": None, "full_report": False,
                 "jira_team": None, "pr_filter": None, "pr_state": None,
-                "dry_run": False, "reviewers": None}
+                "dry_run": False, "reviewers": None, "repo_url": None}
 
     msg_lower = msg.lower()
 
@@ -397,25 +402,28 @@ def _parse_slack_flags(config: dict) -> dict:
 
     # --reviewers a,b | --reviewers "Alice Smith,Bob Jones": learn what these reviewers look for.
     reviewers: str | None = None
-    m = re.search(r'--reviewers?\s+(?:["\u201c]([^"\u201d]+)["\u201d]|([\w,@\-\.]+))', msg, re.IGNORECASE)
+    m = re.search(r'--reviewers?\s+(?:["\u201c]([^"\u201d]+)["\u201d]|(?!-)([\w,@\-\.]+))', msg, re.IGNORECASE)
     if m:
         reviewers = (m.group(1) or m.group(2)).strip()
 
-    # PR URLs: extract any GitHub or Bitbucket PR URLs from the message
-    for token in re.findall(r"https?://\S+", msg):
+    # URLs in the text: PR URLs select PRs; the first bare org/repo URL is the repo to audit. Anything else
+    # (issue links, Jira board URLs) is ignored here; board ids are read by the --board patterns above.
+    repo_url: str | None = None
+    for token in re.findall(r"https?://[^\s|>]+", msg):
         token = token.rstrip(".,;)")
         try:
-            parse_pr_url(token)  # validate format; also implies tracker
+            parse_pr_url(token)  # validates the format; also implies the tracker
             pr_urls.append(token)
         except ValueError:
-            pass
+            if repo_url is None and _REPO_URL_RE.match(token):
+                repo_url = token
 
     return {
         "n_prs": n_prs, "focus": focus, "pr_urls": pr_urls, "model": model,
         "team_members": team_members, "jira_boards": jira_boards,
         "gh_milestone": gh_milestone, "tracker": tracker, "full_report": full_report,
         "jira_team": jira_team, "pr_filter": pr_filter, "pr_state": pr_state,
-        "dry_run": dry_run, "reviewers": reviewers,
+        "dry_run": dry_run, "reviewers": reviewers, "repo_url": repo_url,
     }
 
 
@@ -896,6 +904,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
     if slack_flags["focus"] is not None:
         focus = slack_flags["focus"]
         print(f"[pr-audit] Slack override: focus={focus}", flush=True)
+    repo_url = repo_url or slack_flags["repo_url"]
     _apply_model_override(config, slack_flags)
     options = audit_options.resolve(config, slack_flags)
     if options.reviewers:
@@ -968,7 +977,7 @@ def main(repo_url: str | None, branch: str | None, n_prs: int | None, focus: str
 
     # Combine PR URLs: CLI flag + Slack message + PR_URLS env var (space/comma separated)
     pr_urls_env = [u.strip() for u in re.split(r"[\s,]+", os.environ.get("PR_URLS", "")) if u.strip()]
-    all_pr_urls = list(pr_urls) + slack_flags["pr_urls"] + pr_urls_env
+    all_pr_urls = list(dict.fromkeys([*pr_urls, *slack_flags["pr_urls"], *pr_urls_env]))  # same PR given twice is audited once
 
     workspace = get_workspace_dir(config)
     workspace.mkdir(parents=True, exist_ok=True)

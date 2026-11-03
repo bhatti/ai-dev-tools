@@ -47,16 +47,16 @@ def select_comments(
 
     for i, c in enumerate(comments):
         if prio & _names(c):
-            chosen[i] = _cut(c.get("body", ""), priority_cap)
+            chosen[i] = _cut(c.get("body") or "", priority_cap)
 
     def rank(i: int) -> tuple:
         c = comments[i]
-        body = c.get("body", "")
+        body = c.get("body") or ""
         return (is_trivial(body), not c.get("path"), -len(body), i)
 
     def try_add(i: int) -> None:
         nonlocal used
-        body = _cut(comments[i].get("body", ""), per_comment_cap)
+        body = _cut(comments[i].get("body") or "", per_comment_cap)
         if used + len(body) <= budget_chars:
             chosen[i] = body
             used += len(body)

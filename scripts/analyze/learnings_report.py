@@ -13,19 +13,50 @@ from pathlib import Path
 
 from scripts.analyze.kb_writer import CATEGORIES, normalize_category
 
-_EMPTY = {"entries": [], "reviewer_profiles": []}
+def _int(v: object) -> int:
+    try:
+        return max(int(v), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _strs(v: object) -> list[str]:
+    items = [v] if isinstance(v, str) else v if isinstance(v, list) else []
+    return [str(i) for i in items if isinstance(i, (str, int)) and str(i).strip()]
+
+
+def _dicts(v: object) -> list[dict]:
+    return [i for i in v if isinstance(i, dict)] if isinstance(v, list) else []
+
+
+def _entry(e: dict) -> dict:
+    return {**e, "category": str(e.get("category") or ""), "rule": str(e.get("rule") or ""), "why": str(e.get("why") or ""),
+            "look_for": str(e.get("look_for") or ""), "pr_count": _int(e.get("pr_count")), "reviewers": _strs(e.get("reviewers")),
+            "prs": _strs(e.get("prs")), "tribal": e.get("tribal") is True}
+
+
+def _profile(p: dict) -> dict:
+    return {**p, "reviewer": str(p.get("reviewer") or ""),
+            "focus_areas": [{"category": str(f.get("category") or ""), "count": _int(f.get("count"))} for f in _dicts(p.get("focus_areas"))],
+            "signature_concerns": _strs(p.get("signature_concerns")),
+            "quotes": [{"pr": str(q.get("pr") or ""), "text": str(q.get("text") or "")} for q in _dicts(p.get("quotes"))]}
 
 
 def load_learnings(reports_dir: Path) -> dict:
-    """Refined file if valid, else the raw one, else an empty structure."""
+    """Refined file if it has an ``entries`` list, else the raw one, else empty.
+
+    The files are written by a model, so every field is coerced to its expected type and malformed items are
+    dropped: later steps (KB files, reports) can rely on the shape.
+    """
     for name in ("review_learnings_refined.json", "review_learnings.json"):
         try:
             data = json.loads((reports_dir / name).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(data, dict):
-            return {"entries": data.get("entries") or [], "reviewer_profiles": data.get("reviewer_profiles") or []}
-    return dict(_EMPTY, entries=[], reviewer_profiles=[])
+        if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            return {"entries": [_entry(e) for e in _dicts(data["entries"])],
+                    "reviewer_profiles": [_profile(p) for p in _dicts(data.get("reviewer_profiles"))]}
+    return {"entries": [], "reviewer_profiles": []}
 
 
 def _line(text: object) -> str:

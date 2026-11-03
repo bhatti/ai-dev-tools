@@ -831,3 +831,51 @@ class TestMainWritesRunOptions:
         import json
         data = json.loads((tmp_path / "reports" / "run_options.json").read_text())
         assert data["dry_run"] is True and data["reviewers"] == ["alice", "bob"]
+
+
+class TestParseSlackFlagsRepoUrl:
+    """Slack passes the whole text after the trigger through unmodified; this parser is the only one."""
+
+    def test_repo_url_alone(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "https://github.com/org/repo"})
+        assert r["repo_url"] == "https://github.com/org/repo" and r["pr_urls"] == []
+
+    def test_repo_url_with_flags_in_any_order(self):
+        for msg in ("https://bitbucket.org/ws/repo --reviewers a --dry-run",
+                    "--dry-run https://bitbucket.org/ws/repo --reviewers a",
+                    "--reviewers a --dry-run https://bitbucket.org/ws/repo"):
+            r = _parse_slack_flags({"SLACK_MESSAGE": msg})
+            assert r["repo_url"] == "https://bitbucket.org/ws/repo", msg
+            assert r["dry_run"] is True and r["reviewers"] == "a", msg
+
+    def test_pr_url_is_not_a_repo_url(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "https://github.com/org/repo/pull/12 --dry-run"})
+        assert r["repo_url"] is None and r["pr_urls"] == ["https://github.com/org/repo/pull/12"] and r["dry_run"] is True
+
+    def test_other_urls_are_not_repo_urls(self):
+        for msg in ("https://github.com/org/repo/issues/3", "https://company.atlassian.net/jira/software/projects/P/boards/42"):
+            assert _parse_slack_flags({"SLACK_MESSAGE": msg})["repo_url"] is None, msg
+
+    def test_slack_link_markup_and_trailing_punctuation(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "<https://github.com/org/repo|org/repo>, --n-prs 5"})
+        assert r["repo_url"] == "https://github.com/org/repo" and r["n_prs"] == 5
+
+    def test_git_suffix_and_unrendered_placeholder(self):
+        assert _parse_slack_flags({"SLACK_MESSAGE": "https://github.com/org/repo.git"})["repo_url"] == "https://github.com/org/repo.git"
+        r = _parse_slack_flags({"SLACK_MESSAGE": "<no value>"})
+        assert r["repo_url"] is None and r["dry_run"] is False and r["n_prs"] is None
+
+    def test_all_flags_together_as_slack_delivers_them(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": '--team alice,bob --model opus --focus learnings --state all --filter "Priority Area"=Backend https://github.com/org/repo'})
+        assert (r["team_members"], r["model"], r["focus"], r["pr_state"], r["pr_filter"], r["repo_url"]) == (
+            "alice,bob", "opus", "learnings", "all", "Priority Area=Backend", "https://github.com/org/repo")
+
+
+class TestReviewersEdgeCases:
+    def test_flag_following_reviewers_is_not_taken_as_a_name(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--reviewers --dry-run"})
+        assert r["reviewers"] is None and r["dry_run"] is True
+
+    def test_smart_quotes_from_slack(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--reviewers “Alice Smith,Bob”"})
+        assert r["reviewers"] == "Alice Smith,Bob"
