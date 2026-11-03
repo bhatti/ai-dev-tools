@@ -262,9 +262,11 @@ def _run_summary_line(reports_dir) -> str:
     if entries:
         tribal = sum(1 for e in entries if e.get("tribal"))
         parts.append(f"{len(entries)} review learnings" + (f" ({tribal} tribal)" if tribal else ""))
+    unmatched = audit_options.load_unmatched(reports_dir)
     if opts.reviewers:
-        unmatched = audit_options.load_unmatched(reports_dir)
-        parts.append(f"reviewers: {', '.join(opts.reviewers)}" + (f" (no PR activity found for: {', '.join(unmatched)})" if unmatched else ""))
+        parts.append(f"reviewers: {', '.join(opts.reviewers)}" + (f" (not found: {', '.join(unmatched)})" if unmatched else ""))
+    elif unmatched:
+        parts.append(f":warning: reviewers not found ({', '.join(unmatched)}): learnings are from all reviewers")
     if opts.dry_run:
         parts.append(":test_tube: dry run, no PR will be created")
     return " · ".join(parts)

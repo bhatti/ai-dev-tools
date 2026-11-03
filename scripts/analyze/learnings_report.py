@@ -82,13 +82,19 @@ def _line(text: object) -> str:
     return " ".join(str(text or "").split())
 
 
-def render_learnings_md(data: dict, requested: tuple[str, ...], unmatched: list[str]) -> str:
+def render_learnings_md(data: dict, requested: tuple[str, ...], unmatched: list[str], aliases: dict[str, list[str]] | None = None) -> str:
+    """``requested``: reviewers the learnings are restricted to; ``unmatched``: requested names with no PR activity
+    (when ``requested`` is empty they all failed and the learnings are from everyone); ``aliases``: who each matched."""
     entries = data.get("entries") or []
     out = ["# Review learnings — what reviewers look for", ""]
     if requested:
-        out.append(f"Reviewers analyzed: {', '.join(requested)}")
-    if unmatched:
-        out.append(f":warning: No PR activity found for: {', '.join(unmatched)} (check spelling; login, nickname or display name)")
+        out.append("Reviewers analyzed: " + "; ".join(
+            f"{r} → {', '.join(aliases[r])}" if aliases and r in aliases else r for r in requested))
+    if unmatched and requested:
+        out.append(f":warning: Not found: {', '.join(unmatched)} (tried name, first/last name, nickname, initials, username and id)")
+    elif unmatched:
+        out.append(f":warning: None of the requested reviewers ({', '.join(unmatched)}) matched anyone with PR activity "
+                   "(tried name, first/last name, nickname, initials, username and id), so learnings from all reviewers are shown.")
     if not entries:
         return "\n".join(out + ["", "No learnings extracted from this PR set.", ""])
 

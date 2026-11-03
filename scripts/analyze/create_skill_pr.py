@@ -78,14 +78,17 @@ def main() -> None:
 
     options = audit_options.load(reports_dir, config)
     learnings = load_learnings(reports_dir)
-    kb_entries = select_entries(learnings["entries"], options.reviewers)
+    priority = audit_options.reviewer_names(reports_dir)
+    kb_entries = select_entries(learnings["entries"], priority)
 
     # Read optional plan and findings for enriched PR body
     audit_report = _read_text_safe(reports_dir / "pr_audit_report.md")
     skill_update_plan = _read_text_safe(reports_dir / "skill_update_plan.md")
 
     if not repo_changes and not new_docs and not kb_entries:
-        print("[create-skill-pr] No repo changes to propose", flush=True)
+        print(f"[create-skill-pr] No repo changes to propose ({len(learnings['entries'])} learnings, none passed the evidence bar)", flush=True)
+        _write_skills_report(reports_dir, Path(), [], {}, options.dry_run, "",
+                             _repo_label(config, (config.get("DEFAULT_TRACKER") or "").lower().strip()))
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::no", flush=True)
         if ygs_recs:
@@ -130,7 +133,7 @@ def main() -> None:
     configure_git(codebase_dir, git_name, git_email)
 
     # Review-knowledge checklists/profiles: merged with what the repo already has (merge-only).
-    new_docs += _kb_docs(learnings, options, codebase_dir)
+    new_docs += _kb_docs(learnings, priority, codebase_dir)
 
     # Create branch
     branch_suffix = secrets.token_hex(4)
@@ -202,7 +205,7 @@ def main() -> None:
         _run_git(codebase_dir, ["add", "-A"])  # local index only: lets `git diff --cached` include new files
         diff = _run_git(codebase_dir, ["diff", "--cached"])
         body = _build_pr_body(repo_changes, new_docs, audit_report, skill_update_plan,
-                              learnings_md=render_learnings_md(learnings, options.reviewers, []))
+                              learnings_md=_learnings_md(learnings, options, reports_dir))
         out_dir = _write_dry_run(codebase_dir, reports_dir, changes_made, body, diff_text=diff.stdout or "")
         _write_empty_pr_json(config)
         print("::add-task-context SKILL_PR_CREATED::dry-run", flush=True)
@@ -264,7 +267,7 @@ def main() -> None:
     # Create PR — tracker-specific: GH uses gh CLI, BB uses bitbucket_api
     pr_info = _create_pr(config, pr_branch, base_branch, repo_changes, new_docs, tracker,
                          audit_report=audit_report, skill_update_plan=skill_update_plan,
-                         learnings_md=render_learnings_md(learnings, options.reviewers, []) if learnings["entries"] else "")
+                         learnings_md=_learnings_md(learnings, options, reports_dir) if learnings["entries"] else "")
 
     # Determine org/repo for pr.json metadata — tracker-specific, no cross-fallback
     if tracker in ("jira", "bitbucket", "jira/bitbucket"):
@@ -484,9 +487,10 @@ def _read_kb_files(codebase_dir: Path) -> dict[str, str]:
     }
 
 
-def _kb_docs(learnings: dict, options: "audit_options.AuditOptions", codebase_dir: Path) -> list[dict]:
-    """``new_docs`` entries for the review-knowledge skill (already merged with the repo's existing files)."""
-    entries = select_entries(learnings["entries"], options.reviewers)
+def _kb_docs(learnings: dict, priority: tuple[str, ...], codebase_dir: Path) -> list[dict]:
+    """``new_docs`` entries for the review-knowledge skill (already merged with the repo's existing files).
+    ``priority``: names of the requested reviewers; what they said is kept even when only one PR shows it."""
+    entries = select_entries(learnings["entries"], priority)
     if not entries:
         return []
     files = build_kb_files(entries, learnings["reviewer_profiles"], _read_kb_files(codebase_dir))
@@ -495,6 +499,10 @@ def _kb_docs(learnings: dict, options: "audit_options.AuditOptions", codebase_di
          "reason": "rules and reasoning learned from reviewers' PR feedback"}
         for path, content in sorted(files.items())
     ]
+
+
+def _learnings_md(learnings: dict, options: "audit_options.AuditOptions", reports_dir: Path) -> str:
+    return render_learnings_md(learnings, options.reviewers, audit_options.load_unmatched(reports_dir), audit_options.load_aliases(reports_dir))
 
 
 def _repo_label(config: dict, tracker: str) -> str:

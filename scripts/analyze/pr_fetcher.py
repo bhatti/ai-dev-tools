@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
+from scripts.analyze import reviewer_scope
 from scripts.common.comment_select import select_comments
 from scripts.common.config import worker_count
 from scripts.common.http_retry import Retryable, call_with_retry
@@ -175,7 +176,7 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         config.get("JIRA_SPACE", ""),
         config.get("PR_AUDIT_FILTER", ""),
     ])
-    reviewers_str = ",".join(_reviewer_list(config.get("PR_AUDIT_REVIEWERS", "")))
+    scope = resolve_reviewer_scope(config, "github")
     fetch_limit = n_prs * (10 if has_jira_filter else 1)
     milestone = config.get("PR_AUDIT_GH_MILESTONE", "").strip()
 
@@ -209,33 +210,45 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
         print(f"[pr-fetch] filtering by milestone: {milestone}", flush=True)
     print(f"[pr-fetch] fetching GH PRs states={states}", flush=True)
 
-    # With --reviewers the tracker narrows the list (search qualifiers), so only matching PRs are enriched.
-    searches = [""]
-    if reviewers_str:
-        searches, skipped = _gh_reviewer_searches(reviewers_str)
-        if skipped:
-            print(f"[pr-fetch] GitHub reviewers must be logins; skipped: {', '.join(skipped)}", file=sys.stderr, flush=True)
+    # With --reviewers the tracker narrows the list (search qualifiers), so only matching PRs are enriched. One group
+    # per requested name, so a small --n-prs still covers every name (the groups are interleaved below).
+    groups: list[reviewer_scope.Scope] = [{name: people} for name, people in scope.items()] or [{}]
+    skipped_logins: list[str] = []
 
-    raw_by_num: dict[int, dict] = {}
+    def _collect(searches: list[str]) -> list[dict]:
+        rows: dict[int, dict] = {}
 
-    def _collect(gh_state: str, keep=lambda rp: True) -> None:
-        for search in searches:
-            for rp in _gh_list(gh_state, search):
-                num = rp.get("number") or 0
-                if num and num not in raw_by_num and keep(rp):
-                    raw_by_num[num] = rp
+        def add(gh_state: str, keep=lambda rp: True) -> None:
+            for search in searches:
+                for rp in _gh_list(gh_state, search):
+                    num = rp.get("number") or 0
+                    if num and num not in rows and keep(rp):
+                        rows[num] = rp
 
-    if states_set & {"merged", "declined"}:
-        _collect("merged")
-        # gh --state closed gives CLOSED PRs; declined = closed without mergedAt
-        if "declined" in states_set:
-            _collect("closed", keep=lambda rp: not rp.get("mergedAt"))
-    if "open" in states_set:
-        _collect("open")
+        if states_set & {"merged", "declined"}:
+            add("merged")
+            # gh --state closed gives CLOSED PRs; declined = closed without mergedAt
+            if "declined" in states_set:
+                add("closed", keep=lambda rp: not rp.get("mergedAt"))
+        if "open" in states_set:
+            add("open")
+        return list(rows.values())
 
-    raw_prs = list(raw_by_num.values())
-    if reviewers_str and not has_jira_filter:
-        raw_prs = sorted(raw_prs, key=lambda rp: -rp["number"])[:n_prs]
+    per_group: list[list[dict]] = []
+    for group in groups:
+        if group:
+            searches, skipped = reviewer_scope.gh_searches(group)
+            skipped_logins += skipped
+        else:
+            searches = [""]
+        rows = _collect(searches)
+        per_group.append(sorted(rows, key=lambda rp: -rp["number"]) if group else rows)
+    if skipped_logins:
+        print(f"[pr-fetch] GitHub reviewers must be logins; skipped: {', '.join(skipped_logins)}", file=sys.stderr, flush=True)
+
+    raw_prs = _interleave(per_group, "number")
+    if scope and not has_jira_filter:
+        raw_prs = raw_prs[:n_prs]
 
     # A.1: save raw PR list to artifact
     _write_raw("pr_data_raw.json", raw_prs)
@@ -380,9 +393,9 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
             prs = _filter_by_label(prs, config["JIRA_SPACE"].strip())
 
     # Last on purpose: the Jira dev-status supplement above adds PRs fetched without any reviewer filter.
-    if reviewers_str and has_jira_filter:
+    if scope and has_jira_filter:
         print("[pr-fetch] reviewers filter is applied on top of the Jira scope (JIRA_BOARDS / JIRA_SPACE / --filter)", flush=True)
-    prs = _filter_by_reviewers(prs, reviewers_str)[:n_prs]
+    prs = reviewer_scope.filter_prs(prs, scope)[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from GitHub ({org}/{repo})", flush=True)
     return prs
 
@@ -559,15 +572,10 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
     if not bb_states:
         bb_states = ["MERGED"]
 
-    workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
-    repo = config.get("BITBUCKET_REPO", "").strip()
+    workspace, repo, auth = _bb_credentials(config)
     if not workspace or not repo:
         print("[pr-fetch] BITBUCKET_WORKSPACE/REPO not set", file=sys.stderr, flush=True)
         return []
-
-    username = config.get("BITBUCKET_USERNAME", "").strip()
-    token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", "")).strip()
-    auth = (username, token) if username and token else None
 
     base = f"{api_base()}/repositories/{workspace}/{repo}"
     state_params = "&".join(f"state={s}" for s in bb_states)
@@ -581,20 +589,23 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
         config.get("JIRA_SPACE", ""),
         config.get("PR_AUDIT_FILTER", ""),
     ])
-    reviewers_str = ",".join(_reviewer_list(config.get("PR_AUDIT_REVIEWERS", "")))
+    scope = resolve_reviewer_scope(config, "bitbucket")
     fetch_cap = n_prs * (10 if has_filter else 1)
 
-    if reviewers_str:
-        # Server-side BBQL on assigned reviewers first; commenters who were never assigned cannot be filtered
-        # server-side, so only if that is not enough scan PRs that have comments and match on participants.
-        raw_prs = _bb_list_prs(f"{url}&q={quote(_bb_reviewer_query(reviewers_str), safe='')}", auth, fetch_cap)
-        print(f"[pr-fetch] reviewers: assigned-reviewer query matched {len(raw_prs)} PRs", flush=True)
+    if scope:
+        # Server-side BBQL on assigned reviewers first, one query per requested name so a small --n-prs still covers
+        # every name; commenters who were never assigned cannot be filtered server-side, so only if that is not
+        # enough scan PRs that have comments and match on participants.
+        per_name = [_bb_list_prs(f"{url}&q={quote(reviewer_scope.bbql({name: people}), safe='')}", auth, fetch_cap)
+                    for name, people in scope.items()]
+        raw_prs = _interleave(per_name, "id")
+        print(f"[pr-fetch] reviewers: assigned-reviewer queries matched {len(raw_prs)} PRs "
+              f"({', '.join(f'{n}: {len(r)}' for n, r in zip(scope, per_name))})", flush=True)
         if len(raw_prs) < n_prs:
             seen = {rp.get("id") for rp in raw_prs}
             scan = _bb_list_prs(f"{url}&q={quote('comment_count>0', safe='')}", auth, min(n_prs * _REVIEWER_OVERSCAN, _REVIEWER_SCAN_CAP))
-            found = [rp for rp in _prefilter_bb_raw(scan, reviewers_str) if rp.get("id") not in seen]
+            found = [rp for rp in reviewer_scope.prefilter_bb_rows(scan, scope) if rp.get("id") not in seen]
             raw_prs += found
-            config["_reviewer_candidates"] = _reviewer_candidates(scan)  # for the "no match" message
             print(f"[pr-fetch] reviewers: scanned {len(scan)} commented PRs, {len(found)} involve them", flush=True)
         if not has_filter:
             raw_prs = raw_prs[:n_prs]
@@ -691,7 +702,7 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
             "human_comments": classified["human_comments"],
             "approvers": approvers,
             "reviewers": assigned_reviewers,
-            "participant_groups": [_bb_user_ids(p.get("user") or {}) for p in participants if p.get("role") != "AUTHOR"],
+            "participant_groups": [reviewer_scope.person_ids(p.get("user") or {}) for p in participants if p.get("role") != "AUTHOR"],
             "linked_issue": None,
             "review_decision": review_decision,
             "is_bot_authored": is_ai_authored(author),
@@ -722,11 +733,23 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
         prs = _supplement_from_dev_status(config, jira_issues, prs)
 
     # Last on purpose: the Jira dev-status supplement above adds PRs fetched without any reviewer filter.
-    if reviewers_str and has_filter:
+    if scope and has_filter:
         print("[pr-fetch] reviewers filter is applied on top of the Jira scope (JIRA_BOARDS / JIRA_SPACE / --filter)", flush=True)
-    prs = _filter_by_reviewers(prs, reviewers_str)[:n_prs]
+    prs = reviewer_scope.filter_prs(prs, scope)[:n_prs]
     print(f"[pr-fetch] fetched {len(prs)} merged PRs from Bitbucket ({workspace}/{repo})", flush=True)
     return prs
+
+
+def _interleave(groups: list[list[dict]], key: str) -> list[dict]:
+    """Round-robin over ``groups`` (newest first within each), each row once: with a cap, every group is represented."""
+    seen: set = set()
+    out: list[dict] = []
+    for i in range(max((len(g) for g in groups), default=0)):
+        for g in groups:
+            if i < len(g) and g[i].get(key) not in seen:
+                seen.add(g[i].get(key))
+                out.append(g[i])
+    return out
 
 
 def _bb_get_page(url: str, auth: tuple | None) -> dict:
@@ -756,13 +779,18 @@ def _bb_get_page(url: str, auth: tuple | None) -> dict:
 def _bb_list_prs(url: str, auth: tuple | None, cap: int) -> list[dict]:
     """Pages of a Bitbucket pull-request list until ``cap`` rows; an API error ends the list with what was read."""
     rows: list[dict] = []
+    seen: set = set()
     while url and len(rows) < cap:
         try:
             data = _bb_get_page(url, auth)
         except Exception as e:
             print(f"[pr-fetch] Bitbucket API error: {e}", file=sys.stderr, flush=True)
             break
-        rows.extend(data.get("values", []))
+        for rp in data.get("values", []):
+            # A query on an array field (reviewers.*) returns a PR once per matching element: keep it once.
+            if rp.get("id") is None or rp["id"] not in seen:
+                seen.add(rp.get("id"))
+                rows.append(rp)
         url = data.get("next", "")
     return rows
 
@@ -945,139 +973,55 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
     return filtered
 
 
-# --reviewers narrows PRs on the server where the tracker can (GitHub search qualifiers, Bitbucket BBQL on
-# assigned reviewers). Bitbucket cannot filter by commenter, so that part scans at most this many times n_prs rows.
+# --reviewers: the pure parts (resolving names to people, queries, matching) are in reviewer_scope.py; here are the
+# calls that need the tracker. GitHub narrows PRs with search qualifiers, Bitbucket with BBQL on assigned reviewers
+# (it cannot filter on commenters, so a bounded scan of commented PRs covers those).
 _REVIEWER_OVERSCAN = 10
-_REVIEWER_SCAN_CAP = 2000  # commented PRs examined for non-assigned commenters, whatever --n-prs is
-
-_GH_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-_BB_UUID = re.compile(r"^\{[0-9a-fA-F-]{36}\}$")
-_BB_ACCOUNT_ID = re.compile(r"^(?:[0-9a-f]{24}|\d+:[0-9a-fA-F-]{36})$")
+_REVIEWER_SCAN_CAP = 2000   # commented PRs examined for non-assigned commenters, whatever --n-prs is
+_BB_MEMBER_PAGES = 30       # workspace member pages (100 each) read to resolve names
+_BB_DIRECTORY_SCAN = 500    # PR rows read for participants when the members API is not available
 
 
-def _reviewer_list(reviewers_str: str) -> list[str]:
-    """Requested names in their original spelling, trimmed, unique case-insensitively."""
-    seen: dict[str, str] = {}
-    for r in (reviewers_str or "").split(","):
-        name = r.strip()
-        if name and name != "<no value>":
-            seen.setdefault(name.lower(), name)
-    return list(seen.values())
+def _bb_credentials(config: dict) -> tuple[str, str, tuple | None]:
+    workspace = config.get("BITBUCKET_WORKSPACE", "").strip()
+    repo = config.get("BITBUCKET_REPO", "").strip()
+    username = config.get("BITBUCKET_USERNAME", "").strip()
+    token = config.get("BITBUCKET_TOKEN", config.get("BITBUCKET_APP_PASSWORD", "")).strip()
+    return workspace, repo, (username, token) if username and token else None
 
 
-def _reviewer_names(reviewers_str: str) -> set[str]:
-    return {r.lower() for r in _reviewer_list(reviewers_str)}
+def _bb_directory(config: dict) -> list[dict]:
+    """Users to resolve names against: the workspace members (complete), else the participants of recent PRs."""
+    workspace, repo, auth = _bb_credentials(config)
+    fields = "next,values.user.display_name,values.user.nickname,values.user.uuid,values.user.account_id"
+    url, users = f"{api_base()}/workspaces/{workspace}/members?pagelen=100&fields={fields}", []
+    try:
+        for _ in range(_BB_MEMBER_PAGES):
+            data = _bb_get_page(url, auth)
+            users += [v["user"] for v in data.get("values", []) if v.get("user")]
+            url = data.get("next", "")
+            if not url:
+                break
+        return users
+    except Exception as e:
+        print(f"[pr-fetch] workspace members unavailable ({type(e).__name__}); resolving names from recent PR participants", flush=True)
+    rows = _bb_list_prs(f"{api_base()}/repositories/{workspace}/{repo}/pullrequests?state=MERGED&state=DECLINED&sort=-updated_on&pagelen=50"
+                        f"&fields=%2Bvalues.participants", auth, _BB_DIRECTORY_SCAN)
+    return [p["user"] for rp in rows for p in rp.get("participants") or [] if p.get("user")]
 
 
-def _gh_reviewer_searches(reviewers_str: str) -> tuple[list[str], list[str]]:
-    """GitHub search strings (reviewed-by / commenter, author excluded) per login; names that are not valid
-    logins are returned separately instead of being interpolated into a search query."""
-    searches, skipped = [], []
-    for name in _reviewer_list(reviewers_str):
-        if not _GH_LOGIN.match(name):
-            skipped.append(name)
-            continue
-        searches += [f"reviewed-by:{name} -author:{name}", f"commenter:{name} -author:{name}"]
-    return searches, skipped
-
-
-def _bbql_quote(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def _bb_reviewer_query(reviewers_str: str) -> str:
-    """BBQL matching PRs where any named person is an assigned reviewer (uuid, account id or nickname;
-    nickname matching is case-insensitive on the server; display names are not filterable)."""
-    clauses = []
-    for name in _reviewer_list(reviewers_str):
-        field = "uuid" if _BB_UUID.match(name) else "account_id" if _BB_ACCOUNT_ID.match(name) else "nickname"
-        clauses.append(f"reviewers.{field}={_bbql_quote(name)}")
-    return " OR ".join(clauses)
-
-
-def _bb_user_ids(user: dict) -> list[str]:
-    return [v for v in (user.get("display_name"), user.get("nickname"), user.get("uuid"), user.get("account_id")) if v]
-
-
-def _prefilter_bb_raw(raw_prs: list[dict], reviewers_str: str) -> list[dict]:
-    """Cheap client-side pre-filter of Bitbucket rows by ``participants`` (any non-author participant: assigned
-    reviewers and people who commented or approved). Rows without participant data are kept: they cannot be
-    proven irrelevant and the exact post-filter decides."""
-    names = _reviewer_names(reviewers_str)
+def resolve_reviewer_scope(config: dict, tracker: str) -> reviewer_scope.Scope:
+    """Requested ``PR_AUDIT_REVIEWERS`` resolved to people and cached on ``config``. GitHub names are logins and stay
+    literal; Bitbucket names resolve against the workspace (name, nickname, initials, id)."""
+    names = ",".join(reviewer_scope.reviewer_list(config.get("PR_AUDIT_REVIEWERS", "")))
     if not names:
-        return raw_prs
-    kept = []
-    for rp in raw_prs:
-        parts = rp.get("participants")
-        if not parts:
-            kept.append(rp)
-            continue
-        involved = {i.lower() for p in parts if p.get("role") != "AUTHOR" for i in _bb_user_ids(p.get("user") or {})}
-        if involved & names:
-            kept.append(rp)
-    return kept
-
-
-def _filter_by_reviewers(prs: list[dict], reviewers_str: str) -> list[dict]:
-    """Keep PRs where a named reviewer commented, approved or was assigned (login, nickname or display name,
-    case-insensitive). The PR author's own comments are ignored. Sets ``matched_reviewers`` on kept PRs."""
-    names = _reviewer_names(reviewers_str)
-    if not names:
-        return prs
-    kept = []
-    for pr in prs:
-        author = (pr.get("author") or "").lower()
-        involved: set[str] = set()
-        for c in pr.get("human_comments", []):
-            who = {(c.get(k) or "").lower() for k in ("author", "author_alias", "author_id")}
-            if author not in who:
-                involved |= who
-        involved |= {a.lower() for a in pr.get("approvers", []) if a}
-        involved |= {r.lower() for r in pr.get("reviewers", []) if r}
-        involved |= {x.lower() for g in pr.get("participant_groups", []) for x in g if x}
-        hit = sorted(involved & names)
-        if hit:
-            pr["matched_reviewers"] = hit
-            kept.append(pr)
-    print(f"[pr-fetch] reviewers filter: {len(prs)} → {len(kept)} PRs ({', '.join(sorted(names))})", flush=True)
-    return kept
-
-
-def _identity_groups(pr: dict) -> list[list[str]]:
-    """Every identity set (display name, nickname, ids) the PR data shows for one person."""
-    groups = [list(g) for g in pr.get("participant_groups", [])]
-    for c in pr.get("human_comments", []):
-        groups.append([v for v in (c.get("author"), c.get("author_alias"), c.get("author_id")) if v])
-    return groups
-
-
-def reviewer_identities(prs: list[dict], reviewers_str: str) -> dict[str, list[str]]:
-    """Requested name -> all identities of the person it matched (e.g. nickname -> display name), for the names
-    that matched. The model sees display names in the PR data, so this is how its output is tied back to a request."""
-    out: dict[str, list[str]] = {}
-    for name in _reviewer_list(reviewers_str):
-        ids: dict[str, str] = {}
-        for pr in prs:
-            for group in _identity_groups(pr):
-                if name.lower() in {x.lower() for x in group}:
-                    for x in group:
-                        ids.setdefault(x.lower(), x)
-        if ids:
-            out[name] = list(ids.values())
-    return out
-
-
-def _reviewer_candidates(rows: list[dict], limit: int = 15) -> list[str]:
-    """Most active non-author participants of Bitbucket PR rows as "Display Name (nickname)" — what a user can pass."""
-    counts: dict[str, list] = {}
-    for rp in rows:
-        for p in rp.get("participants") or []:
-            u = p.get("user") or {}
-            if p.get("role") == "AUTHOR" or not u.get("display_name"):
-                continue
-            label = f"{u['display_name']} ({u['nickname']})" if u.get("nickname") and u["nickname"] != u["display_name"] else u["display_name"]
-            counts.setdefault(label, [0])[0] += 1
-    return [k for k, _ in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[0]))[:limit]]
+        return {}
+    if "_reviewer_scope" not in config:
+        scope = reviewer_scope.resolve(names, _bb_directory(config)) if tracker == "bitbucket" else reviewer_scope.literal_scope(names)
+        for name, people in scope.items():
+            print(f"[pr-fetch] reviewer {name!r} -> {', '.join(p.get('display_name') or p.get('nickname', '?') for p in people)}", flush=True)
+        config["_reviewer_scope"] = scope
+    return config["_reviewer_scope"]
 
 
 def _resolve_jira_issue_keys(config: dict) -> tuple[set[str], list[dict]] | None:

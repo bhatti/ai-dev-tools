@@ -60,8 +60,17 @@ def test_load_unmatched_missing_or_corrupt(tmp_path):
     assert load_unmatched(tmp_path) == []
 
 
+def test_reviewer_names_are_requested_names_plus_what_they_matched(tmp_path):
+    from scripts.analyze.audit_options import reviewer_names
+    assert reviewer_names(tmp_path) == ()
+    write(tmp_path, AuditOptions(reviewers=("CJ", "pat")), aliases={"CJ": ["Casey Jordan", "cjordan"]})
+    assert set(reviewer_names(tmp_path)) == {"CJ", "pat", "Casey Jordan", "cjordan"}
+    write(tmp_path, AuditOptions(), unmatched=["CJ"])  # fallback: nobody is a priority reviewer
+    assert reviewer_names(tmp_path) == ()
+
+
 def test_aliases_round_trip(tmp_path):
     from scripts.analyze.audit_options import load_aliases
-    write(tmp_path, AuditOptions(reviewers=("cj",)), aliases={"cj": ["Chris Jones", "cj"]})
-    assert load_aliases(tmp_path) == {"cj": ["Chris Jones", "cj"]}
+    write(tmp_path, AuditOptions(reviewers=("cj",)), aliases={"cj": ["Casey Jordan", "cj"]})
+    assert load_aliases(tmp_path) == {"cj": ["Casey Jordan", "cj"]}
     assert load_aliases(tmp_path / "missing") == {}

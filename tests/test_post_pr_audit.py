@@ -342,9 +342,16 @@ class TestRunSummaryLine:
             {"rule": "a", "why": "b", "tribal": True, "reviewers": ["Alice A"]}, {"rule": "c", "why": "d", "reviewers": ["alice"]}]}))
         write(tmp_path, AuditOptions(dry_run=True, reviewers=("alice", "bob")), unmatched=["bob"], aliases={"alice": ["Alice A", "alice"]})
         line = _run_summary_line(tmp_path)
-        assert "no PR activity found for: bob" in line
+        assert "not found: bob" in line
         assert "2 review learnings" in line and "1 tribal" in line
         assert "alice, bob" in line and "dry run" in line.lower()
+
+    def test_fallback_when_no_requested_reviewer_matched(self, tmp_path):
+        from scripts.analyze.audit_options import AuditOptions, write
+        from scripts.analyze.post_pr_audit import _run_summary_line
+        write(tmp_path, AuditOptions(), unmatched=["CJ", "pat"])
+        line = _run_summary_line(tmp_path)
+        assert "reviewers not found (CJ, pat)" in line and "all reviewers" in line
 
     def test_main_posts_the_line(self, tmp_path):
         from scripts.analyze.audit_options import AuditOptions, write

@@ -88,11 +88,11 @@ class TestRestrictToRequestedReviewers:
     """With --reviewers, only what the requested people said may reach the report and the knowledge base."""
 
     ENTRIES = {"entries": [
-        {"rule": "mine", "why": "w", "reviewers": ["Chris Jones"]},
-        {"rule": "shared", "why": "w", "reviewers": ["Chris Jones", "Someone Else"]},
+        {"rule": "mine", "why": "w", "reviewers": ["Casey Jordan"]},
+        {"rule": "shared", "why": "w", "reviewers": ["Casey Jordan", "Someone Else"]},
         {"rule": "theirs", "why": "w", "reviewers": ["Someone Else"]},
         {"rule": "nobody", "why": "w", "reviewers": []},
-    ], "reviewer_profiles": [{"reviewer": "Chris Jones"}, {"reviewer": "Someone Else"}]}
+    ], "reviewer_profiles": [{"reviewer": "Casey Jordan"}, {"reviewer": "Someone Else"}]}
 
     def _setup(self, tmp_path, reviewers, aliases):
         from scripts.analyze.audit_options import AuditOptions, write
@@ -100,11 +100,11 @@ class TestRestrictToRequestedReviewers:
         write(tmp_path, AuditOptions(reviewers=reviewers), aliases=aliases)
 
     def test_keeps_only_requested_people_through_their_display_names(self, tmp_path):
-        self._setup(tmp_path, ("cj",), {"cj": ["Chris Jones", "cj"]})
+        self._setup(tmp_path, ("cj",), {"cj": ["Casey Jordan", "cj"]})
         d = load_learnings(tmp_path)
         assert [e["rule"] for e in d["entries"]] == ["mine", "shared"]
-        assert d["entries"][1]["reviewers"] == ["Chris Jones"]  # others are trimmed from a shared entry
-        assert [p["reviewer"] for p in d["reviewer_profiles"]] == ["Chris Jones"]
+        assert d["entries"][1]["reviewers"] == ["Casey Jordan"]  # others are trimmed from a shared entry
+        assert [p["reviewer"] for p in d["reviewer_profiles"]] == ["Casey Jordan"]
 
     def test_requested_but_never_matched_means_nothing_not_everything(self, tmp_path):
         self._setup(tmp_path, ("cj",), {})

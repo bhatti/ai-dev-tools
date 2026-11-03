@@ -7,12 +7,6 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from scripts.analyze.pr_fetcher import (
-    _bb_reviewer_query,
-    _filter_by_reviewers,
-    _gh_reviewer_searches,
-    _reviewer_candidates,
-    reviewer_identities,
-    _prefilter_bb_raw,
     build_pr_context,
     fetch_bitbucket_prs,
     fetch_github_prs,
@@ -24,57 +18,6 @@ def _pr(num, author="dev", commenters=(), approvers=(), reviewers=(), comments=N
     return {"number": num, "title": f"t{num}", "author": author, "state": "merged", "human_comments": human,
             "approvers": list(approvers), "reviewers": list(reviewers), "all_comments": human,
             "files_changed": 1, "additions": 1, "deletions": 1}
-
-
-class TestFilterByReviewers:
-    def test_matches_commenter_approver_or_assigned_reviewer_case_insensitively(self):
-        prs = [_pr(1, commenters=["Alice"]), _pr(2, approvers=["ALICE"]), _pr(3, reviewers=["alice"]), _pr(4, commenters=["zed"])]
-        assert [p["number"] for p in _filter_by_reviewers(prs, "alice")] == [1, 2, 3]
-
-    def test_pr_authored_by_reviewer_does_not_count_without_review_activity(self):
-        prs = [_pr(1, author="alice", commenters=["alice"]), _pr(2, author="bob", commenters=["alice"])]
-        assert [p["number"] for p in _filter_by_reviewers(prs, "alice")] == [2]
-
-    def test_matches_bitbucket_alias_nickname(self):
-        c = [{"author": "Alice Smith", "author_alias": "asmith", "body": "x" * 50, "type": "comment"}]
-        assert len(_filter_by_reviewers([_pr(1, comments=c)], "ASmith")) == 1
-
-    def test_records_matched_reviewers_and_empty_list_means_no_filter(self):
-        prs = [_pr(1, commenters=["Alice", "zed"])]
-        out = _filter_by_reviewers(prs, "alice,bob")
-        assert out[0]["matched_reviewers"] == ["alice"]
-        assert _filter_by_reviewers(prs, "") == prs
-
-
-
-class TestPrefilterBbRaw:
-    def test_uses_participants_display_name_nickname_uuid_account_id_and_keeps_unknown(self):
-        raw = [
-            {"id": 1, "participants": [{"user": {"display_name": "Alice Smith", "nickname": "asmith"}, "role": "REVIEWER"}]},
-            {"id": 2, "participants": [{"user": {"display_name": "Zed", "nickname": "zed"}, "role": "REVIEWER"}]},
-            {"id": 3},  # no participant data: cannot prove irrelevant, keep
-            {"id": 4, "participants": [{"user": {"nickname": "asmith"}, "role": "AUTHOR"}]},
-            {"id": 5, "participants": [{"user": {"nickname": "x", "account_id": "712020:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}, "role": "PARTICIPANT"}]},
-        ]
-        assert [r["id"] for r in _prefilter_bb_raw(raw, "asmith")] == [1, 3]
-        assert [r["id"] for r in _prefilter_bb_raw(raw, "Alice Smith")] == [1, 3]
-        assert [r["id"] for r in _prefilter_bb_raw(raw, "712020:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")] == [3, 5]
-
-
-class TestQueryBuilders:
-    def test_github_searches_exclude_author_and_skip_non_logins(self):
-        searches, skipped = _gh_reviewer_searches("alice, Bob Smith ,alice,x y:z")
-        assert searches == ["reviewed-by:alice -author:alice", "commenter:alice -author:alice"]
-        assert skipped == ["Bob Smith", "x y:z"]
-
-    def test_bitbucket_query_picks_field_by_identifier_shape_and_escapes(self):
-        q = _bb_reviewer_query('asmith,{b8ceb65c-4e2e-43d3-8a54-fe5f9cd2b3b2},5c355119b393bf4ce9561ec3,712020:55b7c8c6-7cd1-40a5-affb-5ecda0b7c406,ev"il\\x')
-        parts = q.split(" OR ")
-        assert parts[0] == 'reviewers.nickname="asmith"'
-        assert parts[1] == 'reviewers.uuid="{b8ceb65c-4e2e-43d3-8a54-fe5f9cd2b3b2}"'
-        assert parts[2] == 'reviewers.account_id="5c355119b393bf4ce9561ec3"'
-        assert parts[3].startswith('reviewers.account_id="712020:')
-        assert parts[4] == 'reviewers.nickname="ev\\"il\\\\x"'  # quote and backslash escaped
 
 
 # -- fetch_github_prs: server-side search per reviewer ---------------------------
@@ -167,14 +110,20 @@ def _bb_row(pr_id, author="dev", participants=()):
 class FakeBb:
     """Stands in for requests.get against the Bitbucket API; answers list requests by their decoded q parameter."""
 
-    def __init__(self, by_q):
-        self.by_q, self.urls = by_q, []
+    def __init__(self, by_q, members=None, members_status=200):
+        self.by_q, self.urls, self.members, self.members_status = by_q, [], members or [], members_status
 
     def __call__(self, url, auth=None, timeout=None):
+        import requests
         self.urls.append(url)
         parsed = urlparse(url)
         resp = MagicMock(status_code=200)
-        if parsed.path.endswith("/pullrequests"):
+        if parsed.path.endswith("/members"):
+            resp.status_code = self.members_status
+            if self.members_status >= 400:
+                resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+            resp.json.return_value = {"values": [{"user": u} for u in self.members], "next": ""}
+        elif parsed.path.endswith("/pullrequests"):
             q = parse_qs(parsed.query).get("q", [""])[0]
             resp.json.return_value = {"values": self.by_q.get(q, []), "next": ""}
         else:  # comments / diffstat
@@ -183,6 +132,9 @@ class FakeBb:
 
     def list_queries(self):
         return [parse_qs(urlparse(u).query).get("q", [""])[0] for u in self.urls if urlparse(u).path.endswith("/pullrequests")]
+
+    def member_calls(self):
+        return [u for u in self.urls if urlparse(u).path.endswith("/members")]
 
     def detail_pr_ids(self):
         return sorted({int(u.split("/pullrequests/")[1].split("/")[0]) for u in self.urls if "/pullrequests/" in u})
@@ -203,6 +155,15 @@ class TestBbDiffstat:
         with patch("requests.get", return_value=resp):
             files = _fetch_bb_diffstat("https://bb", 1, None)
         assert files == [{"path": "a.png", "lines_added": 0, "lines_removed": 0}]
+
+
+class TestBbListDedup:
+    def test_a_pr_returned_once_per_matching_reviewer_is_kept_once(self):
+        from scripts.analyze.pr_fetcher import _bb_list_prs
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"values": [{"id": 5}, {"id": 5}, {"id": 5}, {"id": 6}], "next": ""}
+        with patch("requests.get", return_value=resp):
+            assert [r["id"] for r in _bb_list_prs("https://bb/x", None, 10)] == [5, 6]
 
 
 class TestBbRetry:
@@ -335,35 +296,76 @@ class TestReviewerFilterIsFinal:
             assert fetch_github_prs(cfg, n_prs=5) == []
 
 
-class TestReviewerIdentities:
-    def test_maps_requested_name_to_every_identity_of_that_person(self):
-        pr = _pr(1, comments=[{"author": "Alice Smith", "author_alias": "asmith", "author_id": "acc-1", "body": "x" * 40}])
-        pr["participant_groups"] = [["Zed", "zed", "u-9"], ["Alice Smith", "asmith", "{u-1}", "acc-1"]]
-        found = reviewer_identities([pr], "ASMITH,nobody")
-        assert set(found["ASMITH"]) == {"Alice Smith", "asmith", "acc-1", "{u-1}"}
-        assert "nobody" not in found
-
-    def test_filter_matches_through_participant_groups_and_comment_ids(self):
-        pr = _pr(1, commenters=[])
-        pr["participant_groups"] = [["Alice Smith", "asmith", "{u-1}", "acc-1"]]
-        assert len(_filter_by_reviewers([pr], "acc-1")) == 1
 
 
-class TestReviewerCandidates:
-    def test_top_people_by_participation_excluding_authors(self):
-        rows = [
-            {"participants": [{"user": {"display_name": "Alice Smith", "nickname": "asmith"}, "role": "REVIEWER"},
-                              {"user": {"display_name": "Dev", "nickname": "dev"}, "role": "AUTHOR"}]},
-            {"participants": [{"user": {"display_name": "Alice Smith", "nickname": "asmith"}, "role": "PARTICIPANT"},
-                              {"user": {"display_name": "Bob Jones", "nickname": "bjones"}, "role": "PARTICIPANT"}]},
-            {"participants": [{"user": {}, "role": "PARTICIPANT"}]},
-        ]
-        assert _reviewer_candidates(rows) == ["Alice Smith (asmith)", "Bob Jones (bjones)"]
+# -- names resolved through the workspace directory (the CJ / pat / JB case) --------------------------------
 
-    def test_bitbucket_scan_exposes_candidates_when_nothing_matches(self, bb_config):
-        other = ("Bob Jones", "bjones", "{u-2}", "acc-2", "PARTICIPANT", False)
-        fake = FakeBb({"comment_count>0": [_bb_row(5, participants=[other])]})
+CHRIS = {"display_name": "Casey Jordan", "nickname": "Casey Jordan", "uuid": "{00000000-0000-4000-8000-0000000000b2}",
+         "account_id": "712020:00000000-0000-4000-8000-000000000001"}
+CHRIS_P = ("Casey Jordan", "Casey Jordan", CHRIS["uuid"], CHRIS["account_id"])
+
+
+class TestBitbucketDirectoryResolution:
+    def test_initials_resolve_to_the_person_and_query_uses_the_account_id(self, bb_config):
+        fake = FakeBb({f'reviewers.account_id="{CHRIS["account_id"]}"': [_bb_row(1, participants=[CHRIS_P + ("REVIEWER", True)])]},
+                      members=[CHRIS, {"display_name": "Zed", "nickname": "zed"}])
         cfg = {**bb_config, "PR_AUDIT_REVIEWERS": "CJ"}
         with patch("requests.get", side_effect=fake):
-            assert fetch_bitbucket_prs(cfg, n_prs=5) == []
-        assert cfg["_reviewer_candidates"] == ["Bob Jones (bjones)"]
+            prs = fetch_bitbucket_prs(cfg, n_prs=1)
+        assert fake.list_queries() == [f'reviewers.account_id="{CHRIS["account_id"]}"']
+        assert [(p["number"], p["matched_reviewers"]) for p in prs] == [(1, ["CJ"])]
+        assert [p["display_name"] for p in cfg["_reviewer_scope"]["CJ"]] == ["Casey Jordan"]
+        assert len(fake.member_calls()) == 1  # the directory is read once per run
+
+    def test_first_name_covers_every_person_with_it_and_commenters_found_by_scan(self, bb_config):
+        pat_d = ("Pat Duncan", "Pat Duncan", "{u-d}", "acc-d", "PARTICIPANT", False)
+        fake = FakeBb({"comment_count>0": [_bb_row(7, participants=[pat_d])]},
+                      members=[{"display_name": "Pat Duncan", "nickname": "Pat Duncan", "uuid": "{u-d}", "account_id": "acc-d"},
+                               {"display_name": "Pat Holloway", "nickname": "pholloway"}])
+        cfg = {**bb_config, "PR_AUDIT_REVIEWERS": "pat"}
+        with patch("requests.get", side_effect=fake):
+            prs = fetch_bitbucket_prs(cfg, n_prs=5)
+        assert [(p["number"], p["matched_reviewers"]) for p in prs] == [(7, ["pat"])]
+
+    def test_members_api_refused_falls_back_to_participants_of_recent_prs(self, bb_config):
+        fake = FakeBb({"": [_bb_row(3, participants=[CHRIS_P + ("REVIEWER", True)])],
+                       f'reviewers.account_id="{CHRIS["account_id"]}"': [_bb_row(3, participants=[CHRIS_P + ("REVIEWER", True)])]},
+                      members_status=403)
+        cfg = {**bb_config, "PR_AUDIT_REVIEWERS": "CJ"}
+        with patch("requests.get", side_effect=fake):
+            prs = fetch_bitbucket_prs(cfg, n_prs=1)
+        assert [p["number"] for p in prs] == [3]
+        assert fake.list_queries()[0] == ""  # directory scan first, then the id query
+
+    def test_unresolvable_name_returns_no_prs_and_no_error(self, bb_config):
+        fake = FakeBb({}, members=[CHRIS])
+        with patch("requests.get", side_effect=fake):
+            assert fetch_bitbucket_prs({**bb_config, "PR_AUDIT_REVIEWERS": "nobody"}, n_prs=3) == []
+
+
+class TestEveryRequestedNameIsRepresented:
+    """A small --n-prs must not let the most active reviewer crowd the others out (they would be reported "not found")."""
+
+    def test_bitbucket_interleaves_one_query_per_name(self, bb_config):
+        fake = FakeBb({'reviewers.nickname="a"': [_bb_row(10, participants=[("A", "a", "{u-a}", "acc-a", "REVIEWER", True)]),
+                                                  _bb_row(9, participants=[("A", "a", "{u-a}", "acc-a", "REVIEWER", True)]),
+                                                  _bb_row(8, participants=[("A", "a", "{u-a}", "acc-a", "REVIEWER", True)])],
+                       'reviewers.nickname="b"': [_bb_row(2, participants=[("B", "b", "{u-b}", "acc-b", "REVIEWER", True)])]})
+        with patch("requests.get", side_effect=fake):
+            prs = fetch_bitbucket_prs({**bb_config, "PR_AUDIT_REVIEWERS": "a,b"}, n_prs=2)
+        assert fake.list_queries() == ['reviewers.nickname="a"', 'reviewers.nickname="b"']
+        assert [p["number"] for p in prs] == [10, 2]  # b's only PR is kept although a has newer ones
+
+    def test_github_interleaves_per_login(self, gh_env):
+        fake = FakeGh({("merged", "reviewed-by:a -author:a"): [_gh_row(30, reviewer="a"), _gh_row(29, reviewer="a"), _gh_row(28, reviewer="a")],
+                       ("merged", "reviewed-by:b -author:b"): [_gh_row(3, reviewer="b")]})
+        with patch("scripts.analyze.pr_fetcher.subprocess.run", side_effect=fake), \
+             patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[]):
+            prs = fetch_github_prs({**gh_env, "PR_AUDIT_REVIEWERS": "a,b"}, n_prs=2)
+        assert [p["number"] for p in prs] == [30, 3]
+
+    def test_interleave_helper_dedupes_and_keeps_order(self):
+        from scripts.analyze.pr_fetcher import _interleave
+        out = _interleave([[{"id": 1}, {"id": 2}, {"id": 3}], [{"id": 1}, {"id": 9}]], "id")
+        assert [r["id"] for r in out] == [1, 2, 9, 3]
+        assert _interleave([], "id") == [] and _interleave([[]], "id") == []

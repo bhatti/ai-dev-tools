@@ -797,7 +797,7 @@ Key variables:
 | `https://github.com/org/repo/pull/123` | Audit specific PR(s) instead of last N |
 | `--model opus` / `model: <alias\|id>` | Override AI model for this run (aliases from `models.json`) |
 | `--n-prs 40` / `last 40 prs` | Max PRs to analyze (default `N_PRS` = 50) |
-| `--reviewers alice,bob` | Learn what these reviewers look for: only PRs they reviewed (GitHub: logins, filtered server-side with `reviewed-by:`/`commenter:` search; Bitbucket: nickname/account id/uuid via BBQL `reviewers.*`, then a bounded scan of commented PRs for commenters and display names; case-insensitive; 429/5xx retried), their comments in full, one profile each in `review_learnings.md` and the generated `review-knowledge` skill |
+| `--reviewers alice,bob` | Learn what these reviewers look for: only PRs they reviewed, their comments in full, one profile each in `review_learnings.md` and the generated `review-knowledge` skill. Names resolve to people first (Bitbucket: workspace members by name/id, else first or last name, nickname, initials such as `CJ`, accents ignored; GitHub: logins), then PRs are filtered on the tracker (GitHub search qualifiers; Bitbucket BBQL on reviewers plus a bounded scan for commenters). A name nobody matches is reported as not found; if none match, learnings from all reviewers are shown instead of failing |
 | `--dry-run` | Run everything, create no PR: `reports/dry_run/{files/,pr_body.md,diff.patch,files.txt}` plus all reports |
 | `--focus learnings` | Only the review-learnings pass |
 

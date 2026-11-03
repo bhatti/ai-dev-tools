@@ -881,63 +881,77 @@ class TestReviewersEdgeCases:
         assert r["reviewers"] == "Alice Smith,Bob"
 
 
-class TestReviewerScope:
+class TestScopeReviewers:
     def _pr(self):
-        return {"number": 1, "author": "dev", "human_comments": [{"author": "Chris Jones", "author_alias": "cjones", "body": "x" * 40}],
-                "participant_groups": [["Chris Jones", "cjones", "{u-1}"]]}
+        return {"number": 1, "author": "dev", "human_comments": [{"author": "Casey Jordan", "author_alias": "cjordan", "body": "x" * 40}],
+                "participant_groups": [["Casey Jordan", "cjordan", "{u-1}"]], "approvers": [], "reviewers": []}
 
-    def test_matches_are_recorded_for_later_tasks_and_unmatched_reported(self, tmp_path, capsys):
-        from scripts.analyze.audit_options import AuditOptions, load_aliases, load_unmatched
-        from scripts.analyze.run_pr_audit import _apply_reviewer_scope
-        opts = AuditOptions(reviewers=("cjones", "nobody"))
-        unmatched, aliases = _apply_reviewer_scope([self._pr()], opts, tmp_path)
-        assert unmatched == ["nobody"] and set(aliases["cjones"]) == {"Chris Jones", "cjones", "{u-1}"}
-        assert load_unmatched(tmp_path) == ["nobody"] and "cjones" in load_aliases(tmp_path)
+    def _scope(self, prs, reviewers, tmp_path, config=None):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _scope_reviewers
+        cfg = {"DEFAULT_TRACKER": "github", **(config or {})}
+        return _scope_reviewers(prs, AuditOptions(reviewers=reviewers), cfg, tmp_path)
+
+    def test_matches_are_recorded_for_later_tasks_and_missing_names_reported(self, tmp_path, capsys):
+        from scripts.analyze.audit_options import load, load_aliases, load_unmatched
+        from scripts.analyze import reviewer_scope
+        directory = [{"display_name": "Casey Jordan", "nickname": "cjordan", "uuid": "{u-1}"}]
+        cfg = {"DEFAULT_TRACKER": "jira", "_reviewer_scope": reviewer_scope.resolve("cjordan,nobody", directory)}
+        opts, not_found, aliases = self._scope([self._pr()], ("cjordan", "nobody"), tmp_path, cfg)
+        assert opts.reviewers == ("cjordan", "nobody") and not_found == ["nobody"]
+        assert set(aliases["cjordan"]) == {"Casey Jordan", "cjordan"}
+        assert load_unmatched(tmp_path) == ["nobody"] and "cjordan" in load_aliases(tmp_path)
+        assert load(tmp_path, {}).reviewers == ("cjordan", "nobody")
         out = capsys.readouterr().out
-        assert "PR_AUDIT_REVIEWERS_MATCHED::cjones" in out and "PR_AUDIT_REVIEWERS_UNMATCHED::nobody" in out
+        assert "PR_AUDIT_REVIEWERS_MATCHED::cjordan" in out and "PR_AUDIT_REVIEWERS_UNMATCHED::nobody" in out
         assert "PR_AUDIT_REVIEWER_PRS::1" in out
 
+    def test_nobody_matches_means_no_restriction_not_failure(self, tmp_path, capsys):
+        from scripts.analyze.audit_options import load, load_unmatched
+        opts, not_found, aliases = self._scope([self._pr()], ("CJ", "pat"), tmp_path)
+        assert opts.reviewers == () and not_found == ["CJ", "pat"] and aliases == {}
+        assert load(tmp_path, {"PR_AUDIT_REVIEWERS": "CJ"}).reviewers == ()  # the file wins over a job variable
+        assert load_unmatched(tmp_path) == ["CJ", "pat"]
+        assert "showing learnings from all reviewers" in capsys.readouterr().out
+
     def test_without_reviewers_nothing_is_scoped(self, tmp_path):
-        from scripts.analyze.audit_options import AuditOptions
-        from scripts.analyze.run_pr_audit import _apply_reviewer_scope
-        assert _apply_reviewer_scope([self._pr()], AuditOptions(), tmp_path) == ([], {})
+        opts, not_found, aliases = self._scope([self._pr()], (), tmp_path)
+        assert (opts.reviewers, not_found, aliases) == ((), [], {})
 
 
-class TestNoReviewerMatch:
-    def test_fails_loudly_with_candidates_and_tells_slack(self, tmp_path, capsys):
+class TestFetchPrsForAudit:
+    def test_empty_reviewer_result_falls_back_to_the_plain_latest_prs(self):
         from scripts.analyze.audit_options import AuditOptions
-        from scripts.analyze.run_pr_audit import _exit_no_reviewer_match
-        config = {"SLACK_THREAD_TS": "1.2", "_reviewer_candidates": ["Chris Jones (cjones)", "Bob Lee (blee)"]}
-        with patch("scripts.analyze.run_pr_audit.post_message") as post, pytest.raises(SystemExit) as exc:
-            _exit_no_reviewer_match(AuditOptions(reviewers=("CJ", "paul")), config, tmp_path.parent, "org/repo", "dev")
-        assert exc.value.code == 1
-        text = post.call_args[0][1]
-        assert "CJ, paul" in text and "Chris Jones (cjones)" in text and "nickname" in text
-        assert "Chris Jones (cjones)" in capsys.readouterr().out
-        assert (tmp_path.parent / "reports" / "pr_audit_report.md").exists()  # artifacts exist for debugging
+        from scripts.analyze.run_pr_audit import _fetch_prs_for_audit
+        seen = []
 
-    def test_mentions_the_jira_scope_when_one_is_active(self, tmp_path):
-        from scripts.analyze.audit_options import AuditOptions
-        from scripts.analyze.run_pr_audit import _exit_no_reviewer_match
-        with patch("scripts.analyze.run_pr_audit.post_message") as post, pytest.raises(SystemExit):
-            _exit_no_reviewer_match(AuditOptions(reviewers=("x",)), {"JIRA_SPACE": "TeamA"}, tmp_path, "o/r", "main")
-        assert "Jira scope" in post.call_args[0][1]
-        with patch("scripts.analyze.run_pr_audit.post_message") as post, pytest.raises(SystemExit):
-            _exit_no_reviewer_match(AuditOptions(reviewers=("x",)), {}, tmp_path, "o/r", "main")
-        assert "Jira scope" not in post.call_args[0][1]
+        def fake_fetch(config, n, states=None):
+            seen.append(config.get("PR_AUDIT_REVIEWERS"))
+            return [] if config.get("PR_AUDIT_REVIEWERS") else [{"number": 9}]
 
-    def test_slack_failure_does_not_mask_the_exit(self, tmp_path):
+        cfg = {"PR_AUDIT_REVIEWERS": "CJ", "_reviewer_scope": {"CJ": []}}
+        with patch("scripts.analyze.run_pr_audit.fetch_prs", side_effect=fake_fetch):
+            prs = _fetch_prs_for_audit(cfg, 5, ["merged"], AuditOptions(reviewers=("CJ",)))
+        assert prs == [{"number": 9}] and seen == ["CJ", ""] and "_reviewer_scope" not in cfg
+
+    def test_no_reviewers_fetches_once(self):
         from scripts.analyze.audit_options import AuditOptions
-        from scripts.analyze.run_pr_audit import _exit_no_reviewer_match
-        with patch("scripts.analyze.run_pr_audit.post_message", side_effect=RuntimeError("down")), pytest.raises(SystemExit) as exc:
-            _exit_no_reviewer_match(AuditOptions(reviewers=("x",)), {}, tmp_path, "o/r", "main")
-        assert exc.value.code == 1
+        from scripts.analyze.run_pr_audit import _fetch_prs_for_audit
+        with patch("scripts.analyze.run_pr_audit.fetch_prs", return_value=[]) as f:
+            assert _fetch_prs_for_audit({}, 5, ["merged"], AuditOptions()) == []
+        assert f.call_count == 1
 
 
 class TestLearningsPromptRestriction:
     def test_names_identities_and_forbids_other_reviewers(self):
         from scripts.analyze.audit_options import AuditOptions
         from scripts.analyze.run_pr_audit import _learnings_instructions
-        block = _learnings_instructions(AuditOptions(reviewers=("cjones",)), [], {"cjones": ["Chris Jones", "cjones"]})
-        assert "cjones = Chris Jones" in block
+        block = _learnings_instructions(AuditOptions(reviewers=("cjordan",)), [], {"cjordan": ["Casey Jordan", "cjordan"]})
+        assert "cjordan = Casey Jordan" in block
         assert "ONLY" in block and "other people" in block.lower()
+
+    def test_fallback_asks_for_everyones_learnings_and_no_profiles(self):
+        from scripts.analyze.audit_options import AuditOptions
+        from scripts.analyze.run_pr_audit import _learnings_instructions
+        block = _learnings_instructions(AuditOptions(), ["CJ", "pat"], {})
+        assert "CJ, pat" in block and "all reviewers" in block and "ONLY" not in block

@@ -72,6 +72,16 @@ def has_options(reports_dir: Path) -> bool:
     return bool(_read(reports_dir))
 
 
+def reviewer_names(reports_dir: Path) -> tuple[str, ...]:
+    """Every name that stands for a requested reviewer: the requested names and the identities they matched
+    (what the model writes in ``reviewers``). Empty when no reviewers were requested."""
+    names = {n.lower(): n for n in parse_reviewers(",".join(_read(reports_dir).get("reviewers") or []))}
+    for requested, ids in load_aliases(reports_dir).items():
+        for n in (requested, *ids):
+            names.setdefault(n.lower(), n)
+    return tuple(names.values())
+
+
 def load_unmatched(reports_dir: Path) -> list[str]:
     return list(_read(reports_dir).get("unmatched_reviewers") or [])
 
@@ -90,5 +100,6 @@ def load(reports_dir: Path, config: dict) -> AuditOptions:
         return env
     return AuditOptions(
         dry_run=bool(data.get("dry_run")) or env.dry_run,
-        reviewers=parse_reviewers(",".join(data.get("reviewers") or [])) or env.reviewers,
+        # The file is authoritative for reviewers: audit-prs may have dropped them (none matched anyone).
+        reviewers=parse_reviewers(",".join(data.get("reviewers") or [])),
     )

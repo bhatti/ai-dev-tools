@@ -362,7 +362,7 @@ class TestKbDocs:
     def test_builds_docs_for_selected_entries_only(self, tmp_path):
         from scripts.analyze.audit_options import AuditOptions
         from scripts.analyze.create_skill_pr import _kb_docs
-        docs = _kb_docs(self._learnings(), AuditOptions(reviewers=("Alice",)), tmp_path)
+        docs = _kb_docs(self._learnings(), ("Alice",), tmp_path)
         paths = {d["path"] for d in docs}
         assert ".claude/skills/review-knowledge/checklists/security.md" in paths
         assert ".claude/skills/review-knowledge/checklists/style.md" not in paths  # 1 PR, not a requested reviewer
@@ -375,14 +375,33 @@ class TestKbDocs:
         sec = tmp_path / ".claude/skills/review-knowledge/checklists/security.md"
         sec.parent.mkdir(parents=True)
         sec.write_text("# Security review checklist\n\n- [ ] Existing rule — Why: x\n")
-        docs = _kb_docs(self._learnings(), AuditOptions(), tmp_path)
+        docs = _kb_docs(self._learnings(), (), tmp_path)
         content = next(d["content"] for d in docs if d["path"].endswith("checklists/security.md"))
         assert "Existing rule" in content and "Check tenant on every query" in content
 
     def test_nothing_when_no_entries(self, tmp_path):
         from scripts.analyze.audit_options import AuditOptions
         from scripts.analyze.create_skill_pr import _kb_docs
-        assert _kb_docs({"entries": [], "reviewer_profiles": []}, AuditOptions(), tmp_path) == []
+        assert _kb_docs({"entries": [], "reviewer_profiles": []}, (), tmp_path) == []
+
+
+class TestNothingToPropose:
+    def test_the_report_is_still_written_and_says_so(self, tmp_path, monkeypatch):
+        import json as _json
+        from scripts.analyze import create_skill_pr as m
+        from scripts.analyze.audit_options import AuditOptions, write
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        (reports / "skill_improvements.json").write_text(_json.dumps({"repo_skill_changes": [], "new_docs": [], "ygs_recommendations": []}))
+        write(reports, AuditOptions(dry_run=True))
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("DEFAULT_TRACKER", "github")
+        monkeypatch.setenv("GH_ORG", "o")
+        monkeypatch.setenv("GH_REPO", "r")
+        m.main()
+        assert "No files were created or updated" in (reports / "skill_updates_report.md").read_text()
+        assert (reports / "skill_updates_report.html").exists()
+        assert _json.loads((tmp_path / "pr.json").read_text())["number"] == 0
 
 
 class TestApplyActions:

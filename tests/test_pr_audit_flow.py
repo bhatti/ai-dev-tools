@@ -107,14 +107,13 @@ def run_audit(workspace, monkeypatch, message, gh=None, learnings=None, bb=None)
          patch("scripts.analyze.run_pr_audit._load_skill_md", return_value="SKILL"), \
          patch("scripts.analyze.run_pr_audit.link_pr_to_issue", return_value=None), \
          patch("scripts.analyze.run_pr_audit.run_claude", side_effect=_fake_claude(reports, prompts, learnings)), \
-         patch("requests.get", side_effect=bb or (lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected HTTP call")))), \
-         patch("scripts.analyze.run_pr_audit.post_message") as slack:
+         patch("requests.get", side_effect=bb or (lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected HTTP call")))):
         try:
             run_pr_audit.main.main(args=[], standalone_mode=False)
             code = 0
         except SystemExit as e:
             code = e.code or 0
-    return SimpleNamespace(code=code, gh=gh, prompts=prompts, slack=slack, reports=reports)
+    return SimpleNamespace(code=code, gh=gh, prompts=prompts, reports=reports)
 
 
 def run_create(workspace, monkeypatch, push=False):
@@ -190,12 +189,19 @@ class TestWithReviewers:
         assert (pr.repo / ".claude/skills/review-knowledge/reviewers/alice.md").exists()
         assert not (pr.repo / ".claude/skills/review-knowledge/checklists/testing.md").exists()
 
-    def test_no_match_stops_before_the_model_and_tells_slack(self, workspace, monkeypatch):
+    def test_no_match_audits_everyone_and_says_so(self, workspace, monkeypatch):
         audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --reviewers nobody --dry-run")
-        assert audit.code == 1
-        assert audit.prompts == []  # the model is never asked to audit unrelated PRs
-        assert "nobody" in audit.slack.call_args[0][1]
-        assert (audit.reports / "pr_audit_report.md").exists()
+        assert audit.code == 0
+        assert audit.gh.cmds[-1].count("--search") == 0  # the second, unfiltered listing produced the PRs
+        assert "Reviewer focus" not in audit.prompts[0] and "could not be matched" in audit.prompts[0]
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "None of the requested reviewers (nobody)" in md and "all reviewers are shown" in md
+        assert "Check tenant on every query" in md and "No sleeps in tests" in md  # everyone's learnings
+        ctx = json.loads((audit.reports / "run_options.json").read_text())
+        assert ctx["reviewers"] == [] and ctx["unmatched_reviewers"] == ["nobody"]
+        run_create(workspace, monkeypatch)
+        files = kb_files(workspace)
+        assert ".claude/skills/review-knowledge/checklists/testing.md" in files and not any("/reviewers/" in f for f in files)
 
     def test_partial_match_runs_and_reports_the_missing_name(self, workspace, monkeypatch):
         audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --reviewers alice,typo")
@@ -208,7 +214,7 @@ class TestWithReviewers:
 
 BB_LEARNINGS = {
     "entries": [
-        {"category": "security", "rule": "Check tenant on every query", "why": "leak", "look_for": "queries", "pr_count": 2,
+        {"category": "security", "rule": "Check tenant on every query", "why": "leak", "look_for": "queries", "pr_count": 1,
          "prs": ["#1"], "reviewers": ["Alice Smith"]},
         {"category": "testing", "rule": "No sleeps in tests", "why": "flaky", "look_for": "sleep", "pr_count": 2,
          "prs": ["#2"], "reviewers": ["Bob Lee"]},
@@ -246,12 +252,14 @@ class FakeBitbucket:
         from urllib.parse import parse_qs, urlparse
         parsed = urlparse(url)
         resp = MagicMock(status_code=200)
-        if parsed.path.endswith("/pullrequests"):
+        if parsed.path.endswith("/members"):
+            resp.json.return_value = {"values": [{"user": _bb_user(k)} for k in PEOPLE], "next": ""}
+        elif parsed.path.endswith("/pullrequests"):
             q = parse_qs(parsed.query).get("q", [""])[0]
             self.list_queries.append(q)
             rows = list(self.PRS.values())
-            for key, (_, nick, _, _) in PEOPLE.items():
-                if q == f'reviewers.nickname="{nick}"':
+            for key, (_, nick, _, acct) in PEOPLE.items():
+                if q in (f'reviewers.nickname="{nick}"', f'reviewers.account_id="{acct}"'):
                     rows = [r for r in rows if self.OWNER[r["id"]] == key]
                     break
             else:
@@ -308,6 +316,8 @@ class TestBitbucketWithReviewers:
         assert "Check tenant on every query" in md and "No sleeps in tests" not in md and "Bob Lee" not in md
         run_create(bb_workspace, monkeypatch)
         files = kb_files(bb_workspace)
+        # one PR only, written under her display name: kept because she is a requested reviewer
+        assert ".claude/skills/review-knowledge/checklists/security.md" in files
         assert ".claude/skills/review-knowledge/reviewers/alice-smith.md" in files
         assert ".claude/skills/review-knowledge/checklists/testing.md" not in files
         assert not any("bob" in f for f in files)
@@ -318,8 +328,19 @@ class TestBitbucketWithReviewers:
         assert audit.code == 0 and 1 not in bb.detail_ids and 2 in bb.detail_ids
         assert "No sleeps in tests" in (audit.reports / "review_learnings.md").read_text()
 
-    def test_unknown_name_stops_and_suggests_real_ones(self, bb_workspace, monkeypatch):
-        audit = run_bb_audit(bb_workspace, monkeypatch, "--reviewers CJ --dry-run", FakeBitbucket())
-        assert audit.code == 1 and audit.prompts == []
-        text = audit.slack.call_args[0][1]
-        assert "CJ" in text and "Alice Smith (asmith)" in text and "Bob Lee (blee)" in text
+    def test_initials_first_name_and_accents_resolve_through_the_workspace_directory(self, bb_workspace, monkeypatch):
+        bb = FakeBitbucket()
+        audit = run_bb_audit(bb_workspace, monkeypatch, "--n-prs 5 --reviewers AS,blee --dry-run", bb)
+        assert audit.code == 0
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "AS → Alice Smith" in md or "AS → Alice Smith, asmith" in md
+        assert "Check tenant on every query" in md and "No sleeps in tests" in md  # both people were found
+
+    def test_unknown_name_audits_everyone_and_says_so(self, bb_workspace, monkeypatch):
+        bb = FakeBitbucket()
+        audit = run_bb_audit(bb_workspace, monkeypatch, "--reviewers CJ --dry-run", bb)
+        assert audit.code == 0 and audit.prompts
+        md = (audit.reports / "review_learnings.md").read_text()
+        assert "None of the requested reviewers (CJ)" in md
+        assert "Check tenant on every query" in md and "No sleeps in tests" in md
+        assert bb.detail_ids == {1, 2, 3}  # fell back to the plain latest PRs
