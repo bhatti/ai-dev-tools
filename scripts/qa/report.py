@@ -15,9 +15,12 @@ Rules enforced here rather than left to the model:
 Usage:
     python3 -m scripts.qa.report --plan plan.json --candidate qa-out/candidate/results.jsonl \
         [--mode regression --delta delta.json] [--pr pr-context.json] [--findings findings.json] \
-        [--env-failure qa-out/baseline/env-failure.json]... --target-url URL --out-dir reports
+        [--env-failure qa-out/baseline/env-failure.json]... --target-url URL --out-dir reports \
+        [--fail-on blocked|not-ready|concerns] [--embed-evidence] [--failure-patterns patterns.json]
 Evidence files referenced by the results (screenshots, response bodies) are copied, redacted, into
-<out-dir>/evidence/. Only files under --evidence-root (default: the directory holding the side folders) are copied.
+<out-dir>/evidence/ (replaced on every run). Only files under --evidence-root (default: the directory holding the side folders) are copied.
+Repeated identical failures and exchanges are shown once with a count ("Duplicate findings"); this never changes counts or the verdict.
+Exit code: 0 unless --fail-on is given and the readiness reaches it (blocked > not-ready > concerns); 2 on unreadable input.
 """
 
 from __future__ import annotations
@@ -25,10 +28,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.common.report_bundle import collect_evidence, md_cell as _cell, write_bundle
-from scripts.qa import model
+from scripts.qa import dedup, evidence, model, verdict
 
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 _READINESS_SIGNAL = {"Ready": "DONE", "Ready with concerns": "DONE_WITH_CONCERNS", "Not ready": "DONE_WITH_CONCERNS", "Blocked": "BLOCKED"}
@@ -74,7 +78,7 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     not_met = [a for a, s in statuses.items() if s == "not met"]
     if not_met:
         problems.append(f"criteria not met: {', '.join(not_met)}")
-    if delta and delta["status"] in ("REGRESSION", "NEW_FAILURES"):
+    if delta and delta["status"] in ("REGRESSION", "NEW_FAILURES", "UNVERIFIED"):
         problems.append(delta["reason"])
     if delta and delta.get("perf_regressions"):
         problems.append(f"{len(delta['perf_regressions'])} endpoint(s) slower by more than 20%")
@@ -97,8 +101,15 @@ def assess(plan: dict, cand_records: list[dict], delta: dict | None, env_failure
     if findings.get("scope_creep"):
         concerns.append(f"{len(findings['scope_creep'])} behavior(s) in the diff not covered by any criterion")
     readiness = "Blocked" if blockers else ("Not ready" if problems else ("Ready with concerns" if concerns else "Ready"))
+    planned_records = [r for r in cand_records if r["case"] in outcomes]
     return {"readiness": readiness, "blockers": blockers, "problems": problems, "concerns": concerns, "ac_status": statuses,
-            "coverage": cov, "summary": summ, "outcomes": outcomes, "extra": extra}
+            "coverage": cov, "summary": summ, "outcomes": outcomes, "extra": extra,
+            "duplicates": dedup.dedup_failures(outcomes), "exchanges": dedup.dedup_exchanges(planned_records)}
+
+
+def _tagged(messages: list[str], patterns: dict | None) -> list[str]:
+    """Messages with a prefix when the failure is not the product's doing (environment, broken harness)."""
+    return [verdict.tag(m, verdict.failure_kind(m, "candidate", patterns)) for m in messages]
 
 
 def _evidence_links(evidence: dict | None, links: dict[str, str]) -> str:
@@ -149,7 +160,7 @@ def render_markdown(plan: dict, assessment: dict, meta: dict, delta: dict | None
             e = o["evidence"]
             ev = e.get("observed") or e.get("command") or ""
         if o and o["messages"]:
-            ev = f"{'; '.join(o['messages'][:2])} ({ev})"
+            ev = f"{'; '.join(_tagged(o['messages'][:2], meta.get('failure_patterns')))} ({ev})"
         ev_links = _evidence_links(o.get("evidence") if o else None, links)
         lines.append(f"| {_cell(str(case.get('id', '')) + ' ' + str(case.get('title', '')))} | {_cell(case.get('type', ''))} | "
                      f"{_cell(', '.join(case.get('ac', [])))} | {_cell(case.get('expected', ''))} | {_cell(case.get('look_for', '')) or 'n/a'} | "
@@ -161,9 +172,19 @@ def render_markdown(plan: dict, assessment: dict, meta: dict, delta: dict | None
         shot = ((o or {}).get("evidence") or {}).get("screenshot", "")
         link = links.get(shot)
         if link and shot.lower().endswith(_IMAGE_SUFFIXES):
-            shots.append(f"![{_cell(case['id'])}: {_cell(case.get('look_for') or case.get('title', ''))}]({link})")
+            shots.append(f"![{_cell(case['id'])} ({o['outcome']}): {_cell(case.get('look_for') or case.get('title', ''))}]({link})")
     if shots:
         lines += ["", "### Screenshots", ""] + [f"{sh}\n" for sh in shots]
+
+    if a["duplicates"]:
+        lines += ["", "## Duplicate findings (the same problem in several cases; counts above are not affected)", "",
+                  "| Cases | Outcome | Affected | Message |", "| --- | --- | --- | --- |"]
+        lines += [f"| {g['count']} cases | {g['outcome']} | {_cell(', '.join(g['cases']))} | {_cell(g['sample'])[:300]} |" for g in a["duplicates"]]
+    repeated = [e for e in a["exchanges"] if e["count"] > 1 or len(e["observed"]) > 1000]
+    if repeated:
+        lines += ["", "## Failing checks (identical repeats collapsed; long output clipped)", ""]
+        lines += [f"- {_cell(e['case'])} ({e['outcome']}){' x' + str(e['count']) if e['count'] > 1 else ''}: `{_cell(e['command'])[:200]}` -> "
+                  f"{_cell(dedup.clip(e['observed'], 1000))}" for e in repeated]
 
     if a["extra"]:
         lines += ["", "## Additional checks (not part of the plan; they do not count toward verification)", "",
@@ -230,10 +251,18 @@ def write_outputs(plan: dict, cand_records: list[dict], delta: dict | None, env_
                   out_dir: Path, evidence_roots: list[Path] | None = None) -> dict:
     a = assess(plan, cand_records, delta, env_failures, findings, meta.get("mode", "verify"), meta.get("changed_files"),
                meta.get("target_url", ""), meta.get("baseline_url", ""))
+    evidence.reset(out_dir)
     links = collect_evidence(out_dir, _evidence_paths({**a["outcomes"], **a["extra"]}, delta), evidence_roots or [])
     line = status_line(a, delta)
-    result = {**line, "ac_status": a["ac_status"], "summary_stats": a["summary"], "delta": delta, "meta": meta, "evidence_files": sorted(links.values())}
+    result = {**line, "schemaVersion": 1, "verdict": a["readiness"], "problems": verdict.problems(a),
+              "exercised": verdict.exercised(plan, a["outcomes"], "candidate"), "duplicates": a["duplicates"],
+              "finishedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "ac_status": a["ac_status"], "summary_stats": a["summary"], "delta": delta, "meta": {k: v for k, v in meta.items() if k != "failure_patterns"},
+              "evidence_files": sorted(links.values())}
     write_bundle(out_dir, "QA report", render_markdown(plan, a, meta, delta, findings, links), result)
+    if meta.get("embed_evidence"):
+        html = out_dir / "report.html"
+        html.write_text(evidence.embed_images(html.read_text(encoding="utf-8"), out_dir), encoding="utf-8")
     return line
 
 
@@ -258,6 +287,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--baseline-url", default="")
     p.add_argument("--evidence-root", action="append", default=[])
     p.add_argument("--out-dir", default="reports")
+    p.add_argument("--fail-on", default="", choices=["", "blocked", "not-ready", "concerns"], help="exit 1 when the readiness reaches this level (default: never)")
+    p.add_argument("--embed-evidence", action="store_true", help="inline small screenshots into report.html so it can be shared on its own")
+    p.add_argument("--failure-patterns", default="", help="JSON file overriding the failure-kind regexes (see scripts.qa.verdict)")
     a = p.parse_args(argv)
     try:
         plan = _load_json(a.plan, "plan")
@@ -265,17 +297,19 @@ def main(argv: list[str] | None = None) -> int:
         pr = _load_json(a.pr, "pr context") if a.pr else {}
         findings = _load_json(a.findings, "findings") if a.findings else {}
         env_failures = [_load_json(f, "env-failure") for f in a.env_failure if Path(f).exists()]
+        patterns = verdict.load_patterns(a.failure_patterns)
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
         return 2
     cand = Path(a.candidate)
     roots = [Path(r) for r in a.evidence_root] or [cand.resolve().parent.parent]
     meta = {"mode": a.mode, "title": (pr.get("pr") or {}).get("title", ""), "url": (pr.get("pr") or {}).get("url", ""),
-            "ref": a.pr, "ac_source": pr.get("ac_source", ""), "changed_files": pr.get("changed_files") or [], "target_url": a.target_url, "baseline_url": a.baseline_url}
+            "ref": a.pr, "ac_source": pr.get("ac_source", ""), "changed_files": pr.get("changed_files") or [], "target_url": a.target_url, "baseline_url": a.baseline_url,
+            "embed_evidence": a.embed_evidence, "failure_patterns": patterns}
     line = write_outputs(plan, model.load_jsonl(cand), delta, env_failures, findings, meta, Path(a.out_dir), roots)
     print(f"[qa] wrote {a.out_dir}/report.md, report.html, result.json", flush=True)
     print(json.dumps(line))
-    return 0
+    return verdict.exit_code(line["readiness"], a.fail_on)
 
 
 if __name__ == "__main__":

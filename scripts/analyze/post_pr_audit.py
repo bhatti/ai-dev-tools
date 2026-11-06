@@ -34,6 +34,7 @@ _DROP_SECTIONS = [
     "per-pr metrics",
     "checked",
     "claude-assessed process metrics",
+    "changelog & blast radius",   # long; the Slack digest carries one line, the report artifacts carry the section
 ]
 
 # Metric keys and their display names, benchmarks, and "higher is better" flag.
@@ -67,7 +68,7 @@ def _metric_signal(key: str, val: float) -> str:
     return ":white_circle:"
 
 
-def _build_slack_digest(findings: dict, report_md: str) -> str:
+def _build_slack_digest(findings: dict, report_md: str, changelog_line: str = "") -> str:
     """Build a concise Slack digest from structured findings and the markdown report.
 
     Keeps: executive summary, findings (trimmed), skills assessment, key metrics,
@@ -212,6 +213,8 @@ def _build_slack_digest(findings: dict, report_md: str) -> str:
                 lines.append(f"• {name}")
             lines.append("")
 
+    if changelog_line:
+        lines += ["*Changelog & blast radius*", f"• {changelog_line}", ""]
     return "\n".join(lines)
 
 
@@ -249,6 +252,16 @@ def _strip_verbose_sections(text: str) -> str:
         )
         text = pattern.sub("", text)
     return text
+
+
+def _changelog_line(reports_dir) -> str:
+    """The one-line changelog summary from reports/changelog.json ("" when there is none or it cannot be read)."""
+    from scripts.analyze import changelog_report
+
+    try:
+        return changelog_report.digest_line(json.loads((reports_dir / "changelog.json").read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return ""
 
 
 def _run_summary_line(reports_dir) -> str:
@@ -350,7 +363,7 @@ def main() -> None:
         report_text = _strip_verbose_sections(full_report_text)
         print("[post-pr-audit] posting full report (--full) with verbose sections trimmed", flush=True)
     else:
-        digest = _build_slack_digest(findings_data, full_report_text)
+        digest = _build_slack_digest(findings_data, full_report_text, _changelog_line(reports_dir))
         if digest.strip():
             report_text = digest
             print("[post-pr-audit] posting concise Slack digest", flush=True)

@@ -254,3 +254,52 @@ class TestSearchIssues:
             mock_req.post.return_value = _make_response(status_code=400, ok=False)
             result = search_issues(FAKE_CONFIG, "project = X")
         assert result == []
+
+
+class TestResolveUserTeam:
+    """The default team of a named person (the Slack user), as opposed to the credentials' own account."""
+
+    @pytest.fixture(autouse=True)
+    def clear_user_cache(self):
+        _mod._user_team_cache.clear()
+        yield
+        _mod._user_team_cache.clear()
+
+    FIELDS = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
+
+    def _get(self, users):
+        def get(url, *a, **k):
+            return _make_response(users if "/user/search" in url else self.FIELDS)
+        return get
+
+    def test_finds_the_account_by_email_then_the_team_of_their_recent_issues(self):
+        from scripts.common.jira_api import resolve_user_team
+        issues = {"issues": [{"key": "P-1", "fields": {"customfield_10248": {"value": "TeamAlpha"}}}]}
+        with patch("scripts.common.jira_api.requests") as req:
+            req.get.side_effect = self._get([{"accountId": "acc-1", "emailAddress": "dev@example.com"}, {"accountId": "acc-2", "emailAddress": "other@example.com"}])
+            req.post.return_value = _make_response(issues)
+            assert resolve_user_team(FAKE_CONFIG, "Dev@Example.com") == "TeamAlpha"
+        assert '"acc-1"' in req.post.call_args.kwargs["json"]["jql"] and "currentUser" not in req.post.call_args.kwargs["json"]["jql"]
+
+    def test_unknown_or_ambiguous_email_gives_none_and_never_searches_issues(self):
+        from scripts.common.jira_api import resolve_user_team
+        with patch("scripts.common.jira_api.requests") as req:
+            req.get.side_effect = self._get([])
+            assert resolve_user_team(FAKE_CONFIG, "nobody@example.com") is None
+            req.get.side_effect = self._get([{"accountId": "a"}, {"accountId": "b"}])  # no email shown, two candidates: do not guess
+            assert resolve_user_team(FAKE_CONFIG, "x@example.com") is None
+        req.post.assert_not_called()
+
+    def test_a_single_hidden_email_result_is_accepted(self):
+        from scripts.common.jira_api import resolve_user_team
+        issues = {"issues": [{"key": "P-1", "fields": {"customfield_10248": "TeamBeta"}}]}
+        with patch("scripts.common.jira_api.requests") as req:
+            req.get.side_effect = self._get([{"accountId": "acc-9"}])
+            req.post.return_value = _make_response(issues)
+            assert resolve_user_team(FAKE_CONFIG, "dev@example.com") == "TeamBeta"
+
+    def test_blank_email_is_none_without_any_request(self):
+        from scripts.common.jira_api import resolve_user_team
+        with patch("scripts.common.jira_api.requests") as req:
+            assert resolve_user_team(FAKE_CONFIG, "") is None
+        req.get.assert_not_called()

@@ -126,35 +126,20 @@ class TestResolveJiraIssueKeys:
         assert _resolve_jira_issue_keys(config) is None
 
     def test_board_filter_returns_keys(self):
-        # When auto-detect returns None, falls back to board sprint fetch
+        """A board alone is a board filter (sprint issues); it never turns into a team filter."""
         count_resp = {"total": 1, "values": []}
         sprints_page = {"values": [{"id": 10, "state": "active"}]}
         sprint_issues = {"issues": [{"key": "PROJ-1"}, {"key": "PROJ-2"}], "total": 2}
-        with patch("scripts.analyze.pr_fetcher.resolve_current_user_team", return_value=None):
-            with patch("scripts.common.jira_api.requests") as mock_req:
-                mock_req.get.side_effect = [
-                    _mock_response(count_resp),    # board/sprint?maxResults=1 (count)
-                    _mock_response(sprints_page),  # board/sprint?startAt=0 (data)
-                    _mock_response(sprint_issues), # sprint/10/issue
-                ]
-                config = {**JIRA_CONFIG, "JIRA_BOARDS": "42"}
-                keys, issues = _resolve_jira_issue_keys(config)
+        with patch("scripts.common.jira_api.requests") as mock_req:
+            mock_req.get.side_effect = [
+                _mock_response(count_resp),    # board/sprint?maxResults=1 (count)
+                _mock_response(sprints_page),  # board/sprint?startAt=0 (data)
+                _mock_response(sprint_issues), # sprint/10/issue
+            ]
+            config = {**JIRA_CONFIG, "JIRA_BOARDS": "42"}
+            keys, issues = _resolve_jira_issue_keys(config)
         assert keys == {"PROJ-1", "PROJ-2"}
-
-    def test_board_filter_uses_team_when_auto_detected(self):
-        # When auto-detect returns a team name, JQL team filter is used instead of sprint fetch
-        field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]
-        team_issues = {"issues": [{"key": "PROJ-5", "id": "5"}, {"key": "PROJ-6", "id": "6"}]}
-        with patch("scripts.analyze.pr_fetcher.resolve_current_user_team", return_value="TeamAlpha"):
-            with patch("scripts.common.jira_api.requests") as mock_req:
-                mock_req.get.return_value = _mock_response(field_list)
-                mock_req.post.return_value = _mock_response(team_issues)
-                config = {**JIRA_CONFIG, "JIRA_BOARDS": "42"}
-                keys, issues = _resolve_jira_issue_keys(config)
-        assert keys == {"PROJ-5", "PROJ-6"}
-        assert len(issues) == 2
-        # JQL post was called (team filter), not board/sprint endpoint
-        assert mock_req.post.called
+        mock_req.post.assert_not_called()  # no team lookup, no JQL by team
 
     def test_team_filter_uses_jql(self):
         field_list = [{"id": "customfield_10248", "name": "Eng Scrum Team"}]

@@ -465,19 +465,7 @@ def fetch_bb_pr_metadata(config: dict, pr_number: str) -> dict:
 # Re-exported from shared module for backward compatibility
 from scripts.common.pr_classify import SENSITIVE_PATHS  # noqa: F811
 
-_TRANSPARENT_PREFIXES = ("src", "lib", "pkg", "internal", "crates", "apps")
-
-
-def top_level_module(filepath: str) -> str:
-    """Extract top-level module/directory from a file path.
-
-    For paths under transparent prefixes (src/, lib/, etc.), returns two
-    levels deep. Otherwise returns the first path component.
-    """
-    parts = filepath.split("/")
-    if len(parts) >= 2 and parts[0] in _TRANSPARENT_PREFIXES:
-        return parts[0] + "/" + parts[1]
-    return parts[0]
+from scripts.common.pr_classify import top_level_module  # noqa: E402,F401  (shared with the PR audit)
 
 
 # Re-exported from shared module for backward compatibility

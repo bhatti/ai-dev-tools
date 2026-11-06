@@ -360,4 +360,129 @@ class TestPlanNarrativeInReport:
         links = {"shot.png": "evidence/shot.png"}
         a = assess([rec("C1", "pass"), rec("C2", "pass", screenshot="shot.png")], plan=self.PLAN_NARR)
         md = rp.render_markdown(self.PLAN_NARR, a, {"mode": "verify"}, None, {}, links)
-        assert "![C2: red banner under the cart](evidence/shot.png)" in md
+        assert "![C2 (pass): red banner under the cart](evidence/shot.png)" in md
+
+
+class TestDuplicateFindings:
+    PLAN5 = {"criteria": [{"id": "AC1", "text": "t", "source": "issue:X-1"}],
+             "cases": [{"id": f"C{i}", "title": f"case {i}", "type": "API", "ac": ["AC1"], "expected": "200"} for i in range(1, 6)]}
+
+    def _records(self):
+        return [rec(f"C{i}", "fail", f"GET /api/items returned 500 after {10 + i}ms", command="curl /api/items", observed="HTTP 500 boom") for i in range(1, 6)]
+
+    def test_one_group_with_a_count_and_the_affected_cases(self):
+        a = rp.assess(self.PLAN5, self._records(), None, [], {})
+        md = rp.render_markdown(self.PLAN5, a, {}, None, {})
+        assert "## Duplicate findings" in md
+        section = md.split("## Duplicate findings")[1].split("\n## ")[0]
+        assert "5 cases" in section and "C1, C2, C3, C4, C5" in section and "returned 500" in section
+
+    def test_counts_and_readiness_are_unchanged_by_grouping(self):
+        a = rp.assess(self.PLAN5, self._records(), None, [], {})
+        assert a["summary"]["counts"]["fail"] == 5 and a["readiness"] == "Not ready"
+        assert a["duplicates"][0]["count"] == 5
+
+    def test_no_section_when_nothing_repeats(self):
+        a = assess([rec("C1", "fail", "a"), rec("C2", "fail", "b")])
+        assert "Duplicate findings" not in rp.render_markdown(PLAN, a, {}, None, {})
+
+    def test_repeated_identical_exchanges_are_listed_once_with_a_count_and_long_bodies_are_clipped(self):
+        records = [rec("C1", "fail", "bad", command="GET /x", observed="HTTP 500 " + "z" * 1200) for _ in range(3)] + [rec("C2", "pass")]
+        a = assess(records)
+        md = rp.render_markdown(PLAN, a, {}, None, {})
+        assert "x3" in md and "more characters" in md
+        assert md.count("GET /x") == 1 or md.count("GET /x") == 2  # once in the checks list, at most once more in the table
+
+
+class TestFailureKindsInReport:
+    def test_environment_failures_are_tagged_so_they_are_not_blamed_on_the_change(self):
+        a = assess([rec("C1", "fail", "connect ECONNREFUSED 127.0.0.1:80"), rec("C2", "pass")])
+        md = rp.render_markdown(PLAN, a, {}, None, {})
+        assert "[Environment / infrastructure" in md
+
+    def test_product_failures_stay_plain(self):
+        a = assess([rec("C1", "fail", "expected 409 got 200"), rec("C2", "pass")])
+        md = rp.render_markdown(PLAN, a, {}, None, {})
+        assert "expected 409 got 200" in md and "[Environment" not in md and "[Baseline" not in md
+
+
+class TestResultContract:
+    def _run(self, tmp_path, records, **kw):
+        out = tmp_path / "out"
+        rp.write_outputs(PLAN, records, None, [], {}, {"mode": "verify", **kw}, out, [tmp_path])
+        return json.loads((out / "result.json").read_text())
+
+    def test_schema_version_verdict_problems_and_exercised(self, tmp_path):
+        r = self._run(tmp_path, [rec("C1", "fail", "got 200"), rec("C2", "pass")])
+        assert r["schemaVersion"] == 1 and r["verdict"] == "Not ready"
+        assert {"code": "problem", "message": "1 case(s) failed"} in r["problems"]
+        assert [(e["id"], e["side"], e["channel"], e["status"]) for e in r["exercised"]] == [("C1", "candidate", "http", "fail"), ("C2", "candidate", "ui", "pass")]
+        assert r["finishedAt"].endswith("Z") and r["duplicates"] == []
+
+    def test_blocked_run_still_gets_a_contract(self, tmp_path):
+        r = self._run(tmp_path, [])
+        assert r["schemaVersion"] == 1 and r["verdict"] == "Blocked" and r["exercised"] == []
+
+
+class TestFailOn:
+    def _cli(self, tmp_path, records, *extra):
+        (tmp_path / "plan.json").write_text(json.dumps(PLAN))
+        (tmp_path / "c.jsonl").write_text("\n".join(json.dumps(r) for r in records))
+        return rp.main(["--plan", str(tmp_path / "plan.json"), "--candidate", str(tmp_path / "c.jsonl"), "--out-dir", str(tmp_path / "out"), *extra])
+
+    def test_default_never_fails_the_process(self, tmp_path):
+        assert self._cli(tmp_path, [rec("C1", "fail", "x"), rec("C2", "pass")]) == 0
+
+    def test_not_ready_fails_with_the_threshold(self, tmp_path):
+        assert self._cli(tmp_path, [rec("C1", "fail", "x"), rec("C2", "pass")], "--fail-on", "not-ready") == 1
+
+    def test_ready_passes_the_threshold(self, tmp_path):
+        assert self._cli(tmp_path, [rec("C1", "pass"), rec("C2", "pass")], "--fail-on", "concerns") == 0
+
+
+class TestEvidenceHygiene:
+    def test_rerunning_a_report_replaces_evidence_instead_of_accumulating_copies(self, tmp_path):
+        shot = tmp_path / "candidate" / "C2.png"
+        shot.parent.mkdir()
+        shot.write_bytes(b"\x89PNG")
+        out = tmp_path / "out"
+        for _ in range(3):
+            rp.write_outputs(PLAN, [rec("C1", "pass"), rec("C2", "pass", screenshot=str(shot))], None, [], {}, {}, out, [tmp_path])
+        assert sorted(p.name for p in (out / "evidence").iterdir()) == ["C2.png"]
+
+    def test_a_large_text_evidence_file_is_truncated_not_copied_whole(self, tmp_path):
+        big = tmp_path / "candidate" / "body.txt"
+        big.parent.mkdir()
+        big.write_text("A" * 3_000_000)
+        out = tmp_path / "out"
+        rp.write_outputs(PLAN, [rec("C1", "fail", "x", evidence=str(big)), rec("C2", "pass")], None, [], {}, {}, out, [tmp_path])
+        copied = (out / "evidence" / "body.txt").read_text()
+        assert len(copied) < 200_000 and "truncated" in copied
+
+    def test_embed_evidence_inlines_small_images_into_the_html_only(self, tmp_path):
+        shot = tmp_path / "candidate" / "C2.png"
+        shot.parent.mkdir()
+        shot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        out = tmp_path / "out"
+        rp.write_outputs(PLAN, [rec("C1", "pass"), rec("C2", "pass", screenshot=str(shot))], None, [], {}, {"embed_evidence": True}, out, [tmp_path])
+        assert "data:image/png;base64," in (out / "report.html").read_text()
+        assert "data:image" not in (out / "report.md").read_text()
+
+    def test_embed_evidence_respects_the_size_cap(self, tmp_path):
+        shot = tmp_path / "candidate" / "C2.png"
+        shot.parent.mkdir()
+        shot.write_bytes(b"\x89PNG" + b"0" * 400_000)
+        out = tmp_path / "out"
+        rp.write_outputs(PLAN, [rec("C1", "pass"), rec("C2", "pass", screenshot=str(shot))], None, [], {}, {"embed_evidence": True}, out, [tmp_path])
+        assert "data:image" not in (out / "report.html").read_text()
+
+
+class TestScreenshotsShowTheirOutcome:
+    def test_a_skipped_case_is_not_captioned_as_a_failure(self, tmp_path):
+        shot = tmp_path / "candidate" / "C2.png"
+        shot.parent.mkdir()
+        shot.write_bytes(b"\x89PNG")
+        out = tmp_path / "out"
+        rp.write_outputs(PLAN, [rec("C1", "pass"), rec("C2", "inconclusive", "no expect", screenshot=str(shot))], None, [], {}, {}, out, [tmp_path])
+        md = (out / "report.md").read_text()
+        assert "C2 (inconclusive)" in md and "(fail)" not in md.split("### Screenshots")[1].split("\n## ")[0]

@@ -12,59 +12,19 @@ Exit codes: 0=done, 1=error, 2=ambiguous scope (3+ unrelated modules)
 from __future__ import annotations
 
 import json
-import re
 import sys
-from pathlib import Path
 
 import click
 
+from scripts.common import codeowners
 from scripts.common.config import get_workspace_dir, load_config
-from scripts.common.pr_classify import classify_pr_category, extract_issue_ref as _extract_issue_ref
+from scripts.common.pr_classify import blast_level, classify_pr_category, extract_issue_ref as _extract_issue_ref
 from scripts.common.pr_signals import collect_signals
 from scripts.mq._shared import SENSITIVE_PATHS, apply_repo_override, fetch_pr_files, parse_pr_ref, repo_slug, resolve_tracker, top_level_module
 
-_CODEOWNERS_ENTRY_RE = re.compile(r"^(?!\s*#)(\S+)\s+(.+)$")
-
-
-def _parse_codeowners(repo_dir: str | None) -> dict[str, list[str]]:
-    """Parse CODEOWNERS file and return pattern→owners mapping."""
-    if not repo_dir:
-        return {}
-    for candidate in ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"]:
-        path = Path(repo_dir) / candidate
-        if path.exists():
-            entries: dict[str, list[str]] = {}
-            for line in path.read_text().splitlines():
-                m = _CODEOWNERS_ENTRY_RE.match(line.strip())
-                if m:
-                    pattern = m.group(1)
-                    owners = [o.strip() for o in m.group(2).split() if o.strip()]
-                    entries[pattern] = owners
-            return entries
-    return {}
-
-
-def _match_codeowner(filepath: str, codeowners: dict[str, list[str]]) -> list[str]:
-    """Return owners for a file path. Last matching pattern wins (CODEOWNERS convention)."""
-    matched_owners: list[str] = []
-    for pattern, owners in codeowners.items():
-        pat = pattern.rstrip("/")
-        if pat.startswith("/"):
-            pat = pat[1:]
-        if filepath.startswith(pat) or filepath == pat:
-            matched_owners = owners
-        elif "*" in pat:
-            regex = pat.replace(".", r"\.").replace("*", ".*")
-            if re.match(regex, filepath):
-                matched_owners = owners
-    return matched_owners
-
-
-
-
 def _compute_scope(
     files: list[dict],
-    codeowners: dict[str, list[str]],
+    rules: list[codeowners.Rule],
 ) -> tuple[str, str, list[str], set[str]]:
     """Compute scope name, blast_radius, touched paths, and owner teams."""
     owner_sets: dict[str, set[str]] = {}
@@ -81,7 +41,7 @@ def _compute_scope(
         module = top_level_module(path)
         modules.add(module)
 
-        owners = _match_codeowner(path, codeowners)
+        owners = codeowners.owners_for(path, rules)
         for owner in owners:
             owner_sets.setdefault(owner, set()).add(module)
 
@@ -100,12 +60,7 @@ def _compute_scope(
     else:
         scope = "cross-scope"
 
-    if total_lines > 300 or n_modules >= 3 or sensitive_touched:
-        blast_radius = "high"
-    elif total_lines > 50 or n_modules >= 2:
-        blast_radius = "medium"
-    else:
-        blast_radius = "low"
+    blast_radius = blast_level(total_lines, n_modules, bool(sensitive_touched))
 
     return scope, blast_radius, sensitive_touched, all_owners
 
@@ -139,9 +94,9 @@ def main(pr_number: str) -> None:
         sys.exit(0)
 
     codebase_dir = config.get("CODEBASE_DIR", "")
-    codeowners = _parse_codeowners(codebase_dir)
+    rules = codeowners.load(codebase_dir)
 
-    scope, blast_radius, sensitive_touched, owners = _compute_scope(files, codeowners)
+    scope, blast_radius, sensitive_touched, owners = _compute_scope(files, rules)
 
     total_additions = sum(f.get("additions", 0) for f in files)
     total_deletions = sum(f.get("deletions", 0) for f in files)

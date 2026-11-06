@@ -48,6 +48,26 @@ SENSITIVE_PATHS = re.compile(
 )
 
 
+_TRANSPARENT_PREFIXES = ("src", "lib", "pkg", "internal", "crates", "apps")
+
+
+def top_level_module(filepath: str) -> str:
+    """Top-level module/directory of a path; under transparent prefixes (src/, lib/, ...) two levels deep."""
+    parts = filepath.split("/")
+    if len(parts) >= 2 and parts[0] in _TRANSPARENT_PREFIXES:
+        return parts[0] + "/" + parts[1]
+    return parts[0]
+
+
+def blast_level(total_lines: int, n_modules: int, sensitive_touched: bool) -> str:
+    """The one blast-radius rule: high above 300 changed lines, 3+ modules or any sensitive path; medium above 50 lines or 2 modules."""
+    if total_lines > 300 or n_modules >= 3 or sensitive_touched:
+        return "high"
+    if total_lines > 50 or n_modules >= 2:
+        return "medium"
+    return "low"
+
+
 def is_test_file(path: str) -> bool:
     """Check if a file path looks like a test file."""
     name = path.split("/")[-1] if "/" in path else path
@@ -606,7 +626,10 @@ def enrich_pr_with_metrics(pr: dict, files: list[dict] | None = None) -> None:
     pr["total_loc"] = total_loc
     pr["file_count"] = n_files
 
-    blast = pr.get("blast_radius", "low")
+    blast = pr.get("blast_radius")
+    if blast is None:  # nobody computed it (the audit path): derive it from the changed files, never default to "low"
+        paths = [f.get("path", "") for f in files or []]
+        blast = blast_level(total_loc, len({top_level_module(p) for p in paths if p}), any(SENSITIVE_PATHS.search(p) for p in paths))
     pr["blast_radius"] = apply_blast_cap(blast, flags)
 
     risk = compute_risk_score(pr, files)

@@ -12,6 +12,7 @@ from scripts.common.report_renderer import render_simple_html
 from scripts.common.text_utils import strip_ansi
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_TEXT_CHARS = 120_000  # a copied text evidence file keeps this much; a runaway log must not become the report
 _MD_SPECIAL = re.compile(r"([\[\]`<>|])")
 
 
@@ -41,9 +42,12 @@ def collect_evidence(out_dir: Path, sources: list[str], roots: list[Path]) -> di
             if b"\0" in raw:
                 continue
             try:
-                data = redact(raw.decode("utf-8"))
+                text = raw.decode("utf-8", errors="strict") if len(raw) <= 4 * MAX_TEXT_CHARS else raw[:4 * MAX_TEXT_CHARS].decode("utf-8", errors="ignore")
             except UnicodeDecodeError:
                 continue
+            if len(text) > MAX_TEXT_CHARS:
+                text = f"{text[:MAX_TEXT_CHARS]}\n... [truncated: the evidence file is longer than {MAX_TEXT_CHARS} characters]\n"
+            data = redact(text)
         dest.mkdir(parents=True, exist_ok=True)
         name, n = path.name, 1
         while (dest / name).exists():

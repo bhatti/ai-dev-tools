@@ -169,14 +169,8 @@ def resolve_field_id(config: dict, field_name: str) -> str | None:
     return None
 
 
-def resolve_current_user_team(config: dict) -> str | None:
-    """Auto-detect the current Jira user's team from their recent issue assignments.
-
-    Uses `currentUser()` in JQL (no separate /myself round-trip needed) to find
-    the team custom field value on a recently assigned issue.
-    Cached per JIRA_EMAIL so repeated calls are cheap.
-    """
-    cache_key = (config.get("JIRA_EMAIL") or "").lower()
+def _team_of_recent_assignee(config: dict, assignee: str, cache_key: str) -> str | None:
+    """Team (custom field) of the most recent issue assigned in the last 30 days to ``assignee`` (a JQL user expression)."""
     if cache_key and cache_key in _user_team_cache:
         return _user_team_cache[cache_key]
 
@@ -191,7 +185,7 @@ def resolve_current_user_team(config: dict) -> str | None:
             f"{_base(config)}/rest/api/3/search/jql",
             headers=_auth_headers(config),
             json={
-                "jql": "assignee = currentUser() AND updated >= -30d ORDER BY updated DESC",
+                "jql": f"assignee = {assignee} AND updated >= -30d ORDER BY updated DESC",
                 "maxResults": 20,
                 "fields": [field_id],
             },
@@ -214,6 +208,34 @@ def resolve_current_user_team(config: dict) -> str | None:
     except Exception as e:
         print(f"[jira-api] team auto-detect error: {e}", file=sys.stderr)
     return None
+
+
+def resolve_current_user_team(config: dict) -> str | None:
+    """Team of the account the Jira credentials belong to (from their recent assignments); cached per JIRA_EMAIL."""
+    return _team_of_recent_assignee(config, "currentUser()", (config.get("JIRA_EMAIL") or "").lower())
+
+
+def resolve_user_team(config: dict, user_email: str) -> str | None:
+    """Default team of the person with this e-mail address (e.g. the Slack user who ran a command), or None.
+
+    The account is found with the user search; an address Jira hides is accepted only when the search returns exactly one
+    candidate, never a guess among several.
+    """
+    email = (user_email or "").strip().lower()
+    if not email:
+        return None
+    try:
+        resp = requests.get(f"{_base(config)}/rest/api/3/user/search", headers=_auth_headers(config), params={"query": email}, timeout=15)
+        users = resp.json() if resp.ok else []
+    except Exception as e:
+        print(f"[jira-api] user lookup error: {e}", file=sys.stderr)
+        return None
+    exact = [u for u in users if (u.get("emailAddress") or "").lower() == email]
+    chosen = exact[0] if exact else (users[0] if len(users) == 1 else None)
+    if not chosen or not chosen.get("accountId"):
+        return None
+    account = str(chosen["accountId"]).replace("\\", "\\\\").replace('"', '\\"')
+    return _team_of_recent_assignee(config, f'"{account}"', f"acct:{account}")
 
 
 def fetch_board_issue_keys(

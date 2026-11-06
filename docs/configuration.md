@@ -85,6 +85,24 @@ Required only when running the Slack agent router (`scripts/slack/router.py`).
 
 *Required for Slack router only.
 
+## PR Audit Variables
+
+Set by the `ai-*-pr-audit` job YAMLs; most are overridden per run by Slack flags (see the README table of PR audit flags). Team scoping is opt-in: `JIRA_SPACE`, `JIRA_BOARDS` and `PR_AUDIT_TEAM_MEMBERS` from org configs are cleared by the audit and only set again by `--team` / `--board` in the Slack text.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `N_PRS` | `50` | Max PRs to analyze (`--n-prs`) |
+| `PR_AUDIT_FOCUS` | `all` | Specialists to run (`--focus`) |
+| `PR_AUDIT_DRY_RUN` | empty | `1` = produce every report, create no PR (`--dry-run`) |
+| `PR_AUDIT_REVIEWERS` | empty | Reviewers to learn from (`--reviewers a,b`); names resolve to people first |
+| `PR_AUDIT_CONTEXT_CHARS` | 250000 (400000 with reviewers) | Character budget of PR data given to the model |
+| `PR_AUDIT_CHANGELOG` | on | `0` skips the "Changelog & Blast Radius" section (`--no-changelog`) |
+| `PR_AUDIT_DIFF_PRS` | `25` | Risky PRs whose diff is read for breaking-change signals (`--breaking-diffs`; `0` = paths only) |
+| `SLACK_USER_TAG` | empty | E-mail of the Slack user; a bare `--team` means this person's default Jira team |
+| `PR_AUDIT_FILTER`, `PR_AUDIT_GH_MILESTONE` | empty | Explicit scope flags (`--filter`, `--milestone`) |
+| `PR_AUDIT_TEAM_MEMBERS`, `JIRA_SPACE`, `JIRA_BOARDS` | cleared | Set by the audit itself from `--team a,b`, `--team Name` and `--board` |
+| `MAX_PR_AUDIT_SIZE`, `MAX_DEEP_REVIEWS` | `10000000`, `2` | Size cap and number of deep reviews |
+
 ## Standup Variables
 
 Used by `scripts/standup/gather_jira.py`, `gather_gh.py` and `synthesize.py`.

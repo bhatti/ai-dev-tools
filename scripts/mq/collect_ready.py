@@ -136,7 +136,7 @@ def _enrich_prs_with_diffstat(prs: list[dict], config: dict) -> None:
         if not files:
             continue
         try:
-            scope_name, blast_radius, _, _ = _compute_scope(files, {})
+            scope_name, blast_radius, _, _ = _compute_scope(files, [])
             if scope_name and scope_name not in ("unknown", "cross-scope"):
                 pr["scope"] = scope_name
             pr["blast_radius"] = blast_radius

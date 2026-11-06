@@ -1040,3 +1040,38 @@ class TestDashboardRowsAreUniqueAndAboutOpenWork:
         assert "| Stale PRs (>7d) | 0/1 |" in out and "| Avg Age | 2d |" in out
         assert "| Stale PRs (>7d) | n/a |" in build_metrics_dashboard([self._pr(state="merged", merged_at="2020-01-02T00:00:00Z")])
         assert build_stale_pr_table(prs) == []
+
+
+class TestBlastRadiusFromFiles:
+    """Regression: the audit path never set blast_radius, so enrich_pr_with_metrics reported "low" for everything."""
+
+    def _enrich(self, files, **pr):
+        from scripts.common.pr_classify import enrich_pr_with_metrics
+        p = {"title": "change", "labels": [], **pr}
+        enrich_pr_with_metrics(p, files=[{"path": f, "additions": a, "deletions": d} for f, a, d in files])
+        return p["blast_radius"]
+
+    def test_sensitive_paths_are_high_whatever_the_size(self):
+        assert self._enrich([("services/auth/token.py", 2, 1)]) == "high"
+
+    def test_large_change_is_high(self):
+        assert self._enrich([("svc/a.py", 200, 150)]) == "high"
+
+    def test_three_modules_is_high(self):
+        assert self._enrich([("a/x.py", 1, 1), ("b/y.py", 1, 1), ("c/z.py", 1, 1)]) == "high"
+
+    def test_medium_and_low(self):
+        assert self._enrich([("svc/a.py", 40, 30)]) == "medium"
+        assert self._enrich([("a/x.py", 5, 5), ("b/y.py", 5, 5)]) == "medium"
+        assert self._enrich([("svc/a.py", 3, 1)]) == "low"
+
+    def test_an_explicit_value_set_by_the_caller_is_kept(self):
+        assert self._enrich([("svc/a.py", 3, 1)], blast_radius="high") == "high"
+
+    def test_docs_and_test_only_prs_stay_capped(self):
+        assert self._enrich([("docs/auth/guide.md", 400, 10)], title="docs: update the auth guide") in ("low", "medium")
+
+    def test_blast_level_rule(self):
+        from scripts.common.pr_classify import blast_level
+        assert [blast_level(301, 1, False), blast_level(50, 3, False), blast_level(1, 1, True), blast_level(51, 1, False), blast_level(1, 2, False),
+                blast_level(50, 1, False)] == ["high", "high", "high", "medium", "medium", "low"]

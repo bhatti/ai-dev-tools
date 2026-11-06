@@ -5,6 +5,7 @@ files; only the network/LLM edges are faked (`gh`, the model, git push, Slack).
 """
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -56,7 +57,7 @@ class FakeGh:
         return MagicMock(returncode=0, stdout=json.dumps(rows), stderr="")
 
 
-def _fake_claude(reports_dir: Path, prompts: list, learnings: dict):
+def _fake_claude(reports_dir: Path, prompts: list, learnings: dict, model_changelog=None):
     def run(prompt, **kw):
         prompts.append(prompt)
         (reports_dir / "pr_audit_report.md").write_text("# PR Audit -- o/r\n\n### Executive Summary\n\n" + "Review depth is shallow. " * 20)
@@ -65,6 +66,8 @@ def _fake_claude(reports_dir: Path, prompts: list, learnings: dict):
             "repo_skill_changes": [{"action": "create", "file_path": ".claude/skills/x/SKILL.md", "description": "d", "full_content": "body"}],
             "new_docs": [], "ygs_recommendations": []}))
         (reports_dir / "review_learnings.json").write_text(json.dumps(learnings))
+        if model_changelog is not None:
+            (reports_dir / "changelog_model.json").write_text(json.dumps(model_changelog))
         return SimpleNamespace(status="DONE", output="", status_json={"status": "DONE", "spec_gap_count": 0, "design_gap_count": 0,
                                                                          "skill_gap_count": 0, "practice_gap_count": 0})
     return run
@@ -84,7 +87,7 @@ def workspace(tmp_path, monkeypatch):
     return tmp_path
 
 
-def run_audit(workspace, monkeypatch, message, gh=None, learnings=None, bb=None):
+def run_audit(workspace, monkeypatch, message, gh=None, learnings=None, bb=None, codeowners="", model_changelog=None, diff=None):
     """Run audit-prs the way the pod does: the Slack text arrives in SLACK_MESSAGE."""
     monkeypatch.setenv("SLACK_MESSAGE", message)
     gh = gh or FakeGh()
@@ -94,7 +97,13 @@ def run_audit(workspace, monkeypatch, message, gh=None, learnings=None, bb=None)
 
     def clone(url, branch, dest, depth):
         (dest / ".git").mkdir(parents=True, exist_ok=True)
+        if codeowners:
+            (dest / ".github").mkdir(exist_ok=True)
+            (dest / ".github" / "CODEOWNERS").write_text(codeowners)
         return True, "main"
+
+    diff_calls: list = []
+    fetch_diff = lambda config, tracker, number, max_bytes=0: (diff_calls.append(number) or (diff or "", "" if diff else "no diff in this test"))
 
     with patch("scripts.analyze.pr_fetcher.subprocess.run", side_effect=gh), \
          patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[]), \
@@ -106,14 +115,15 @@ def run_audit(workspace, monkeypatch, message, gh=None, learnings=None, bb=None)
          patch("scripts.analyze.run_pr_audit._attach_review_signals"), \
          patch("scripts.analyze.run_pr_audit._load_skill_md", return_value="SKILL"), \
          patch("scripts.analyze.run_pr_audit.link_pr_to_issue", return_value=None), \
-         patch("scripts.analyze.run_pr_audit.run_claude", side_effect=_fake_claude(reports, prompts, learnings)), \
+         patch("scripts.analyze.run_pr_audit.run_claude", side_effect=_fake_claude(reports, prompts, learnings, model_changelog)), \
+         patch("scripts.analyze.change_impact.fetch_pr_diff", side_effect=fetch_diff), \
          patch("requests.get", side_effect=bb or (lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected HTTP call")))):
         try:
             run_pr_audit.main.main(args=[], standalone_mode=False)
             code = 0
         except SystemExit as e:
             code = e.code or 0
-    return SimpleNamespace(code=code, gh=gh, prompts=prompts, reports=reports)
+    return SimpleNamespace(code=code, gh=gh, prompts=prompts, reports=reports, diff_calls=diff_calls)
 
 
 def run_create(workspace, monkeypatch, push=False):
@@ -344,3 +354,138 @@ class TestBitbucketWithReviewers:
         assert "None of the requested reviewers (CJ)" in md
         assert "Check tenant on every query" in md and "No sleeps in tests" in md
         assert bb.detail_ids == {1, 2, 3}  # fell back to the plain latest PRs
+
+
+# -- Changelog & Blast Radius ----------------------------------------------------------------------------------------
+
+CODEOWNERS_TEXT = "* @org/everyone\n/proto/ @org/platform\n/web/ @org/frontend\n/auth/ @org/identity\n"
+PROTO_DIFF = ("diff --git a/proto/pay.proto b/proto/pay.proto\n--- a/proto/pay.proto\n+++ b/proto/pay.proto\n@@ -1,3 +1,2 @@\n"
+              "-  string currency = 3;\n   int64 amount = 1;\n")
+
+
+def _gh_with(rows):
+    gh = FakeGh()
+    gh.all = rows
+    return gh
+
+
+def _row_files(num, files, title=None, reviewer="alice"):
+    row = _row(num, reviewer)
+    row["files"] = [{"path": p, "additions": a, "deletions": d} for p, a, d in files]
+    if title:
+        row["title"] = title
+    return row
+
+
+class TestChangelogGitHub:
+    ROWS = [_row_files(10, [("proto/pay.proto", 0, 1)], "Drop currency from Pay"), _row_files(11, [("auth/token.py", 2, 1)], "Tighten token expiry"),
+            _row_files(12, [("web/button.ts", 2, 1)], "Button colour")]
+
+    def test_section_files_teams_blast_and_breaking_candidate(self, workspace, monkeypatch):
+        model = {"features": [{"title": "Pay API trimmed", "summary": "Removes the currency field", "prs": [10], "category": "platform"}]}
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --n-prs 10", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT,
+                          model_changelog=model, diff=PROTO_DIFF)
+        assert audit.code == 0
+        report = (audit.reports / "pr_audit_report.md").read_text()
+        assert report.count("## Changelog & Blast Radius") == 1
+        out = json.loads((audit.reports / "changelog.json").read_text())
+        pay = next(f for f in out["features"] if f["title"] == "Pay API trimmed")
+        assert pay["teams"] == ["platform"] and pay["blast"]["external"] is True
+        assert [(b["kind"], b["confidence"]) for b in pay["breaking"]] == [("field_removed", "high")]
+        token = next(f for f in out["features"] if 11 in f["prs"])
+        assert token["teams"] == ["identity"] and token["blast"]["level"] == "high"  # auth is always high
+        assert all(12 not in f["prs"] for f in out["features"])  # a low-blast button change is not a notable change
+        for name in ("changelog.md", "changelog.html", "change_facts.json"):
+            assert (audit.reports / name).exists()
+        assert "changelog_model.json" in audit.prompts[0] and "#10" in audit.prompts[0] and "platform" in audit.prompts[0]
+        assert out["summary"]["breaking_high"] == 1 and audit.diff_calls == ["10"]  # only the contract PR's diff is read
+
+    def test_the_section_is_also_in_the_html_report(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT, diff=PROTO_DIFF)
+        assert "Changelog &amp; Blast Radius" in (audit.reports / "pr_audit_report.html").read_text()
+
+    def test_without_a_model_file_the_changelog_is_built_from_facts(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT, diff=PROTO_DIFF)
+        out = json.loads((audit.reports / "changelog.json").read_text())
+        assert out["mode"] == "facts" and {f["title"] for f in out["features"]} == {"Drop currency from Pay", "Tighten token expiry"}
+
+    def test_no_changelog_flag_skips_everything(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --no-changelog", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT)
+        assert "Changelog & Blast Radius (specialist" not in audit.prompts[0]
+        assert not (audit.reports / "changelog.json").exists() and "Changelog & Blast Radius" not in (audit.reports / "pr_audit_report.md").read_text()
+        assert audit.diff_calls == []
+
+    def test_breaking_diffs_zero_reads_no_diff_and_reports_path_only_candidates(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --breaking-diffs 0", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT, diff=PROTO_DIFF)
+        assert audit.diff_calls == []
+        out = json.loads((audit.reports / "changelog.json").read_text())
+        assert out["meta"]["diff_prs"] == 0 and out["summary"]["candidates_low"] >= 1
+
+    def test_a_changelog_failure_does_not_fail_the_audit(self, workspace, monkeypatch):
+        with patch("scripts.analyze.run_pr_audit.change_impact.build_facts", side_effect=RuntimeError("boom")):
+            audit = run_audit(workspace, monkeypatch, "https://github.com/o/r", gh=_gh_with(self.ROWS))
+        assert audit.code == 0 and (audit.reports / "pr_audit_report.md").exists() and not (audit.reports / "changelog.json").exists()
+
+    def test_works_together_with_reviewers_and_dry_run(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --reviewers alice --dry-run", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT, diff=PROTO_DIFF)
+        assert audit.code == 0 and (audit.reports / "changelog.json").exists() and (audit.reports / "review_learnings.md").exists()
+
+
+class TestChangelogBitbucket:
+    def test_contract_change_owned_by_a_team_with_a_declared_breaking_title(self, bb_workspace, monkeypatch):
+        bb = FakeBitbucket()
+        inner = bb.__call__
+
+        def with_contract_files(url, auth=None, timeout=None):
+            resp = inner(url, auth=auth, timeout=timeout)
+            if url.split("?")[0].endswith("/diffstat"):
+                resp.json.return_value = {"values": [{"new": {"path": "proto/pay.proto"}, "lines_added": 0, "lines_removed": 1}], "next": ""}
+            return resp
+
+        bb.PRS[1]["title"] = "feat!: remove currency"
+        audit = run_audit(bb_workspace, monkeypatch, "--n-prs 5", learnings=BB_LEARNINGS, bb=with_contract_files, codeowners=CODEOWNERS_TEXT, diff=PROTO_DIFF)
+        assert audit.code == 0
+        out = json.loads((audit.reports / "changelog.json").read_text())
+        kinds = {b["kind"] for b in out["breaking_changes"]}
+        assert {"field_removed", "declared_breaking"} <= kinds
+        assert "platform" in {t for f in out["features"] for t in f["teams"]}
+
+
+# -- Team scoping through the whole audit ----------------------------------------------------------------------------
+
+class TestTeamScopeThroughTheAudit:
+    """Org-config team/board defaults are in the environment (as the job YAML provides them); only --team may use them."""
+
+    def _run(self, workspace, monkeypatch, message, **env):
+        for k, v in {"JIRA_SPACE": "Org Default Team", "JIRA_BOARDS": "42", "PR_AUDIT_TEAM_MEMBERS": "someone", **env}.items():
+            monkeypatch.setenv(k, v)
+        seen = {}
+
+        def keys(config):
+            seen.update({k: config.get(k, "") for k in ("JIRA_SPACE", "JIRA_BOARDS", "PR_AUDIT_TEAM_MEMBERS")})
+            return None  # no scope: the test is about what reaches the fetcher
+        with patch("scripts.analyze.pr_fetcher._resolve_jira_issue_keys", side_effect=keys):
+            audit = run_audit(workspace, monkeypatch, message)
+        return audit, seen
+
+    def test_without_team_the_org_defaults_never_reach_the_fetcher(self, workspace, monkeypatch):
+        audit, seen = self._run(workspace, monkeypatch, "https://github.com/o/r --n-prs 5")
+        assert audit.code == 0 and seen == {"JIRA_SPACE": "", "JIRA_BOARDS": "", "PR_AUDIT_TEAM_MEMBERS": ""}
+
+    def test_a_named_team_reaches_the_fetcher_alone(self, workspace, monkeypatch):
+        audit, seen = self._run(workspace, monkeypatch, "https://github.com/o/r --team Platform")
+        assert audit.code == 0 and seen == {"JIRA_SPACE": "Platform", "JIRA_BOARDS": "", "PR_AUDIT_TEAM_MEMBERS": ""}
+
+    def test_members_reach_the_fetcher_alone(self, workspace, monkeypatch):
+        audit, seen = self._run(workspace, monkeypatch, "https://github.com/o/r --team alice,bob")
+        assert seen == {"JIRA_SPACE": "", "JIRA_BOARDS": "", "PR_AUDIT_TEAM_MEMBERS": "alice,bob"}
+
+    def test_a_bare_team_on_a_jira_run_uses_the_slack_users_team(self, bb_workspace, monkeypatch):
+        monkeypatch.setenv("JIRA_BASE_URL", "https://j")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "t")
+        monkeypatch.setenv("SLACK_USER_TAG", "dev@example.com")
+        with patch("scripts.analyze.run_pr_audit.resolve_user_team", return_value="Distributed") as mine:
+            audit, seen = self._run(bb_workspace, monkeypatch, "--team")
+        assert audit.code == 0 and seen["JIRA_SPACE"] == "Distributed" and seen["JIRA_BOARDS"] == ""
+        assert mine.call_args[0][1] == "dev@example.com"

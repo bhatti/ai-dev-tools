@@ -179,8 +179,9 @@ def validate_plan(plan: dict) -> list[str]:
                 problems.append(f"case {cid} references unknown criterion {ac}")
         if not c.get("expected"):
             problems.append(f"case {cid} has no expected result")
-        if "required" in c and not isinstance(c["required"], bool):
-            problems.append(f"case {cid}: required must be true or false")
+        for flag in ("required", "repro"):
+            if flag in c and not isinstance(c[flag], bool):
+                problems.append(f"case {cid}: {flag} must be true or false")
     return problems
 
 

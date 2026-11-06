@@ -18,7 +18,7 @@ from scripts.analyze import reviewer_scope
 from scripts.common.comment_select import select_comments
 from scripts.common.config import worker_count
 from scripts.common.http_retry import Retryable, call_with_retry
-from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, resolve_current_user_team, search_issues as _jira_search_issues
+from scripts.common.jira_api import resolve_field_id, fetch_board_issue_keys, search_issues as _jira_search_issues
 from scripts.common.issue_fetcher import get_jira_linked_prs
 from scripts.common.pr_classify import enrich_pr_with_metrics as _enrich_pr_with_metrics
 from scripts.common.pr_metadata import _size_bucket as _size_bucket_fn
@@ -368,6 +368,8 @@ def fetch_github_prs(config: dict, n_prs: int = 50, states: list[str] | None = N
             for f in files_list if isinstance(f, dict)
         ]
         _enrich_pr_with_metrics(pr, files=classify_files or None)
+        pr["file_changes"] = classify_files[:MAX_FILE_CHANGES]   # every changed file with its size: the changelog classifies them all
+        pr["files_truncated"] = len(files_list) >= _GH_FILES_LIMIT  # `gh pr list --json files` stops at ~100 files
         prs.append(pr)
 
     # A.1: save inline review comments to artifact
@@ -713,6 +715,8 @@ def fetch_bitbucket_prs(config: dict, n_prs: int = 50, states: list[str] | None 
             for d in diffstat
         ]
         _enrich_pr_with_metrics(pr, files=classify_files or None)
+        pr["file_changes"] = classify_files[:MAX_FILE_CHANGES]
+        pr["files_truncated"] = False
         prs.append(pr)
 
     # A.1: save per-PR comments to artifact
@@ -828,26 +832,26 @@ def _fetch_bb_comments(base_url: str, pr_id: int, auth: tuple | None) -> list[di
 
 
 def _fetch_bb_diffstat(base_url: str, pr_id: int, auth: tuple | None) -> list[dict]:
-    """Fetch diffstat (file-level additions/deletions) for a Bitbucket PR."""
-    import requests as _requests
-
+    """Diffstat (file-level additions/deletions) for a Bitbucket PR, following pagination (100 files per page)."""
     url = f"{base_url}/pullrequests/{pr_id}/diffstat?pagelen=100"
     files: list[dict] = []
-    try:
-        resp = _requests.get(url, auth=auth, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+    for _ in range(_BB_DIFFSTAT_PAGES):
+        if not url:
+            break
+        try:
+            data = _bb_get_page(url, auth)
+        except Exception as e:
+            print(f"[pr-fetch] warn: Bitbucket diffstat for PR {pr_id} cut short ({type(e).__name__}); file list may be incomplete", file=sys.stderr, flush=True)
+            break
         for entry in data.get("values", []):
             new_file = entry.get("new", {}) or {}
             old_file = entry.get("old", {}) or {}
-            path = new_file.get("path", "") or old_file.get("path", "")
             files.append({
-                "path": path,
+                "path": new_file.get("path", "") or old_file.get("path", ""),
                 "lines_added": entry.get("lines_added") or 0,  # null for binary files
                 "lines_removed": entry.get("lines_removed") or 0,
             })
-    except Exception:
-        pass
+        url = data.get("next", "")
     return files
 
 
@@ -976,6 +980,9 @@ def _filter_by_team(prs: list[dict], team_str: str, tracker: str = "github") -> 
 # --reviewers: the pure parts (resolving names to people, queries, matching) are in reviewer_scope.py; here are the
 # calls that need the tracker. GitHub narrows PRs with search qualifiers, Bitbucket with BBQL on assigned reviewers
 # (it cannot filter on commenters, so a bounded scan of commented PRs covers those).
+MAX_FILE_CHANGES = 400      # changed files kept per PR (path + additions/deletions)
+_GH_FILES_LIMIT = 100       # `gh pr list --json files` returns at most about this many files per PR
+_BB_DIFFSTAT_PAGES = 10     # Bitbucket diffstat pages (100 files each) followed per PR
 _REVIEWER_OVERSCAN = 10
 _REVIEWER_SCAN_CAP = 2000   # commented PRs examined for non-assigned commenters, whatever --n-prs is
 _BB_MEMBER_PAGES = 30       # workspace member pages (100 each) read to resolve names
@@ -1046,14 +1053,6 @@ def _resolve_jira_issue_keys(config: dict) -> tuple[set[str], list[dict]] | None
     if not all([config.get("JIRA_BASE_URL"), config.get("JIRA_EMAIL"), config.get("JIRA_API_TOKEN")]):
         print("[pr-fetch] JIRA creds not set — skipping issue-key filter", flush=True)
         return None
-
-    # Auto-detect team from the current Jira user's account when --board is used but
-    # JIRA_SPACE (team name) hasn't been explicitly configured.
-    if board_str and not team_name:
-        detected = resolve_current_user_team(config)
-        if detected:
-            team_name = detected
-            print(f"[pr-fetch] using auto-detected team '{team_name}' for board filter", flush=True)
 
     keys: set[str] = set()
     all_issues: list[dict] = []

@@ -21,3 +21,7 @@
 9. **Rate-limited target:** the target answers 429 to repeated requests. Pass: the helpers wait and retry; a persistent 429 is blocked infrastructure, not a failed criterion.
 10. **Hung UI phase:** a case waits for an element that never appears. Pass: the wrapper's timeout kills the run, finished cases are kept, the rest are reported as not run.
 11. **Stacked dialogs after login:** a forced password change then a release-notes dialog cover the page. Pass: `login.dismiss` clears them and the cases run; no case is blamed on the dialogs.
+12. **Same failure in many cases:** one broken endpoint fails five cases. Pass: the report lists the five cases and also one "Duplicate findings" row with the count; the pass/fail counts and readiness are unchanged.
+13. **Bug-fix repro that never reproduced:** a `repro` case passes on the baseline and on the candidate. Pass: the delta is UNVERIFIED and the report does not call the fix verified.
+14. **Baseline timeout vs candidate timeout:** the baseline times out on a case and the candidate passes; later a candidate case times out. Pass: the first is INCONCLUSIVE (never FIXED), the second is a failure of the candidate.
+15. **Connection refused on the candidate:** a case fails with ECONNREFUSED. Pass: the report tags it as an environment problem and does not present it as a product defect.

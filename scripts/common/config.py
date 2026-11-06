@@ -48,6 +48,8 @@ DEFAULTS: dict[str, str] = {
     "PR_AUDIT_GH_MILESTONE":          "",
     "PR_AUDIT_FILTER":                "",
     "PR_AUDIT_DRY_RUN":               "",
+    "PR_AUDIT_CHANGELOG":             "",
+    "PR_AUDIT_DIFF_PRS":              "",
     "PR_AUDIT_REVIEWERS":             "",
     "PR_AUDIT_CONTEXT_CHARS":         "",
     "YGS_SKILLS_REPO":                "",
@@ -124,6 +126,8 @@ _ALIASES: list[tuple[str, str]] = [
     ("TeamId",                       "JIRA_SPACE"),   # TeamId → JIRA_SPACE (same concept)
     ("PrAuditFilter",               "PR_AUDIT_FILTER"),
     ("PrAuditDryRun",               "PR_AUDIT_DRY_RUN"),
+    ("PrAuditChangelog",            "PR_AUDIT_CHANGELOG"),
+    ("PrAuditDiffPrs",              "PR_AUDIT_DIFF_PRS"),
     ("PrAuditReviewers",            "PR_AUDIT_REVIEWERS"),
     ("PrAuditContextChars",         "PR_AUDIT_CONTEXT_CHARS"),
     ("PrAuditTeamMembers",          "PR_AUDIT_TEAM_MEMBERS"),

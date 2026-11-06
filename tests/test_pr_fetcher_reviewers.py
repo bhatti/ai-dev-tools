@@ -126,7 +126,9 @@ class FakeBb:
         elif parsed.path.endswith("/pullrequests"):
             q = parse_qs(parsed.query).get("q", [""])[0]
             resp.json.return_value = {"values": self.by_q.get(q, []), "next": ""}
-        else:  # comments / diffstat
+        elif parsed.path.endswith("/diffstat"):
+            resp.json.return_value = {"values": [{"new": {"path": "a.py"}, "lines_added": 3, "lines_removed": 1}], "next": ""}
+        else:  # comments
             resp.json.return_value = {"values": [], "next": ""}
         return resp
 
@@ -369,3 +371,29 @@ class TestEveryRequestedNameIsRepresented:
         out = _interleave([[{"id": 1}, {"id": 2}, {"id": 3}], [{"id": 1}, {"id": 9}]], "id")
         assert [r["id"] for r in out] == [1, 2, 9, 3]
         assert _interleave([], "id") == [] and _interleave([[]], "id") == []
+
+
+class TestFileChangesForTheChangelog:
+    def test_bitbucket_diffstat_follows_pagination(self):
+        from scripts.analyze.pr_fetcher import _fetch_bb_diffstat
+        pages = [{"values": [{"new": {"path": f"a{i}.py"}, "lines_added": 1, "lines_removed": 0} for i in range(100)], "next": "https://bb/next"},
+                 {"values": [{"new": None, "old": {"path": "gone.py"}, "lines_added": None, "lines_removed": 4}], "next": ""}]
+        resp = [MagicMock(status_code=200, json=MagicMock(return_value=p)) for p in pages]
+        with patch("requests.get", side_effect=resp) as get:
+            files = _fetch_bb_diffstat("https://bb", 1, None)
+        assert len(files) == 101 and files[-1] == {"path": "gone.py", "lines_added": 0, "lines_removed": 4} and get.call_count == 2
+
+    def test_prs_carry_every_changed_file_with_its_size(self, bb_config):
+        row = _bb_row(1, participants=[("A", "a", "{u-a}", "acc-a", "REVIEWER", True)])
+        fake = FakeBb({"": [row]})
+        with patch("requests.get", side_effect=fake):
+            prs = fetch_bitbucket_prs(bb_config, n_prs=1)
+        assert prs[0]["file_changes"] == [{"path": "a.py", "additions": 3, "deletions": 1}] and prs[0]["files_truncated"] is False
+
+    def test_github_marks_prs_whose_file_list_hit_the_gh_limit(self, gh_env):
+        row = _gh_row(1)
+        row["files"] = [{"path": f"f{i}.py", "additions": 1, "deletions": 0} for i in range(100)]
+        fake = FakeGh({("merged", ""): [row]})
+        with patch("scripts.analyze.pr_fetcher.subprocess.run", side_effect=fake), patch("scripts.analyze.pr_fetcher._fetch_gh_review_comments", return_value=[]):
+            prs = fetch_github_prs(gh_env, n_prs=1)
+        assert len(prs[0]["file_changes"]) == 100 and prs[0]["files_truncated"] is True

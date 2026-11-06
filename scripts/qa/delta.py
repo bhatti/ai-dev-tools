@@ -5,15 +5,18 @@ Per-case delta (matched by case id):
     fail/fail -> PRE_EXISTING     only candidate -> NEW        only baseline -> REMOVED
     blocked or infra on either side -> INFRA (never a regression)
     not-run / inconclusive on either side -> INCONCLUSIVE
-    baseline fail whose message is a timeout / connection / 502-504 error -> INCONCLUSIVE (not FIXED)
+    baseline fail that is not the product's doing (timeout, connection / 502-504 error, broken harness: see
+    verdict.failure_kind) -> INCONCLUSIVE (not FIXED)
+    pass/pass on a case marked ``repro`` (a bug reproduction) -> UNVERIFIED: the bug never showed on the baseline
 
 Run status precedence: BLOCKED (a side executed nothing) > REGRESSION > NEW_FAILURES (a case only the candidate
-has, failing) > INCOMPLETE (infra, blocked, inconclusive or removed cases) > PRE_EXISTING (fails on both sides)
+has, failing) > UNVERIFIED (a repro case passes on the baseline) > INCOMPLETE (infra, blocked, inconclusive or removed cases) > PRE_EXISTING (fails on both sides)
 > FIXED > CLEAN. CLEAN is therefore impossible when a side executed nothing or any case could not be compared.
 
 Usage:
     python3 -m scripts.qa.delta --baseline base.jsonl --candidate cand.jsonl \
-        [--baseline-log b.log --candidate-log c.log] [--perf-baseline b.json --perf-candidate c.json] [--noise noise.txt] [--plan plan.json] --out delta.json
+        [--baseline-log b.log --candidate-log c.log] [--perf-baseline b.json --perf-candidate c.json] [--noise noise.txt] \
+        [--plan plan.json] [--strict-repro] [--failure-patterns patterns.json] --out delta.json
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ import re
 import sys
 from pathlib import Path
 
+from scripts.common.text_utils import normalize_log_line
+from scripts.qa import verdict
 from scripts.qa.model import _NO_RESULT, case_outcomes, load_jsonl, summarize
 
 PERF_REGRESSION_RATIO = 1.20
@@ -35,12 +40,7 @@ _ERROR_LEVELS = {"error", "err", "fatal", "critical", "crit", "panic", "severe",
 _INCREASE_FACTOR, _INCREASE_MIN = 3, 5
 
 
-# A baseline failure whose message names a connectivity or gateway problem says nothing about the product: do not
-# let it turn a candidate pass into FIXED. (The candidate side keeps such failures: a timeout there is a regression.)
-_TRANSIENT = re.compile(r"timed? ?out|timeout|ECONNREFUSED|ECONNRESET|connection (?:refused|reset)|\b50[234]\b|bad gateway|service unavailable", re.I)
-
-
-def classify_case(base: dict | None, cand: dict | None) -> str:
+def classify_case(base: dict | None, cand: dict | None, repro: bool = False, patterns: dict | None = None) -> str:
     if base is None and cand is None:
         raise ValueError("both sides missing")
     if base is None:
@@ -52,32 +52,17 @@ def classify_case(base: dict | None, cand: dict | None) -> str:
         return "INFRA"
     if b in ("not-run", "inconclusive") or c in ("not-run", "inconclusive"):
         return "INCONCLUSIVE"
-    if b == "fail" and any(_TRANSIENT.search(m) for m in base.get("messages", [])):
+    # A baseline failure that is not the product's doing says nothing about the candidate: never let it become FIXED.
+    # (The candidate side keeps such failures: a timeout there is a regression.)
+    if b == "fail" and any(verdict.failure_kind(m, "baseline", patterns) != "product" for m in base.get("messages", [])):
         return "INCONCLUSIVE"
     if b == "pass" and c == "pass":
-        return "BOTH_PASS"
+        return "UNVERIFIED" if repro else "BOTH_PASS"
     if b == "pass" and c == "fail":
         return "REGRESSION"
     if b == "fail" and c == "pass":
         return "FIXED"
     return "PRE_EXISTING"
-
-
-_CODE_TABLE = str.maketrans("0123456789", "abcdefghij")
-
-
-def normalize_log_line(line: str) -> str:
-    """Strip volatile tokens so the same error clusters across runs."""
-    s = line.strip().lower()
-    s = re.sub(r"\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?z?", "<ts>", s)
-    s = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", s)
-    s = re.sub(r"\b[0-9a-hjkmnp-tv-z]{26}\b", "<ulid>", s)
-    s = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b", "<ip>", s)
-    s = re.sub(r"\b[0-9a-f]{12,}\b", "<hex>", s)
-    # Keep HTTP-ish status codes distinguishable (status 404 vs 500), then drop every other number.
-    s = re.sub(r"(?i)\b(status|code|http)([\s:=]*)([1-5]\d\d)\b", lambda m: f"{m.group(1)}{m.group(2)}" + m.group(3).translate(_CODE_TABLE), s)
-    s = re.sub(r"\d+", "N", s)  # also catches digits glued to units, e.g. 31ms
-    return s[:200]
 
 
 def log_errors(text: str, noise: list[str] | None = None) -> dict[str, dict]:
@@ -131,8 +116,10 @@ def perf_regressions(base: dict[str, float], cand: dict[str, float], ratio: floa
     return out
 
 
-def compare(base_records: list[dict], cand_records: list[dict], plan_ids: set[str] | None = None) -> dict:
-    """Per-case delta and run status. With ``plan_ids`` only planned cases count as executed (generated smoke checks do not)."""
+def compare(base_records: list[dict], cand_records: list[dict], plan_ids: set[str] | None = None,
+            repro_ids: set[str] | None = None, patterns: dict | None = None) -> dict:
+    """Per-case delta and run status. With ``plan_ids`` only planned cases count as executed (generated smoke checks do not).
+    ``repro_ids``: cases that reproduce a bug; they must fail on the baseline, else they prove nothing (UNVERIFIED)."""
     base, cand = case_outcomes(base_records), case_outcomes(cand_records)
     for cid in plan_ids or ():  # a planned case nobody ran is not "fine": it makes the comparison INCOMPLETE
         base.setdefault(cid, {**_NO_RESULT, "messages": ["no result was recorded for this planned case"]})
@@ -140,7 +127,7 @@ def compare(base_records: list[dict], cand_records: list[dict], plan_ids: set[st
     rows = []
     for cid in sorted(set(base) | set(cand)):
         rows.append({"case": cid, "baseline": (base.get(cid) or {}).get("outcome"), "candidate": (cand.get(cid) or {}).get("outcome"),
-                     "delta": classify_case(base.get(cid), cand.get(cid)),
+                     "delta": classify_case(base.get(cid), cand.get(cid), cid in (repro_ids or ()), patterns),
                      "baseline_evidence": (base.get(cid) or {}).get("evidence"), "candidate_evidence": (cand.get(cid) or {}).get("evidence"),
                      "messages": (cand.get(cid) or base.get(cid) or {}).get("messages", [])})
     counts: dict[str, int] = {}
@@ -156,6 +143,8 @@ def compare(base_records: list[dict], cand_records: list[dict], plan_ids: set[st
         status, why = "REGRESSION", f"{counts['REGRESSION']} case(s) pass on baseline and fail on candidate"
     elif new_failing:
         status, why = "NEW_FAILURES", f"{new_failing} case(s) exist only on the candidate and fail"
+    elif counts.get("UNVERIFIED"):
+        status, why = "UNVERIFIED", f"{counts['UNVERIFIED']} repro case(s) pass on the baseline: the bug was never reproduced, so the candidate's pass proves nothing"
     elif incomplete:
         status, why = "INCOMPLETE", f"{incomplete} case(s) could not be compared (infrastructure, blocked, inconclusive or removed)"
     elif counts.get("PRE_EXISTING"):
@@ -176,11 +165,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--perf-baseline", default="")
     p.add_argument("--perf-candidate", default="")
     p.add_argument("--noise", default="", help="file with extra regexes (one per line) for known-harmless log lines")
-    p.add_argument("--plan", default="", help="plan.json: only planned cases count as executed")
+    p.add_argument("--plan", default="", help="plan.json: only planned cases count as executed; cases with repro:true must fail on the baseline")
+    p.add_argument("--strict-repro", action="store_true", help="treat every case as a bug reproduction (it must fail on the baseline)")
+    p.add_argument("--failure-patterns", default="", help="JSON file overriding the failure-kind regexes (see scripts.qa.verdict)")
     p.add_argument("--out", default="delta.json")
     a = p.parse_args(argv)
-    plan_ids = {c["id"] for c in json.loads(Path(a.plan).read_text(encoding="utf-8")).get("cases", []) if c.get("id")} if a.plan else None
-    result = compare(load_jsonl(a.baseline), load_jsonl(a.candidate), plan_ids)
+    plan_cases = json.loads(Path(a.plan).read_text(encoding="utf-8")).get("cases", []) if a.plan else []
+    plan_ids = {c["id"] for c in plan_cases if c.get("id")} if a.plan else None
+    base_records, cand_records = load_jsonl(a.baseline), load_jsonl(a.candidate)
+    repro_ids = {c["case"] for c in base_records + cand_records} | (plan_ids or set()) if a.strict_repro else {c["id"] for c in plan_cases if c.get("repro") is True}
+    try:
+        patterns = verdict.load_patterns(a.failure_patterns)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}))
+        return 2
+    result = compare(base_records, cand_records, plan_ids, repro_ids, patterns)
     noise = [ln.strip() for ln in Path(a.noise).read_text().splitlines() if ln.strip()] if a.noise else None
     read = lambda f: Path(f).read_text(encoding="utf-8", errors="replace") if f and Path(f).exists() else ""
     result["new_log_errors"] = error_changes(read(a.baseline_log), read(a.candidate_log), noise)

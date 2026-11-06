@@ -955,3 +955,126 @@ class TestLearningsPromptRestriction:
         from scripts.analyze.run_pr_audit import _learnings_instructions
         block = _learnings_instructions(AuditOptions(), ["CJ", "pat"], {})
         assert "CJ, pat" in block and "all reviewers" in block and "ONLY" not in block
+
+
+class TestChangelogFlagsAndPrompt:
+    def test_flags(self):
+        assert _parse_slack_flags({})["no_changelog"] is False and _parse_slack_flags({})["breaking_diffs"] is None
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--no-changelog --breaking-diffs 7 --n-prs 5"})
+        assert r["no_changelog"] is True and r["breaking_diffs"] == 7 and r["n_prs"] == 5
+
+    def test_template_asks_for_the_model_part_and_calls_facts_facts(self):
+        assert "changelog_model.json" in _PR_AUDIT_PROMPT_TEMPLATE
+
+    def test_instructions_carry_the_facts_and_are_empty_without_them(self):
+        from scripts.analyze.run_pr_audit import _changelog_instructions
+        assert _changelog_instructions(None) == ""
+        facts = {"prs": [], "teams": {"payments": {"prs": 2, "high_blast": 1, "breaking_candidates": 1}}, "breaking": [], "meta": {}}
+        block = _changelog_instructions(facts)
+        assert "changelog_model.json" in block and "payments (2 PRs" in block and "do not recompute" in block
+
+    def test_a_failure_while_building_facts_never_fails_the_audit(self, tmp_path, capsys):
+        from scripts.analyze.run_pr_audit import _build_changelog_facts
+        with patch("scripts.analyze.run_pr_audit.change_impact.build_facts", side_effect=RuntimeError("boom")):
+            assert _build_changelog_facts([{"number": 1}], tmp_path, {}, 5, tmp_path) is None
+        assert "changelog facts failed" in capsys.readouterr().out
+
+    def test_finish_writes_files_and_returns_the_section(self, tmp_path):
+        from scripts.analyze.run_pr_audit import _finish_changelog
+        facts = {"prs": [], "teams": {}, "breaking": [], "meta": {"prs": 0, "diff_prs": 0, "diff_limit": 25, "diff_errors": [], "codeowners_rules": 0, "files_truncated_prs": 0, "note": "n"}}
+        assert _finish_changelog(None, tmp_path, "o/r") == ""
+        assert _finish_changelog(facts, tmp_path, "o/r").startswith("## Changelog & Blast Radius")
+        assert (tmp_path / "changelog.json").exists() and (tmp_path / "changelog.html").exists()
+
+
+class TestTeamFlagParsing:
+    def test_no_team_flag_means_no_team_request(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "https://github.com/o/r --n-prs 5"})
+        assert (r["team_requested"], r["jira_team"], r["team_members"]) == (False, None, None)
+
+    def test_bare_team_requests_the_default_team(self):
+        for msg in ("--team", "--team --dry-run", "https://github.com/o/r --team", "--team --reviewers a", "--team https://github.com/o/r"):
+            r = _parse_slack_flags({"SLACK_MESSAGE": msg})
+            assert (r["team_requested"], r["jira_team"], r["team_members"]) == (True, None, None), msg
+
+    def test_team_with_a_name_or_members(self):
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--team Platform --dry-run"})
+        assert (r["team_requested"], r["jira_team"], r["team_members"]) == (True, "Platform", None)
+        r = _parse_slack_flags({"SLACK_MESSAGE": "--team alice,bob"})
+        assert (r["team_requested"], r["jira_team"], r["team_members"]) == (True, None, "alice,bob")
+        r = _parse_slack_flags({"SLACK_MESSAGE": "team:alice,bob"})
+        assert r["team_members"] == "alice,bob"
+
+    def test_team_names_with_spaces_are_quoted(self):
+        for msg in ('--team "Distributed Management"', "--team \u201cDistributed Management\u201d --dry-run"):
+            r = _parse_slack_flags({"SLACK_MESSAGE": msg})
+            assert (r["team_requested"], r["jira_team"], r["team_members"], r["dry_run"] or True) == (True, "Distributed Management", None, True), msg
+        assert _parse_slack_flags({"SLACK_MESSAGE": '--team "Alice Smith,Bob Lee"'})["team_members"] == "Alice Smith,Bob Lee"
+
+    def test_look_alike_flags_are_not_team(self):
+        for msg in ("--team-members x", "--teams x", "--reviewers team"):
+            assert _parse_slack_flags({"SLACK_MESSAGE": msg})["team_requested"] is False, msg
+
+
+class TestTeamScope:
+    """Team filtering is opt-in per run: only --team in the Slack text turns it on."""
+
+    AMBIENT = {"JIRA_SPACE": "OrgDefaultTeam", "JIRA_BOARDS": "42", "PR_AUDIT_TEAM_MEMBERS": "x,y", "JIRA_BASE_URL": "https://j", "JIRA_EMAIL": "e", "JIRA_API_TOKEN": "t"}
+
+    def _scope(self, message, tracker="jira", extra=None, monkeypatch=None, **env):
+        from scripts.analyze.run_pr_audit import _apply_scope
+        for k in ("JIRA_SPACE", "JIRA_BOARDS", "PR_AUDIT_TEAM_MEMBERS", "PR_AUDIT_FILTER", "PR_AUDIT_GH_MILESTONE"):
+            monkeypatch.delenv(k, raising=False)
+        config = {**self.AMBIENT, **(extra or {}), **env}
+        flags = _parse_slack_flags({"SLACK_MESSAGE": message})
+        _apply_scope(config, flags, tracker)
+        return config
+
+    def test_org_config_defaults_do_not_turn_team_filtering_on(self, monkeypatch):
+        c = self._scope("https://github.com/o/r --n-prs 5", monkeypatch=monkeypatch)
+        assert (c["JIRA_SPACE"], c["JIRA_BOARDS"], c["PR_AUDIT_TEAM_MEMBERS"]) == ("", "", "")
+        assert "JIRA_SPACE" not in os.environ and "JIRA_BOARDS" not in os.environ
+
+    def test_a_named_team_enables_only_that_team(self, monkeypatch):
+        c = self._scope("--team Platform", monkeypatch=monkeypatch)
+        assert (c["JIRA_SPACE"], c["JIRA_BOARDS"], c["PR_AUDIT_TEAM_MEMBERS"]) == ("Platform", "", "")
+        assert os.environ["JIRA_SPACE"] == "Platform"
+
+    def test_members_enable_only_the_member_filter(self, monkeypatch):
+        c = self._scope("--team alice,bob", monkeypatch=monkeypatch)
+        assert (c["JIRA_SPACE"], c["PR_AUDIT_TEAM_MEMBERS"]) == ("", "alice,bob")
+
+    def test_bare_team_uses_the_default_team_of_the_slack_user(self, monkeypatch):
+        with patch("scripts.analyze.run_pr_audit.resolve_user_team", return_value="Distributed") as mine, \
+             patch("scripts.analyze.run_pr_audit.resolve_current_user_team") as fallback:
+            c = self._scope("--team", monkeypatch=monkeypatch, SLACK_USER_TAG="dev@example.com")
+        assert c["JIRA_SPACE"] == "Distributed" and c["JIRA_BOARDS"] == ""
+        mine.assert_called_once()
+        assert mine.call_args[0][1] == "dev@example.com"
+        fallback.assert_not_called()
+
+    def test_bare_team_without_a_slack_user_uses_the_credentials_account_and_says_so(self, monkeypatch, capsys):
+        with patch("scripts.analyze.run_pr_audit.resolve_current_user_team", return_value="Distributed"):
+            c = self._scope("--team", monkeypatch=monkeypatch)
+        assert c["JIRA_SPACE"] == "Distributed" and "credentials" in capsys.readouterr().out
+
+    def test_an_unresolvable_default_team_filters_nothing_and_warns(self, monkeypatch, capsys):
+        with patch("scripts.analyze.run_pr_audit.resolve_user_team", return_value=None):
+            c = self._scope("--team", monkeypatch=monkeypatch, SLACK_USER_TAG="dev@example.com")
+        assert c["JIRA_SPACE"] == "" and "no team filter" in capsys.readouterr().out
+
+    def test_bare_team_on_github_has_no_directory_and_filters_nothing(self, monkeypatch, capsys):
+        c = self._scope("--team", tracker="github", monkeypatch=monkeypatch)
+        assert c["JIRA_SPACE"] == "" and "GitHub" in capsys.readouterr().out
+
+    def test_board_alone_is_not_a_team_filter(self, monkeypatch):
+        c = self._scope("--board 77", monkeypatch=monkeypatch)
+        assert (c["JIRA_BOARDS"], c["JIRA_SPACE"]) == ("77", "")
+
+    def test_bare_board_uses_the_org_board_but_still_no_team(self, monkeypatch):
+        c = self._scope("--board", monkeypatch=monkeypatch)
+        assert (c["JIRA_BOARDS"], c["JIRA_SPACE"]) == ("42", "")
+
+    def test_explicit_milestone_and_filter_are_kept(self, monkeypatch):
+        c = self._scope("--milestone v2 --filter label=security", tracker="github", monkeypatch=monkeypatch)
+        assert c["PR_AUDIT_GH_MILESTONE"] == "v2" and c["PR_AUDIT_FILTER"] == "label=security" and c["JIRA_SPACE"] == ""

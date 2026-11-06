@@ -364,3 +364,41 @@ class TestRunSummaryLine:
             import scripts.analyze.post_pr_audit as m
             m.main()
         assert "dry run" in posted[0].lower()
+
+
+class TestChangelogInSlack:
+    def _setup(self, tmp_path, with_changelog=True):
+        from scripts.analyze import changelog_report as cr
+        config = _setup_workspace(tmp_path, _SAMPLE_FINDINGS)
+        reports = Path(config["WORKSPACE_DIR"]) / "reports"
+        if with_changelog:
+            f = {"prs": [{"number": 1, "title": "Pay", "url": "", "author": "d", "state": "merged", "merged_at": "", "files": 1, "loc": 1, "files_truncated": False,
+                          "classes": {}, "areas": [], "teams": ["payments"], "owners": [], "owner_source": "codeowners",
+                          "blast": {"level": "high", "external": True, "internal": [], "reasons": []}, "diff_read": True,
+                          "signals": [{"kind": "field_removed", "file": "p.proto", "evidence": "x", "confidence": "high", "detail": ""}], "consumers": []}],
+                 "teams": {"payments": {"prs": 1, "high_blast": 1, "breaking_candidates": 1}}, "breaking": [],
+                 "meta": {"prs": 1, "diff_prs": 1, "diff_limit": 25, "diff_errors": [], "codeowners_rules": 1, "files_truncated_prs": 0, "note": "n"}}
+            (reports / "changelog.json").write_text(json.dumps(cr.merge(f, None)))
+        return config
+
+    def _post(self, config, extra=None):
+        posted = []
+        with patch("scripts.analyze.post_pr_audit.load_config", return_value={**config, **(extra or {})}), \
+             patch("scripts.analyze.post_pr_audit.post_report", side_effect=lambda cfg, s, *a, **k: posted.append(s) or True):
+            import scripts.analyze.post_pr_audit as m
+            m.main()
+        return posted[0]
+
+    def test_digest_has_one_changelog_line(self, tmp_path):
+        text = self._post(self._setup(tmp_path))
+        assert "Changelog & blast radius" in text and "field_removed in PR #1" in text
+
+    def test_no_changelog_no_line(self, tmp_path):
+        assert "Changelog & blast radius" not in self._post(self._setup(tmp_path, with_changelog=False))
+
+    def test_full_report_drops_the_long_section_but_keeps_the_rest(self, tmp_path):
+        config = self._setup(tmp_path)
+        (Path(config["WORKSPACE_DIR"]) / "reports" / "pr_audit_report.md").write_text(
+            _SAMPLE_REPORT_MD + "\n### Changelog & Blast Radius\n\nLONG-SECTION-BODY\n\n### Next\n\nkept\n")
+        text = self._post(config, {"AUDIT_FULL_REPORT": "1"})
+        assert "LONG-SECTION-BODY" not in text

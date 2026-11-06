@@ -394,3 +394,53 @@ class TestTransientBaselineFailure:
     def test_a_candidate_timeout_is_still_a_regression(self):
         cand = {"outcome": "fail", "infra": False, "messages": ["request timed out after 30s"]}
         assert dl.classify_case({"outcome": "pass", "infra": False, "messages": []}, cand) == "REGRESSION"
+
+
+class TestStrictRepro:
+    def test_a_repro_case_that_passes_on_the_baseline_is_unverified(self):
+        base, cand = [{"case": "C1", "outcome": "pass"}], [{"case": "C1", "outcome": "pass"}]
+        d = dl.compare(base, cand, {"C1"}, repro_ids={"C1"})
+        assert d["cases"][0]["delta"] == "UNVERIFIED" and d["status"] == "UNVERIFIED"
+        assert "never reproduced" in d["reason"]
+
+    def test_a_repro_case_that_fails_then_passes_is_fixed(self):
+        d = dl.compare([{"case": "C1", "outcome": "fail", "message": "bug"}], [{"case": "C1", "outcome": "pass"}], {"C1"}, repro_ids={"C1"})
+        assert d["status"] == "FIXED"
+
+    def test_ordinary_cases_are_not_affected(self):
+        d = dl.compare([{"case": "C1", "outcome": "pass"}], [{"case": "C1", "outcome": "pass"}], {"C1"})
+        assert d["status"] == "CLEAN"
+
+    def test_regression_still_outranks_unverified(self):
+        base = [{"case": "C1", "outcome": "pass"}, {"case": "C2", "outcome": "pass"}]
+        cand = [{"case": "C1", "outcome": "pass"}, {"case": "C2", "outcome": "fail"}]
+        assert dl.compare(base, cand, {"C1", "C2"}, repro_ids={"C1"})["status"] == "REGRESSION"
+
+    def test_plan_flag_and_global_switch_select_repro_cases(self, tmp_path):
+        plan = tmp_path / "plan.json"
+        plan.write_text(json.dumps({"cases": [{"id": "C1", "repro": True}, {"id": "C2"}]}))
+        base = tmp_path / "b.jsonl"
+        cand = tmp_path / "c.jsonl"
+        for f in (base, cand):
+            f.write_text("\n".join(json.dumps({"case": c, "outcome": "pass"}) for c in ("C1", "C2")))
+        out = tmp_path / "d.json"
+        dl.main(["--baseline", str(base), "--candidate", str(cand), "--plan", str(plan), "--out", str(out)])
+        rows = {r["case"]: r["delta"] for r in json.loads(out.read_text())["cases"]}
+        assert rows == {"C1": "UNVERIFIED", "C2": "BOTH_PASS"}
+        dl.main(["--baseline", str(base), "--candidate", str(cand), "--plan", str(plan), "--strict-repro", "--out", str(out)])
+        assert {r["delta"] for r in json.loads(out.read_text())["cases"]} == {"UNVERIFIED"}
+
+
+class TestTransientBaselineFailures:
+    def test_environment_trouble_on_the_baseline_is_inconclusive_not_fixed(self):
+        assert dl.classify_case({"outcome": "fail", "messages": ["ECONNREFUSED"]}, {"outcome": "pass", "messages": []}) == "INCONCLUSIVE"
+        assert dl.classify_case({"outcome": "fail", "messages": ["request timed out"]}, {"outcome": "pass", "messages": []}) == "INCONCLUSIVE"
+
+    def test_the_same_text_on_the_candidate_is_still_a_regression(self):
+        assert dl.classify_case({"outcome": "pass", "messages": []}, {"outcome": "fail", "messages": ["request timed out"]}) == "REGRESSION"
+
+    def test_a_harness_error_on_the_baseline_is_inconclusive(self):
+        assert dl.classify_case({"outcome": "fail", "messages": ["Traceback (most recent call last): harness"]}, {"outcome": "pass", "messages": []}) == "INCONCLUSIVE"
+
+    def test_a_real_product_failure_on_the_baseline_is_fixed(self):
+        assert dl.classify_case({"outcome": "fail", "messages": ["expected 409 got 200"]}, {"outcome": "pass", "messages": []}) == "FIXED"

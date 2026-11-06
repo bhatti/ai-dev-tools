@@ -14,6 +14,15 @@ import pytest
 from scripts.common.models import resolve_model
 
 
+@pytest.fixture(autouse=True)
+def _isolated_environ():
+    """Scripts publish resolved options to os.environ (as in a pod); keep one test's from reaching the next."""
+    saved = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 @pytest.fixture
 def tmp_workspace(tmp_path):
     """Provide a temporary workspace directory and set WORKSPACE_DIR env var."""
