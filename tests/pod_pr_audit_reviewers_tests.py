@@ -17,7 +17,7 @@ pr-audit-no-reviewers-full-bb    same without --reviewers: everyone's learnings,
 pr-audit-reviewers-nomatch-bb    a name nobody has: the audit still runs, says so, and shows everyone's learnings
 pr-audit-team-scope-bb           real Jira + Bitbucket: no --team => no filter (org defaults ignored); bare --team => the Slack user's default team; unknown user => no filter
 pr-audit-changelog-gh            changelog facts on a real public GitHub repo with CODEOWNERS (PAR_CL_ORG/PAR_CL_REPO, default cli/cli): teams from
-                                 CODEOWNERS, blast radius, diffs read for risky PRs, changelog.{json,md,html} written
+                                 CODEOWNERS, blast radius, diffs read for risky PRs, changelog.{json,md,html} and blast_radius.{md,html} written
 Env (each test is skipped when its names are not set): PAR_BB_REVIEWERS (names to resolve in your Bitbucket workspace, comma-separated),
 PAR_GH_ORG / PAR_GH_REPO / PAR_GH_REVIEWER (a GitHub repo and a login that reviewed PRs in it).
 """
@@ -131,7 +131,7 @@ if not rules: problems.append("no CODEOWNERS rules found in the checkout")
 if not all(r["teams"] for r in facts["prs"]): problems.append("a PR without a team")
 if any(r["blast"]["level"] not in ("low", "medium", "high") for r in facts["prs"]): problems.append("bad blast level")
 if facts["meta"]["diff_prs"] < 1: problems.append(f"no diff was read: {facts['meta']['diff_errors']}")
-for name in ("changelog.json", "changelog.md", "changelog.html"):
+for name in ("changelog.json", "changelog.md", "changelog.html", "blast_radius.md", "blast_radius.html"):
     if not (reports / name).stat().st_size: problems.append(name + " is empty")
 if not section.startswith("## Changelog & Blast Radius"): problems.append("section heading missing")
 print(f"::add-task-context PRS::{len(prs)}")
@@ -231,7 +231,7 @@ def build_tests(h: ModuleType) -> dict:
         "ents = json.load(open(R + '/review_learnings.json')).get('entries', []) if os.path.exists(R + '/review_learnings.json') else []\n"
         "learn = ('review_learnings.md', 'review_learnings.html') if (opts['reviewers'] or ents) else ()\n"
         "for f in ('pr_audit_report.md', 'pr_audit_report.html', *learn,\n"
-        "          'skill_updates_report.md', 'skill_updates_report.html', 'run_options.json', 'changelog.md', 'changelog.html', 'changelog.json', 'change_facts.json'):\n"
+        "          'skill_updates_report.md', 'skill_updates_report.html', 'run_options.json', 'changelog.md', 'changelog.html', 'changelog.json', 'blast_radius.md', 'blast_radius.html', 'change_facts.json'):\n"
         "    if not os.path.exists(R + '/' + f) or os.path.getsize(R + '/' + f) == 0: issues.append('missing report ' + f)\n"
         "cl = json.load(open(R + '/changelog.json')) if os.path.exists(R + '/changelog.json') else {}\n"
         "if cl.get('mode') not in ('model', 'facts'): issues.append('changelog mode missing: ' + str(cl.get('mode')))\n"

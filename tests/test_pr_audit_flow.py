@@ -5,7 +5,6 @@ files; only the network/LLM edges are faked (`gh`, the model, git push, Slack).
 """
 
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -145,6 +144,12 @@ def kb_files(workspace):
 
 
 class TestWithoutReviewers:
+    def test_the_learnings_report_exists_even_when_nothing_was_extracted(self, workspace, monkeypatch):
+        audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --n-prs 10", learnings={"entries": [], "reviewer_profiles": []})
+        assert audit.code == 0
+        assert "No learnings were extracted" in (audit.reports / "review_learnings.md").read_text()
+        assert (audit.reports / "review_learnings.html").exists()
+
     def test_audit_then_pr_includes_everyones_learnings(self, workspace, monkeypatch):
         audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --n-prs 10")
         assert audit.code == 0
@@ -382,22 +387,25 @@ class TestChangelogGitHub:
             _row_files(12, [("web/button.ts", 2, 1)], "Button colour")]
 
     def test_section_files_teams_blast_and_breaking_candidate(self, workspace, monkeypatch):
-        model = {"features": [{"title": "Pay API trimmed", "summary": "Removes the currency field", "prs": [10], "category": "platform"}]}
+        model = {"themes": [{"title": "Pay API trimmed", "summary": "Removes the currency field",
+                             "items": [{"pr": 10, "type": "platform", "summary": "Pay no longer returns currency"}]}],
+                 "breaking": [{"pr": 10, "kind": "field_removed", "confidence": "high", "summary": "Clients reading currency from Pay break"}]}
         audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --n-prs 10", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT,
                           model_changelog=model, diff=PROTO_DIFF)
         assert audit.code == 0
         report = (audit.reports / "pr_audit_report.md").read_text()
         assert report.count("## Changelog & Blast Radius") == 1
         out = json.loads((audit.reports / "changelog.json").read_text())
-        pay = next(f for f in out["features"] if f["title"] == "Pay API trimmed")
-        assert pay["teams"] == ["platform"] and pay["blast"]["external"] is True
-        assert [(b["kind"], b["confidence"]) for b in pay["breaking"]] == [("field_removed", "high")]
-        token = next(f for f in out["features"] if 11 in f["prs"])
-        assert token["teams"] == ["identity"] and token["blast"]["level"] == "high"  # auth is always high
-        assert all(12 not in f["prs"] for f in out["features"])  # a low-blast button change is not a notable change
-        for name in ("changelog.md", "changelog.html", "change_facts.json"):
+        items = {i["pr"]: i for t in out["themes"] for i in t["items"]}
+        assert sorted(items) == [10, 11, 12]  # the changelog lists every PR, low-blast ones included
+        assert items[10]["summary"] == "Pay no longer returns currency" and items[10]["team"] == "platform"
+        assert items[11]["team"] == "identity" and items[11]["blast"] == "high"  # auth is always high
+        assert [(b["kind"], b["confidence"], b["what"]) for b in out["breaking_changes"]] == [("field_removed", "high", "Clients reading currency from Pay break")]
+        assert out["breaking_changes"][0]["url"] and "/10" in out["breaking_changes"][0]["url"]
+        for name in ("changelog.md", "changelog.html", "blast_radius.md", "blast_radius.html", "change_facts.json"):
             assert (audit.reports / name).exists()
-        assert "changelog_model.json" in audit.prompts[0] and "#10" in audit.prompts[0] and "platform" in audit.prompts[0]
+        assert "Blast radius" not in (audit.reports / "changelog.md").read_text()
+        assert "changelog_model.json" in audit.prompts[0] and "#10" in audit.prompts[0] and "#12" in audit.prompts[0]  # the model sees every PR
         assert out["summary"]["breaking_high"] == 1 and audit.diff_calls == ["10"]  # only the contract PR's diff is read
 
     def test_the_section_is_also_in_the_html_report(self, workspace, monkeypatch):
@@ -407,7 +415,7 @@ class TestChangelogGitHub:
     def test_without_a_model_file_the_changelog_is_built_from_facts(self, workspace, monkeypatch):
         audit = run_audit(workspace, monkeypatch, "https://github.com/o/r", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT, diff=PROTO_DIFF)
         out = json.loads((audit.reports / "changelog.json").read_text())
-        assert out["mode"] == "facts" and {f["title"] for f in out["features"]} == {"Drop currency from Pay", "Tighten token expiry"}
+        assert out["mode"] == "facts" and sorted(i["pr"] for t in out["themes"] for i in t["items"]) == [10, 11, 12]
 
     def test_no_changelog_flag_skips_everything(self, workspace, monkeypatch):
         audit = run_audit(workspace, monkeypatch, "https://github.com/o/r --no-changelog", gh=_gh_with(self.ROWS), codeowners=CODEOWNERS_TEXT)
@@ -448,7 +456,7 @@ class TestChangelogBitbucket:
         out = json.loads((audit.reports / "changelog.json").read_text())
         kinds = {b["kind"] for b in out["breaking_changes"]}
         assert {"field_removed", "declared_breaking"} <= kinds
-        assert "platform" in {t for f in out["features"] for t in f["teams"]}
+        assert "platform" in {t for b in out["breaking_changes"] for t in b["teams"]}
 
 
 # -- Team scoping through the whole audit ----------------------------------------------------------------------------

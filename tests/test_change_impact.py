@@ -35,6 +35,15 @@ class TestTeamsAndOwners:
         r = facts([pr(2, [("misc/a.py", 1, 1)])], rules=[])["prs"][0]
         assert r["teams"] == ["area:misc"] and r["owner_source"] == "area"
 
+    def test_a_pr_spanning_many_areas_keeps_only_its_biggest_owners(self):
+        files = [("billing/a.py", 1, 1), ("billing/b.py", 1, 1), ("auth/a.py", 1, 1), ("web/x.ts", 1, 1), ("proto/p.proto", 1, 1), ("search/s.py", 1, 1)]
+        r = facts([pr(1, files)])["prs"][0]
+        assert len(r["teams"]) == ci.MAX_TEAMS and r["teams"][0] == "payments"
+
+    def test_a_pr_counts_once_for_the_team_owning_most_of_it(self):
+        f = facts([pr(1, [("billing/a.py", 1, 1), ("billing/b.py", 1, 1), ("web/x.ts", 1, 1)])])
+        assert {t: s["prs"] for t, s in f["teams"].items()} == {"payments": 1}
+
     def test_team_summary_counts_prs_per_team(self):
         f = facts([pr(1, [("billing/a.py", 1, 1)]), pr(2, [("billing/b.py", 1, 1)]), pr(3, [("web/x.ts", 1, 1)])])
         assert f["teams"]["payments"]["prs"] == 2 and f["teams"]["frontend"]["prs"] == 1
@@ -121,10 +130,11 @@ class TestConsumers:
 
 
 class TestPromptFacts:
-    def test_only_significant_prs_are_listed_and_capped(self):
-        f = facts([pr(i, [("search/a.py", 1, 1)]) for i in range(1, 30)] + [pr(99, [("auth/x.py", 1, 1)])])
-        text = ci.prompt_facts(f, max_lines=5)
-        assert "#99" in text and text.count("\n") < 12 and "teams:" in text.lower()
+    def test_every_pr_is_listed_riskiest_first_and_the_list_is_capped(self):
+        f = facts([pr(i, [("search/a.py", 1, 1)], title=f"change {i}") for i in range(1, 30)] + [pr(99, [("auth/x.py", 1, 1)])])
+        text = ci.prompt_facts(f)
+        assert all(f"#{i} " in text for i in (1, 15, 29, 99)) and text.index("#99") < text.index("#29 ")
+        assert ci.prompt_facts(f, max_lines=5).count("\n") <= 5
 
 
 class TestAutomatedPrs:

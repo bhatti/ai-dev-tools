@@ -331,9 +331,9 @@ class TestEdgeCases:
 # -- Tests: learnings + dry-run lines ------------------------------------------
 
 class TestRunSummaryLine:
-    def test_empty_when_nothing_to_report(self, tmp_path):
+    def test_learnings_count_is_always_shown_even_when_zero(self, tmp_path):
         from scripts.analyze.post_pr_audit import _run_summary_line
-        assert _run_summary_line(tmp_path) == ""
+        assert _run_summary_line(tmp_path) == "0 review learnings (review_learnings report)"
 
     def test_learnings_counts_and_dry_run_banner(self, tmp_path):
         from scripts.analyze.audit_options import AuditOptions, write
@@ -391,7 +391,7 @@ class TestChangelogInSlack:
 
     def test_digest_has_one_changelog_line(self, tmp_path):
         text = self._post(self._setup(tmp_path))
-        assert "Changelog & blast radius" in text and "field_removed in PR #1" in text
+        assert "Changelog & blast radius" in text and "field was removed" in text and "PR #1" in text
 
     def test_no_changelog_no_line(self, tmp_path):
         assert "Changelog & blast radius" not in self._post(self._setup(tmp_path, with_changelog=False))

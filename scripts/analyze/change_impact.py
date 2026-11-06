@@ -25,6 +25,7 @@ from scripts.common import codeowners as co
 from scripts.common.pr_classify import SENSITIVE_PATHS, blast_level, is_test_file, top_level_module
 from scripts.common.pr_context import fetch_pr_diff
 
+MAX_TEAMS = 3                # a PR touching many areas is owned by its biggest few; the rest would only add noise to every table
 MAX_SYMBOLS = 6
 MAX_GREP_HITS = 40
 CONSUMER_SCAN_SECONDS = 90   # total time budget for the consumer search across all PRs; the rest is reported as not scanned
@@ -52,7 +53,7 @@ def _git_grep(symbol: str, repo_dir: str) -> list[str]:
 
 
 def _teams(paths: list[tuple[str, int]], labels: list[str], rules: list[co.Rule]) -> tuple[list[str], list[str], str]:
-    """(teams, raw owners, source) for the changed paths, biggest ownership first."""
+    """(teams, raw owners, source) for the changed paths: the ``MAX_TEAMS`` owning the most files first."""
     weight: dict[str, int] = {}
     raw: dict[str, int] = {}
     for path, size in paths:
@@ -60,7 +61,7 @@ def _teams(paths: list[tuple[str, int]], labels: list[str], rules: list[co.Rule]
             weight[co.team_name(owner)] = weight.get(co.team_name(owner), 0) + 1
             raw[owner] = raw.get(owner, 0) + size
     if weight:
-        return sorted(weight, key=lambda t: (-weight[t], t)), sorted(raw), "codeowners"
+        return sorted(weight, key=lambda t: (-weight[t], t))[:MAX_TEAMS], sorted(raw), "codeowners"
     for label in labels:
         if m := _TEAM_LABEL.match(label):
             return [m.group(1).strip()], [], "label"
@@ -126,7 +127,7 @@ def build_facts(prs: list[dict], rules: list[co.Rule], config: dict, diff_limit:
         records[pr["number"]] = {
             "number": pr["number"], "title": pr.get("title", ""), "url": pr.get("url", ""), "author": pr.get("author", ""), "state": pr.get("state", ""),
             "merged_at": pr.get("merged_at", ""), "files": len(paths), "loc": loc, "files_truncated": bool(pr.get("files_truncated")),
-            "classes": {c: v[:10] for c, v in classes.items()}, "areas": areas, "teams": teams, "owners": owners, "owner_source": source,
+            "labels": pr.get("labels") or [], "classes": {c: v[:10] for c, v in classes.items()}, "areas": areas, "teams": teams, "owners": owners, "owner_source": source,
             "blast": {"level": level, "external": external, "internal": [], "reasons": reasons}, "signals": declared, "consumers": [], "diff_read": False,
             "_declared": bool(any(s["kind"] == "declared_breaking" for s in declared)), "_paths": set(paths),
         }
@@ -175,7 +176,7 @@ def build_facts(prs: list[dict], rules: list[co.Rule], config: dict, diff_limit:
 
     teams: dict[str, dict] = {}
     for r in records.values():
-        for t in r["teams"]:
+        for t in r["teams"][:1]:   # a PR counts once, for the team owning most of it
             s = teams.setdefault(t, {"prs": 0, "high_blast": 0, "breaking_candidates": 0})
             s["prs"] += 1
             s["high_blast"] += r["blast"]["level"] == "high"
@@ -194,15 +195,13 @@ def _inline(text: str, limit: int = 120) -> str:
     return re.sub(r"\s+", " ", (text or "").replace("`", "'"))[:limit]
 
 
-def prompt_facts(facts: dict, max_lines: int = 120) -> str:
-    """Compact text of the significant PRs (blast above low, signals, or consumers) for the model, capped at ``max_lines``."""
+def prompt_facts(facts: dict, max_lines: int = 600) -> str:
+    """One compact line per PR (risky ones first) for the model, capped at ``max_lines``: the changelog covers every PR."""
     lines = []
     for r in sorted(facts["prs"], key=lambda r: (_BLAST_RANK[r["blast"]["level"]], -len(r["signals"]), -r["number"])):
-        if r["blast"]["level"] == "low" and not any(s["confidence"] != "low" for s in r["signals"]) and not r["consumers"]:
-            continue
-        sig = ", ".join(f"{s['kind']}({s['confidence']}) {_inline(s['file'])}".strip() for s in r["signals"][:4])
+        sig = ", ".join(f"{s['kind']}({s['confidence']})" for s in r["signals"] if s["confidence"] != "low")[:100]
         cons = ", ".join(sorted({c["team"] for c in r["consumers"]}))
-        lines.append(f"#{r['number']} [{r['blast']['level']}{' external' if r['blast']['external'] else ''}] teams={','.join(r['teams']) or '?'} "
-                     f"({r['owner_source']}) | {_inline(r['title'], 90)} | signals: {sig or 'none'}" + (f" | used by: {cons}" if cons else ""))
+        lines.append(f"#{r['number']} [{r['blast']['level']}{' external' if r['blast']['external'] else ''}] {','.join(r['teams'][:2]) or '?'} | "
+                     f"{_inline(r['title'], 100)}" + (f" | signals: {sig}" if sig else "") + (f" | used by: {cons}" if cons else ""))
     teams = "; ".join(f"{t} ({s['prs']} PRs, {s['high_blast']} high blast, {s['breaking_candidates']} breaking candidates)" for t, s in sorted(facts["teams"].items(), key=lambda kv: -kv[1]["prs"])[:15])
     return f"Teams: {teams or 'unknown'}\n" + "\n".join(lines[:max_lines])

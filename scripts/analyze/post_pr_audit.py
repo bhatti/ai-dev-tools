@@ -271,10 +271,8 @@ def _run_summary_line(reports_dir) -> str:
 
     opts = audit_options.load(reports_dir, {})
     entries = load_learnings(reports_dir)["entries"]
-    parts = []
-    if entries:
-        tribal = sum(1 for e in entries if e.get("tribal"))
-        parts.append(f"{len(entries)} review learnings" + (f" ({tribal} tribal)" if tribal else ""))
+    tribal = sum(1 for e in entries if e.get("tribal"))
+    parts = [f"{len(entries)} review learnings" + (f" ({tribal} tribal)" if tribal else "") + " (review_learnings report)"]
     unmatched = audit_options.load_unmatched(reports_dir)
     if opts.reviewers:
         parts.append(f"reviewers: {', '.join(opts.reviewers)}" + (f" (not found: {', '.join(unmatched)})" if unmatched else ""))

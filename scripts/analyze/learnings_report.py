@@ -96,7 +96,8 @@ def render_learnings_md(data: dict, requested: tuple[str, ...], unmatched: list[
         out.append(f":warning: None of the requested reviewers ({', '.join(unmatched)}) matched anyone with PR activity "
                    "(tried name, first/last name, nickname, initials, username and id), so learnings from all reviewers are shown.")
     if not entries:
-        return "\n".join(out + ["", "No learnings extracted from this PR set.", ""])
+        return "\n".join(out + ["", "No learnings were extracted from this PR set: none of the review comments carried a durable rule "
+                                 "(approvals, nits and thread chatter are skipped). Pass `--reviewers a,b` to focus on specific reviewers.", ""])
 
     by_cat: dict[str, list[dict]] = {}
     for e in entries:
