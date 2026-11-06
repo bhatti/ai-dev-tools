@@ -308,3 +308,11 @@ def test_ai_skill_dind_service_shares_the_workspace_with_the_skill_container():
     block = text[text.index("- name: docker-dind"):]
     block = block[:block.index("{{end}}")]
     assert "empty_dir:" in block and "- name: workspace" in block and "mount_path: /workspace" in block
+
+
+def test_ai_skill_dind_uses_the_classic_image_store_so_kind_can_import_multi_arch_images():
+    """docker:dind defaults to the containerd image store, whose `docker save` breaks `ctr images import` ("content digest ... not found")."""
+    text = (EXAMPLES_DIR / "ai-skill.yaml").read_text()
+    block = text[text.index("- name: docker-dind"):]
+    command = next(l for l in block.splitlines() if l.strip().startswith("command:"))
+    assert '"--feature", "containerd-snapshotter=false"' in command

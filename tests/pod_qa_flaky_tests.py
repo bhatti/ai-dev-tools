@@ -6,7 +6,7 @@ real pod (local scripts copied over the image), with no LLM involved:
     PYTHONPATH=. python3 tests/test_pod_functional.py --tests flaky-pipeline,qa-verify-url,qa-regression-url
 
 Names: flaky-pipeline, qa-pr-context-gh, qa-pr-context-bb, qa-verify-url, qa-regression-url, qa-worktree-env,
-       qa-docker-preflight-no-daemon, qa-regression-docker and skill-dind-real (real docker:dind sidecar), qa-skills-load.
+       qa-docker-preflight-no-daemon, qa-regression-docker, skill-dind-real and skill-dind-kind-import (real docker:dind sidecar), qa-skills-load.
 """
 
 from __future__ import annotations
@@ -463,6 +463,28 @@ echo "::add-task-context FOREIGN_CONTAINERS::$(docker ps -a --filter name=qa-for
                 return bad
         return h._pass(result, "real docker:dind sidecar: image started natively with auto-detected port (no forced platform), tests ran, containers removed, delta CLEAN; an image of another architecture is BLOCKED with an explanation")
 
+    def test_skill_dind_kind_import(base_env):
+        """What `bleat hedge install` / `kind load` do: docker save | ctr images import into a kind node, with a multi-arch image."""
+        result = h.TestResult("skill-dind-kind-import")
+        env = dict(base_env, DOCKER_HOST="tcp://localhost:2375")
+        with dind_pod("skill-dind-kind") as pod:
+            step = h.exec_step(pod, "kind-import", r'''
+for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
+echo "::add-task-context STORE::$(docker info --format '{{.Driver}}' 2>&1)"
+docker pull -q kindest/node:v1.31.2 >/dev/null && docker pull -q alpine:3.20 >/dev/null
+docker run -d --privileged --name kn --tmpfs /tmp --tmpfs /run -v /var kindest/node:v1.31.2 >/dev/null
+for i in $(seq 1 30); do docker exec kn ctr version >/dev/null 2>&1 && break; sleep 2; done
+OUT=$(docker save alpine:3.20 | docker exec --privileged -i kn ctr --namespace=k8s.io images import - 2>&1); RC=$?
+echo "::add-task-context IMPORT_RC::$RC"
+echo "::add-task-context IMPORT_OUT::$(echo "$OUT" | tail -1 | cut -c1-120)"
+docker rm -f kn >/dev/null 2>&1
+''', env, timeout=900)
+            result.steps.append(step)
+            bad = markers_ok(result, step, {"STORE": "overlay2", "IMPORT_RC": "0"})
+            if bad:
+                return bad
+        return h._pass(result, "multi-arch image imports into a kind node through the dind sidecar (classic overlay2 image store)")
+
     def test_skill_dind_real(base_env):
         result = h.TestResult("skill-dind-real")
         env = dict(base_env)
@@ -652,6 +674,7 @@ python3 -m scripts.qa.env_manager --help > /dev/null && echo "::add-task-context
         "qa-worktree-env": test_qa_worktree_env,
         "qa-regression-docker": test_qa_regression_docker,
         "skill-dind-real": test_skill_dind_real,
+        "skill-dind-kind-import": test_skill_dind_kind_import,
         "qa-plan-gates": test_qa_plan_gates,
         "qa-skills-load": test_skills_load,
     }
